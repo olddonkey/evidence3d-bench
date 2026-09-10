@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "evidence3d-task-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "title", "split", "status", "prompt", "frame", "inputs", "output_contract", "budget", "rights"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,79}$" },
+    "title": { "type": "string", "minLength": 1 },
+    "split": { "enum": ["calibration", "development", "test"] },
+    "status": { "enum": ["calibration_only", "annotation_pending", "admitted"] },
+    "prompt": { "type": "string", "minLength": 20 },
+    "frame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["unit", "up", "alignment", "description"],
+      "properties": {
+        "unit": { "const": "metre" }, "up": { "const": "Y" },
+        "alignment": { "const": "fixed_no_fitting" },
+        "description": { "type": "string", "minLength": 1 }
+      }
+    },
+    "inputs": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "path", "sha256", "bytes", "role", "source", "captured_at", "rights"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "path": { "type": "string", "pattern": "^inputs/[^\\\\]+$" },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "bytes": { "type": "integer", "minimum": 1 },
+          "role": { "enum": ["photo", "plan", "dimension_sheet", "aerial_proxy", "historical_photo", "synthetic_reference"] },
+          "source": { "type": "string" },
+          "captured_at": { "type": ["string", "null"] },
+          "rights": { "enum": ["local_review_only", "generated_calibration"] }
+        }
+      }
+    },
+    "output_contract": {
+      "type": "object", "additionalProperties": false,
+      "required": ["format", "geometry", "scope", "prohibited"],
+      "properties": {
+        "format": { "const": "GLB 2.0" },
+        "geometry": { "const": "static_uncompressed_triangles" },
+        "scope": { "type": "string", "minLength": 1 },
+        "prohibited": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "budget": {
+      "type": "object", "additionalProperties": false,
+      "required": ["wall_seconds", "max_artifact_bytes", "max_triangles"],
+      "properties": {
+        "wall_seconds": { "type": "integer", "minimum": 1 },
+        "max_artifact_bytes": { "type": "integer", "minimum": 1024, "maximum": 536870912 },
+        "max_triangles": { "type": "integer", "minimum": 1, "maximum": 3000000 }
+      }
+    },
+    "rights": { "enum": ["local_review_only", "generated_calibration"] }
+  }
+}

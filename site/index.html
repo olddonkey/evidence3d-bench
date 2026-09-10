@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Evidence3D Bench · 评测工作台</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="importmap">{"imports":{"three":"/vendor/three.module.js","three/addons/":"/vendor/addons/"}}</script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Evidence3D Bench 首页">
+      <svg viewBox="0 0 32 36" aria-hidden="true"><path d="M16 2 30 10v16l-14 8L2 26V10Z M2 10l14 8 14-8 M16 18v16" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+      <span>Evidence<span class="mint">3D</span><small>BENCHMARK LAB</small></span>
+    </a>
+    <nav aria-label="工作台">
+      <button data-tab="calibration" class="tab active" aria-current="page">评分器校准</button>
+      <button data-tab="tasks" class="tab">真实资料集</button>
+      <button data-tab="review" class="tab">匿名盲评</button>
+    </nav>
+    <div class="local"><span class="dot"></span>LOCAL ONLY <span class="version">v0.1</span></div>
+  </header>
+  <main id="main">
+    <section class="hero">
+      <div><div class="eyebrow">EVIDENCE → GEOMETRY → VERIFICATION</div>
+      <h1>让每一个分数，都有依据。</h1>
+      <p>先验证评分器能否发现已知错误，再比较真实的建模能力。</p></div>
+      <div class="hero-note"><span class="mint">●</span> 几何测量与人类偏好分别记录<br><span>模型裁判不参与正式得分</span></div>
+    </section>
+    <div id="error" class="error" role="alert" hidden></div>
+    <div id="loading" class="loading">正在加载本地评测记录…</div>
+    <section id="calibration" class="page" hidden>
+      <div id="stats" class="stats"></div>
+      <div class="section-top"><div><h2>已知缺陷，逐项验证</h2><p>以下是合成校准样例；没有运行 AI 模型，也没有生成综合排名。</p></div>
+        <label class="select-label">校准对象<select id="task-filter"></select></label>
+      </div>
+      <div class="results-grid">
+        <section class="panel results-panel">
+          <div class="panel-label">测量记录 <span>FIXED FRAME / NO AUTO FIT</span></div>
+          <div class="table-scroll"><table><thead><tr><th>样例条件</th><th>交付</th><th>最大尺寸误差</th><th>最低轮廓 IoU</th><th>几何检查</th></tr></thead><tbody id="result-rows"></tbody></table></div>
+        </section>
+        <aside class="panel inspection">
+          <div class="panel-label">视角对照 <span id="selected-type"></span></div>
+          <h3 id="selected-label"></h3><p id="selected-description"></p>
+          <div class="legend"><span><i class="overlap"></i>重合</span><span><i class="extra"></i>多出</span><span><i class="missing"></i>缺失</span></div>
+          <div id="overlays" class="overlay-grid"></div>
+          <div id="dimension-readout" class="dimension-readout"></div>
+        </aside>
+      </div>
+      <section class="panel checks-panel"><div class="panel-label">评分器校准检查 <span id="check-total"></span></div><div id="checks" class="check-grid"></div></section>
+      <div class="boundary"><span>测量边界</span><p>轮廓和尺寸不能证明隐藏表面、内部结构或完整拓扑正确；重叠的重复表面也可能不改变这些指标。当前结果仅验证这里列出的能力。</p></div>
+    </section>
+    <section id="tasks" class="page" hidden>
+      <div class="section-top"><div><div class="eyebrow">DEVELOPMENT CORPUS</div><h2>真实资料，独立核验后计分</h2><p>原始图片已锁定哈希；旧模型、测量结论和建模代码均不在输入包内。</p></div><span class="badge pending">标准答案待独立审核</span></div>
+      <div id="task-cards" class="task-cards"></div>
+      <section id="source-detail" class="panel source-detail" hidden></section>
+      <div class="boundary"><span>资料使用范围</span><p>这些资料目前仅供本地开发与审核。拍摄日期、坐标基准、可观测区域和分发权限均需逐项核验；已有生成模型不会自动成为标准答案。</p></div>
+    </section>
+    <section id="review" class="page" hidden>
+      <div class="section-top"><div><div class="eyebrow">BLIND PAIRWISE REVIEW</div><h2>先看证据，再做选择</h2><p>匿名比较实际 3D 几何。三个视窗使用同一尺度，相机可联动旋转。</p></div><span id="review-mode-pill" class="badge pending">尚未开始</span></div>
+      <div id="review-start" class="panel review-start">
+        <div><h3>开始一轮独立评审</h3><p>使用同一昵称可以续评；不同评审者请使用不同昵称。当前材料为合成校准样例。</p>
+          <p class="muted">如果已经查看过缺陷答案，请使用练习模式。</p></div>
+        <form id="review-form">
+          <label>评审昵称<input id="reviewer" name="reviewer" minlength="2" maxlength="64" required placeholder="例如：reviewer-01" autocomplete="off"></label>
+          <label>评审模式<select id="review-mode"><option value="practice">练习 · 不计入人工统计</option><option value="human">独立人工评审</option></select></label>
+          <button class="primary" type="submit">开始 / 继续评审 <span>→</span></button>
+        </form>
+      </div>
+      <section id="ballot" hidden>
+        <div class="ballot-top"><h3 id="ballot-title"></h3><span id="ballot-progress"></span></div>
+        <p id="ballot-question"></p>
+        <div class="view-toolbar"><span><i class="dot"></i>统一灰模 · 相同光照 · 相同坐标</span><button id="reset-views" class="secondary">重置视角</button></div>
+        <div class="viewer-grid">
+          <div class="viewer-card"><div class="viewer-label">参考对象 <span>REFERENCE</span></div><div class="viewer" id="view-reference"></div></div>
+          <div class="viewer-card"><div class="viewer-label">模型 A <span>ANONYMOUS</span></div><div class="viewer" id="view-a"></div></div>
+          <div class="viewer-card"><div class="viewer-label">模型 B <span>ANONYMOUS</span></div><div class="viewer" id="view-b"></div></div>
+        </div>
+        <div id="viewer-status" class="muted" role="status">加载几何中…</div>
+        <div class="panel vote-panel">
+          <div><h3>哪个更忠实于参考？</h3><p>请检查多个角度。资料不足时可以保留判断。</p></div>
+          <div id="vote-choices" class="vote-choices">
+            <button data-choice="a" aria-pressed="false" disabled>A 更接近</button><button data-choice="b" aria-pressed="false" disabled>B 更接近</button>
+            <button data-choice="tie" aria-pressed="false" disabled>差不多</button><button data-choice="both_bad" aria-pressed="false" disabled>两个都不好</button>
+            <button data-choice="insufficient_evidence" aria-pressed="false" disabled>资料不足</button>
+          </div>
+          <label class="note-label">观察记录 <span>可选</span><textarea id="vote-notes" maxlength="1600" placeholder="例如：右侧塔楼缺失；屋顶轮廓不符。"></textarea></label>
+          <div class="vote-bottom"><span id="vote-help">请先选择一个判断。</span><button id="submit-vote" class="primary" disabled>保存并继续 →</button></div>
+        </div>
+      </section>
+      <div id="review-complete" class="panel complete" hidden><div class="complete-icon">✓</div><h3>这一轮评审已保存</h3><p>投票保存在本地。练习与正式人工记录分别统计，重复对照仅用于检查顺序影响。</p><button id="another-reviewer" class="secondary">更换评审者</button></div>
+      <div id="human-summary" class="panel human-summary"></div>
+    </section>
+    <footer><span>Evidence3D Bench</span><span>独立证据 / 固定协议 / 可复算结果</span><span>本地开发版 · 未上传</span></footer>
+  </main>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

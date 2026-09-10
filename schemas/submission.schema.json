@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "evidence3d-submission-v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "id", "task_id", "task_sha256", "artifact", "system", "run"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,119}$" },
+    "task_id": { "type": "string" },
+    "task_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": { "path": { "type": "string", "pattern": "\\.glb$" }, "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" } }
+    },
+    "system": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "model_version", "harness_version"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "model_version": { "type": "string", "minLength": 1 },
+        "harness_version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "run": {
+      "type": "object", "additionalProperties": false,
+      "required": ["seed", "wall_seconds", "cost_usd", "human_intervention", "resource_accounting"],
+      "properties": {
+        "seed": { "type": ["integer", "null"] },
+        "wall_seconds": { "type": "number", "minimum": 0 },
+        "cost_usd": { "type": ["number", "null"], "minimum": 0 },
+        "human_intervention": { "type": "boolean" },
+        "resource_accounting": { "enum": ["self_reported", "runner_measured", "fixture"] }
+      }
+    }
+  }
+}

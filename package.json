@@ -1,0 +1,20 @@
+{
+  "name": "evidence3d-bench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "demo": "node cli.mjs demo",
+    "prepare:local": "node cli.mjs prepare",
+    "test": "node --test test/*.test.mjs",
+    "start": "node cli.mjs serve",
+    "check": "node cli.mjs verify"
+  },
+  "dependencies": {
+    "ajv": "8.20.0",
+    "three": "0.180.0"
+  }
+}

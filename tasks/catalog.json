@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "source_pack_root": "forge-artifacts/reference",
+  "cases": [
+    {
+      "id": "westminster", "title": "Westminster Abbey",
+      "root": "westminster-abbey-london-2026-07-30",
+      "scope": "Abbey exterior; exclude St Margaret's, neighbouring streets and ground planes.",
+      "frame_review": "Exact origin, plan alignment, target epoch and per-component measurement anchors need independent review.",
+      "annotation_questions": ["Official dimensions and measured-plan consistency", "Double towers and transept positions", "Lady Chapel and Chapter House scope", "Occlusion-aware facade masks"],
+      "files": [
+        ["detail-references/westminster-abbey-official/plan-westminster-abbey.jpg", "plan"],
+        ["detail-references/technical-drawings/abbey-dimensions-page-1.png", "dimension_sheet"],
+        ["detail-references/technical-drawings/abbey-dimensions-page-2.png", "dimension_sheet"],
+        ["detail-references/wikimedia-commons/westminster-abbey-west-facade.jpg", "photo"],
+        ["detail-references/westminster-abbey-official/north-front-westminster-abbey.jpg", "photo"],
+        ["detail-references/westminster-abbey-official/lady-chapel-exterior.jpg", "photo"],
+        ["detail-references/westminster-abbey-official/abbey-south-side-winter-96dpi.jpg", "photo"]
+      ]
+    },
+    {
+      "id": "fenchurch", "title": "20 Fenchurch Street",
+      "root": "fenchurch-building-2026-07-29",
+      "scope": "Main tower exterior and entrance canopy; exclude adjacent buildings and street scenery.",
+      "frame_review": "Metric origin, elevation datum, current-state date and section interpretation need independent review.",
+      "annotation_questions": ["Height and section profile", "Roof and crown curvature", "Main facade and side-profile relation", "Entrance canopy scope"],
+      "files": [
+        ["detail-references/technical-structure/steel-focus-north-and-west-sections.png", "plan"],
+        ["detail-references/facade-contractor/permasteelisa-glazed-face-and-side-profile.jpg", "photo"],
+        ["detail-references/facade-contractor/permasteelisa-sky-garden-roof-curvature.jpg", "photo"],
+        ["detail-references/architect-official/gallery/vinoly-aerial-massing-context.jpg", "photo"],
+        ["detail-references/technical-structure/steel-focus-frame-and-sky-garden-schematics.png", "plan"],
+        ["detail-references/entrance-canopy/knippershelbig-north-entrance-canopy.jpg", "photo"]
+      ]
+    },
+    {
+      "id": "kingsfold", "title": "3 Kingsfold Close",
+      "root": "3-kingsfold-close-billingshurst-2026-07-30",
+      "scope": "Exact house exterior; exclude adjacent houses, garden and street scenery. Do not claim unseen rear details as observed.",
+      "frame_review": "Use 2010 views as dated facade evidence, not proof of current state. Absolute scale, target date and coordinate anchors need review.",
+      "annotation_questions": ["Facade identity and date", "Roof footprint and setbacks", "What rear details are actually observable", "Independent absolute scale"],
+      "files": [
+        ["exact-property/front-2010-house-crop.jpg", "historical_photo"],
+        ["exact-property/roof-and-plot-aerial-crop.jpg", "aerial_proxy"],
+        ["streetview/front-2010-close-center.jpg", "historical_photo"],
+        ["streetview/front-2010-close-left.jpg", "historical_photo"],
+        ["streetview/front-2010-close-right.jpg", "historical_photo"],
+        ["photoreal-3d/top-down/roof-top-r80.jpg", "aerial_proxy"]
+      ]
+    },
+    {
+      "id": "in-n-out", "title": "In-N-Out #129",
+      "root": "in-n-out-129-rengstorff-mountain-view-2026-08-06",
+      "scope": "Restaurant exterior and attached architectural elements; exclude cars, vegetation and unrelated signs.",
+      "frame_review": "Use September 2025 front photo as dated evidence; historical sides are not automatically current. Origin, scale and target date need independent review.",
+      "annotation_questions": ["Current versus historical facade", "Independent metric scale", "Roof and parapet outline", "Unknown north-side geometry"],
+      "files": [
+        ["current-photos/google-maps-front-2025-09.jpg", "photo"],
+        ["aerial-and-maps/esri-imagery-roof.jpg", "aerial_proxy"],
+        ["historical/flickr-2013-front-left.jpg", "historical_photo"],
+        ["historical/flickr-2013-front-right.jpg", "historical_photo"]
+      ]
+    }
+  ]
+}
