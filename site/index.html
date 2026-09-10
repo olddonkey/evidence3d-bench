@@ -16,10 +16,12 @@
     </a>
     <nav aria-label="工作台">
       <button data-tab="calibration" class="tab active" aria-current="page">评分器校准</button>
+      <button data-tab="details" class="tab">细节校准</button>
       <button data-tab="tasks" class="tab">真实资料集</button>
       <button data-tab="review" class="tab">匿名盲评</button>
+      <button data-tab="detail-review" class="tab">逐项评分</button>
     </nav>
-    <div class="local"><span class="dot"></span>LOCAL ONLY <span class="version">v0.1</span></div>
+    <div class="local"><span class="dot"></span>LOCAL ONLY <span class="version">v0.2</span></div>
   </header>
   <main id="main">
     <section class="hero">
@@ -51,6 +53,34 @@
       <section class="panel checks-panel"><div class="panel-label">评分器校准检查 <span id="check-total"></span></div><div id="checks" class="check-grid"></div></section>
       <div class="boundary"><span>测量边界</span><p>轮廓和尺寸不能证明隐藏表面、内部结构或完整拓扑正确；重叠的重复表面也可能不改变这些指标。当前结果仅验证这里列出的能力。</p></div>
     </section>
+    <section id="details" class="page" hidden>
+      <div class="section-top"><div><div class="eyebrow">LOCAL GEOMETRY / DETAIL CARDS</div><h2>主体一样，细节可以完全不同</h2><p>固定局部相机检查深度与法线；自动检测结果和人工细节分分别记录。</p></div><span id="detail-calibration-status" class="badge pending">加载中</span></div>
+      <div id="detail-statistics" class="stats"></div>
+      <div id="detail-unavailable" class="boundary" hidden><p>细节校准样例尚未生成。运行 npm run demo:details 后刷新页面。</p></div>
+      <div class="panel detail-workspace" id="detail-workspace" hidden>
+        <div class="detail-selectors">
+          <label>对照条件<select id="detail-variant"></select></label>
+          <label>细节卡片<select id="detail-card"></select></label>
+          <label>显示方式<select id="detail-style"><option value="gray">灰模与阴影</option><option value="material">基础材质色块</option><option value="normal">几何法线</option><option value="depth">固定范围深度</option></select></label>
+        </div>
+        <div class="detail-card-top"><h3 id="detail-card-title"></h3><span id="detail-card-status"></span></div>
+        <ul id="detail-requirements" class="requirements"></ul>
+        <div class="view-toolbar"><div id="detail-view-buttons" class="view-presets"></div><span class="muted">参考确定取景区域 · 不按候选自动取景</span></div>
+        <div class="viewer-grid two">
+          <div class="viewer-card"><div class="viewer-label">参考对象 <span>LOCKED REFERENCE</span></div><div class="viewer" id="detail-reference"></div></div>
+          <div class="viewer-card"><div class="viewer-label">当前对照 <span id="detail-candidate-label"></span></div><div class="viewer" id="detail-candidate"></div></div>
+        </div>
+        <p id="detail-viewer-status" class="muted" role="status"></p>
+        <div id="detail-measurements">
+          <div id="detail-metric-readout" class="local-metrics"></div>
+          <div id="detail-image-grid" class="detail-image-grid"></div>
+          <p class="small-note">深度差图：深色表示接近，橙色表示差异，紫色表示可见覆盖不同。自动通过不等于人工满分。</p>
+        </div>
+        <details class="anchor-reference"><summary>查看此卡片的人工评分锚点</summary><ol id="detail-anchors" start="0"></ol></details>
+      </div>
+      <section class="panel checks-panel"><div class="panel-label">局部缺陷校准 <span id="detail-check-total"></span></div><div id="detail-checks" class="check-grid"></div></section>
+      <div class="boundary"><span>细节总分</span><p>0–4 分需按卡片独立填写。每个类别先汇总，再按预先固定的类别权重合成；未完成、资料争议或明显分歧时不补权重、不输出总分。</p></div>
+    </section>
     <section id="tasks" class="page" hidden>
       <div class="section-top"><div><div class="eyebrow">DEVELOPMENT CORPUS</div><h2>真实资料，独立核验后计分</h2><p>原始图片已锁定哈希；旧模型、测量结论和建模代码均不在输入包内。</p></div><span class="badge pending">标准答案待独立审核</span></div>
       <div id="task-cards" class="task-cards"></div>
@@ -65,13 +95,14 @@
         <form id="review-form">
           <label>评审昵称<input id="reviewer" name="reviewer" minlength="2" maxlength="64" required placeholder="例如：reviewer-01" autocomplete="off"></label>
           <label>评审模式<select id="review-mode"><option value="practice">练习 · 不计入人工统计</option><option value="human">独立人工评审</option></select></label>
+          <label>评审目标<select id="review-criterion"><option value="geometry_fidelity">几何忠实度 · 灰模</option><option value="appearance_fidelity">整体视觉忠实度 · 色块材质</option><option value="aesthetic_preference">整体审美偏好 · 单独记录</option></select></label>
           <button class="primary" type="submit">开始 / 继续评审 <span>→</span></button>
         </form>
       </div>
       <section id="ballot" hidden>
         <div class="ballot-top"><h3 id="ballot-title"></h3><span id="ballot-progress"></span></div>
         <p id="ballot-question"></p>
-        <div class="view-toolbar"><span><i class="dot"></i>统一灰模 · 相同光照 · 相同坐标</span><button id="reset-views" class="secondary">重置视角</button></div>
+        <div class="view-toolbar"><span><i class="dot"></i><span id="review-render-policy">统一灰模 · 相同光照 · 相同坐标</span></span><button id="reset-views" class="secondary">重置视角</button></div>
         <div class="viewer-grid">
           <div class="viewer-card"><div class="viewer-label">参考对象 <span>REFERENCE</span></div><div class="viewer" id="view-reference"></div></div>
           <div class="viewer-card"><div class="viewer-label">模型 A <span>ANONYMOUS</span></div><div class="viewer" id="view-a"></div></div>
@@ -79,7 +110,7 @@
         </div>
         <div id="viewer-status" class="muted" role="status">加载几何中…</div>
         <div class="panel vote-panel">
-          <div><h3>哪个更忠实于参考？</h3><p>请检查多个角度。资料不足时可以保留判断。</p></div>
+          <div><h3 id="overall-vote-question">哪个更忠实于参考？</h3><p>请检查多个角度。资料不足时可以保留判断。</p></div>
           <div id="vote-choices" class="vote-choices">
             <button data-choice="a" aria-pressed="false" disabled>A 更接近</button><button data-choice="b" aria-pressed="false" disabled>B 更接近</button>
             <button data-choice="tie" aria-pressed="false" disabled>差不多</button><button data-choice="both_bad" aria-pressed="false" disabled>两个都不好</button>
@@ -92,8 +123,39 @@
       <div id="review-complete" class="panel complete" hidden><div class="complete-icon">✓</div><h3>这一轮评审已保存</h3><p>投票保存在本地。练习与正式人工记录分别统计，重复对照仅用于检查顺序影响。</p><button id="another-reviewer" class="secondary">更换评审者</button></div>
       <div id="human-summary" class="panel human-summary"></div>
     </section>
+    <section id="detail-review" class="page" hidden>
+      <div class="section-top"><div><div class="eyebrow">EVIDENCE-ANCHORED DETAIL RATING</div><h2>把细节判断，落到每张卡片上</h2><p>候选身份和自动检测结果隐藏。依据参考、局部视角和评分锚点逐项判断。</p></div><span id="detail-review-mode-pill" class="badge pending">尚未开始</span></div>
+      <div id="detail-review-start" class="panel review-start">
+        <div><h3>一轮评审，一个匿名候选</h3><p>十张可评分卡片。窗户、入口、构造与装饰按类别分别汇总；后立面装饰因缺少要求已预先排除。</p><p class="muted">看过条件标签或进行界面测试时，请选练习模式。</p></div>
+        <form id="detail-review-form">
+          <label>细节评审昵称<input id="detail-reviewer" minlength="2" maxlength="64" required placeholder="例如：detail-reviewer-01" autocomplete="off"></label>
+          <label>细节评审模式<select id="detail-review-mode"><option value="practice">练习 · 不计入人工结果</option><option value="human">独立人工评审</option></select></label>
+          <button type="submit" class="primary">开始 / 继续逐项评审 →</button>
+        </form>
+      </div>
+      <section id="detail-rating-item" hidden>
+        <div class="ballot-top"><h3 id="rating-title"></h3><span id="rating-progress"></span></div>
+        <p id="rating-question"></p><ul id="rating-requirements" class="requirements"></ul>
+        <div class="view-toolbar"><div id="rating-views" class="view-presets"></div><label>评分观察方式<select id="rating-style"><option value="gray">灰模与阴影</option><option value="material">基础材质色块</option><option value="normal">几何法线</option><option value="depth">固定范围深度</option></select></label></div>
+        <div class="viewer-grid two">
+          <div class="viewer-card"><div class="viewer-label">参考对象 <span>REFERENCE</span></div><div class="viewer" id="rating-reference"></div></div>
+          <div class="viewer-card"><div class="viewer-label">匿名候选 <span>ANONYMOUS</span></div><div class="viewer" id="rating-candidate"></div></div>
+        </div>
+        <p id="rating-load-status" role="status" class="small-note"></p>
+        <div id="rating-evidence" class="evidence-links"></div>
+        <div class="panel vote-panel">
+          <h3>按照这张卡片的锚点评分</h3><div id="rating-options" class="rating-options"></div>
+          <button id="rating-unknown" class="secondary" disabled aria-pressed="false">资料不足，申请核验</button>
+          <label class="note-label">细节观察记录<textarea id="rating-notes" maxlength="1600" placeholder="指出缺失、错位、压平或无法判断的具体部分。资料不足时须说明原因。"></textarea></label>
+          <div class="vote-bottom"><span id="rating-save-hint">请先检查参考和局部视角，再选择分数。</span><button id="save-rating" class="primary" disabled>保存细节评分并继续 →</button></div>
+        </div>
+      </section>
+      <div id="detail-rating-complete" class="panel complete" hidden><div class="complete-icon">✓</div><h3>本轮逐项评审已保存</h3><p id="individual-detail-feedback"></p><p>独立汇总需要足够评审者；明显分歧或资料争议会保留为待核验。</p><button id="detail-next-round" class="primary">同一评审者继续下一候选 →</button> <button id="detail-new-reviewer" class="secondary">更换细节评审者</button></div>
+      <div id="detail-human-summary" class="panel human-summary"></div>
+    </section>
     <footer><span>Evidence3D Bench</span><span>独立证据 / 固定协议 / 可复算结果</span><span>本地开发版 · 未上传</span></footer>
   </main>
   <script type="module" src="/app.js"></script>
+  <script type="module" src="/detail-app.js"></script>
 </body>
 </html>

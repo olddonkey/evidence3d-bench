@@ -2,6 +2,8 @@
 
 协议标识：evidence3d-geometry-v0.1.0。该版本输出可复算的原始指标，不输出综合质量分或全系统排名。
 
+应用 v0.2 在此基础上增加细节协议 evidence3d-detail-geometry-v0.1.0，见 [DETAILS.md](DETAILS.md)。局部自动指标、人工细节分与整体视觉偏好分开记录，本文的全局几何定义保持不变。
+
 ## 评分与数据的信任边界
 
 任务、输入文件、提交 GLB 和参考网格分别锁定 SHA-256。任务 revision 使用按键排序的 canonical JSON 哈希，避免 JSON 缩进影响身份。报告记录任务、提交、产物及真值的哈希，并记录评分源码与 schema 的联合指纹，以及 Node / Three.js 版本。

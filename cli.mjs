@@ -3,6 +3,10 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFile, readdir } from 'node:fs/promises';
 import { buildCalibration } from './lib/fixtures.mjs';
+import { buildDetailCalibration } from './lib/detail-fixtures.mjs';
+import { prepareDetailDrafts } from './lib/detail-drafts.mjs';
+import { detailSummary } from './lib/detail-reviews.mjs';
+import { registerDetailSubmission } from './lib/detail-registration.mjs';
 import { prepareRealTasks, exportTask } from './lib/prepare.mjs';
 import { evaluate } from './lib/evaluate.mjs';
 import { startServer } from './lib/server.mjs';
@@ -26,9 +30,17 @@ try {
     console.log('Calibration: '+calibration.checks.filter(c=>c.passed).length+'/'+calibration.checks.length+
       ' checks; '+calibration.submission_count+' submissions; '+(calibration.passed?'PASS':'FAIL'));
     if(!calibration.passed) process.exitCode=1;
+    const details=await buildDetailCalibration(dataRoot);
+    console.log('Detail calibration: '+details.checks.filter(c=>c.passed).length+'/'+details.checks.length+' checks; '+details.submissions+' submissions; '+(details.passed?'PASS':'FAIL'));
+    if(!details.passed)process.exitCode=1;
+  } else if(command==='demo-details') {
+    const result=await buildDetailCalibration(dataRoot);
+    console.log(JSON.stringify(result,null,2));
+    if(!result.passed)process.exitCode=1;
   } else if(command==='prepare') {
     const cases=await prepareRealTasks(dataRoot,sourceRoot,join(root,'tasks','catalog.json'));
-    console.log(JSON.stringify({prepared:cases,ground_truth:'pending_independent_review'},null,2));
+    const drafts=await prepareDetailDrafts(dataRoot,join(root,'tasks','detail-drafts.json'));
+    console.log(JSON.stringify({prepared:cases,detail_drafts:drafts,ground_truth:'pending_independent_review'},null,2));
   } else if(command==='pack') {
     console.log(JSON.stringify(await exportTask(await required('task'),await required('out')),null,2));
   } else if(command==='submit') {
@@ -59,13 +71,18 @@ try {
     console.log('Verified '+inputs+' locked input files across '+tasks+' tasks');
   } else if(command==='review-summary') {
     console.log(JSON.stringify(summarizeVotes(await readVotes(dataRoot)),null,2));
+  } else if(command==='detail-summary') {
+    console.log(JSON.stringify(await detailSummary(dataRoot),null,2));
+  } else if(command==='register-detail') {
+    console.log(JSON.stringify(await registerDetailSubmission(dataRoot,await required('submission'),options.label),null,2));
   } else if(command==='serve') {
     const {server,url}=await startServer({dataRoot,port:Number(options.port||5198)});
     console.log('Evidence3D Bench: '+url+'\nLocal-only. Press Ctrl-C to stop.');
     for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>server.close(()=>process.exit(0)));
   } else {
-    console.log('Evidence3D Bench v0.1\n\n'+
+    console.log('Evidence3D Bench v0.2\n\n'+
       '  npm run demo                         Build fixtures and check the evaluator\n'+
+      '  npm run demo:details                 Rebuild local detail calibration\n'+
       '  npm run prepare:local                Copy hash-locked local reference packs\n'+
       '  npm start                            Open the local review application\n'+
       '  npm test                             Run contract, geometry and review tests\n'+
@@ -74,6 +91,8 @@ try {
       '  node cli.mjs evaluate --task FILE --submission FILE --truth FILE --out DIR\n'+
       '  node cli.mjs verify\n'+
       '  node cli.mjs review-summary\n\n'+
+      '  node cli.mjs detail-summary\n'+
+      '  node cli.mjs register-detail --submission FILE --label NAME\n\n'+
       'All commands accept --data DIR. prepare accepts --source /path/to/img2threejs.\n'+
       'No model API calls, remote repository, uploads, or synthetic human votes are created.');
   }

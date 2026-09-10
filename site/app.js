@@ -80,6 +80,29 @@ function drawTasks(){
         figure.append(link,caption);grid.append(figure);
       }
       detail.append(grid);
+      if(task.detail_draft) {
+        detail.append(el('h3','draft-heading','细节卡片草案 · '+task.detail_draft.cards.length+' 项'),el('p','',task.detail_draft.source_limit));
+        const drafts=el('div','draft-grid');
+        for(const card of task.detail_draft.cards) {
+          const row=el('article','draft-card'),region=card.source_regions[0],source=task.inputs.find(i=>i.id===region.source_id);
+          const crop=el('div','draft-crop'),img=el('img');img.src=source.url;img.alt=card.title+'参考区域草案';
+          img.addEventListener('load',()=>{
+            const [l,t,r,b]=region.rect,dx=r-l,dy=b-t;
+            const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg'),image=document.createElementNS(ns,'image');
+            const x=l*img.naturalWidth,y=t*img.naturalHeight,w=dx*img.naturalWidth,h=dy*img.naturalHeight;
+            svg.setAttribute('viewBox',[x,y,w,h].join(' '));svg.setAttribute('preserveAspectRatio','xMidYMid meet');
+            svg.setAttribute('role','img');svg.setAttribute('aria-label',img.alt);
+            const defs=document.createElementNS(ns,'defs'),clip=document.createElementNS(ns,'clipPath'),rect=document.createElementNS(ns,'rect');
+            const clipId='crop-'+task.id+'-'+card.id;clip.id=clipId;clip.setAttribute('clipPathUnits','userSpaceOnUse');
+            for(const [key,value] of Object.entries({x,y,width:w,height:h}))rect.setAttribute(key,String(value));
+            clip.append(rect);defs.append(clip);
+            image.setAttribute('href',source.url);image.setAttribute('width',String(img.naturalWidth));image.setAttribute('height',String(img.naturalHeight));
+            image.setAttribute('clip-path','url(#'+clipId+')');svg.append(defs,image);crop.replaceChildren(svg);
+          });
+          crop.append(img);row.append(crop,el('h4','',card.title),el('p','',card.proposed_check),badge('待独立核验','pending'));drafts.append(row);
+        }
+        detail.append(drafts);
+      }
     });return card;
   }));
 }
@@ -99,10 +122,16 @@ async function showBallot(next){
   if(next.complete){drawHuman(await api('/api/human-summary'));return;}
   $('ballot-title').textContent=next.title;$('ballot-progress').textContent=(next.progress.done+1)+' / '+next.progress.total;
   $('ballot-question').textContent=next.question;$('vote-notes').value='';$('submit-vote').disabled=true;
+  $('overall-vote-question').textContent=next.criterion==='aesthetic_preference'?'你更喜欢哪个整体视觉效果？':'哪个更忠实于参考？';
+  for(const button of document.querySelectorAll('[data-choice]'))if(['a','b'].includes(button.dataset.choice)) {
+    button.textContent=button.dataset.choice.toUpperCase()+(next.criterion==='aesthetic_preference'?' 更喜欢':' 更接近');
+  }
   $('vote-help').textContent='请先选择一个判断。';$('viewer-status').textContent='正在加载三个模型…';
   for(const button of document.querySelectorAll('[data-choice]')){button.disabled=true;button.setAttribute('aria-pressed','false');}
   try{
-    viewers=await createViewers([{element:'view-reference',url:next.reference,label:'参考对象'},{element:'view-a',url:next.a,label:'模型 A'},{element:'view-b',url:next.b,label:'模型 B'}],next.frame);
+    viewers=await createViewers([{element:'view-reference',url:next.reference,label:'参考对象'},{element:'view-a',url:next.a,label:'模型 A'},{element:'view-b',url:next.b,label:'模型 B'}],next.frame,
+      {style:next.criterion&&next.criterion!=='geometry_fidelity'?'material':'gray'});
+    $('review-render-policy').textContent=next.criterion&&next.criterion!=='geometry_fidelity'?'相同灯光 · 基础材质色块 · 不含贴图':'统一灰模 · 相同光照 · 相同坐标';
     $('viewer-status').textContent='三个模型均已加载。拖动任一视窗可同步观察，请检查正面、背面和屋顶。';
     for(const button of document.querySelectorAll('[data-choice]'))button.disabled=false;
   }catch(error){$('viewer-status').textContent='模型未完整加载，投票保持禁用。';showError(error);}
@@ -112,7 +141,7 @@ $('task-filter').addEventListener('change',()=>{selectedTask=$('task-filter').va
 $('review-form').addEventListener('submit',async event=>{
   event.preventDefault();$('error').hidden=true;
   const button=event.currentTarget.querySelector('button');button.disabled=true;
-  try{const next=await api('/api/reviews/start',{reviewer:$('reviewer').value,mode:$('review-mode').value});await showBallot(next);}catch(error){showError(error);}finally{button.disabled=false;}
+  try{const next=await api('/api/reviews/start',{reviewer:$('reviewer').value,mode:$('review-mode').value,criterion:$('review-criterion').value});await showBallot(next);}catch(error){showError(error);}finally{button.disabled=false;}
 });
 for(const button of document.querySelectorAll('[data-choice]'))button.addEventListener('click',()=>{
   choice=button.dataset.choice;
@@ -134,5 +163,5 @@ try{
   const cases=data.tasks.filter(t=>t.split==='calibration');
   $('task-filter').replaceChildren(...cases.map(task=>{const option=el('option','',task.title);option.value=task.id;return option;}));
   if(cases.length){selectedTask=cases[0].id;selectRow(data.reports.find(r=>r.task_id===selectedTask));}
-  $('loading').hidden=true;setTab(['calibration','tasks','review'].includes(location.hash.slice(1))?location.hash.slice(1):'calibration');
+  $('loading').hidden=true;setTab(['calibration','details','tasks','review','detail-review'].includes(location.hash.slice(1))?location.hash.slice(1):'calibration');
 }catch(error){$('loading').hidden=true;showError(error);}
