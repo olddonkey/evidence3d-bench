@@ -1,10 +1,10 @@
 # 从校准原型进入真实试验
 
-v0.2 已完成全局和局部几何校准、细节卡片、固定局部视角、逐项人工评分及新提交登记。后续先完成以下工作，再发布真实对象成绩。
+v0.3 已完成全局和局部几何校准、四组细节示例、固定局部视角、逐项人工评分及按任务登记新提交。后续先完成以下工作，再发布真实对象成绩。
 
 ## 首批真实标注
 
-本地 .local/annotations/ 已为 Westminster、Fenchurch、Kingsfold 和 In-N-Out 创建标注工作表。
+本地 .local/annotations/ 已为 Westminster、Fenchurch、Kingsfold、In-N-Out、Gasholders、Stanford Dish 和 Green Library 创建标注工作表。
 
 每题还附有十张带原始照片区域的细节草案，文件为 details-TASK.json。它们没有独立审批、世界相机或容差，不可直接作为评分真值。需在这些草案上完成确认、修正和遮挡处理。
 

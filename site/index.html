@@ -21,7 +21,7 @@
       <button data-tab="review" class="tab">匿名盲评</button>
       <button data-tab="detail-review" class="tab">逐项评分</button>
     </nav>
-    <div class="local"><span class="dot"></span>LOCAL ONLY <span class="version">v0.2</span></div>
+    <div class="local"><span class="dot"></span>LOCAL ONLY <span class="version">v0.3</span></div>
   </header>
   <main id="main">
     <section class="hero">
@@ -59,10 +59,12 @@
       <div id="detail-unavailable" class="boundary" hidden><p>细节校准样例尚未生成。运行 npm run demo:details 后刷新页面。</p></div>
       <div class="panel detail-workspace" id="detail-workspace" hidden>
         <div class="detail-selectors">
+          <label>细节示例<select id="detail-example"></select></label>
           <label>对照条件<select id="detail-variant"></select></label>
           <label>细节卡片<select id="detail-card"></select></label>
           <label>显示方式<select id="detail-style"><option value="gray">灰模与阴影</option><option value="material">基础材质色块</option><option value="normal">几何法线</option><option value="depth">固定范围深度</option></select></label>
         </div>
+        <p id="detail-example-focus" class="small-note"></p>
         <div class="detail-card-top"><h3 id="detail-card-title"></h3><span id="detail-card-status"></span></div>
         <ul id="detail-requirements" class="requirements"></ul>
         <div class="view-toolbar"><div id="detail-view-buttons" class="view-presets"></div><span class="muted">参考确定取景区域 · 不按候选自动取景</span></div>
@@ -126,8 +128,9 @@
     <section id="detail-review" class="page" hidden>
       <div class="section-top"><div><div class="eyebrow">EVIDENCE-ANCHORED DETAIL RATING</div><h2>把细节判断，落到每张卡片上</h2><p>候选身份和自动检测结果隐藏。依据参考、局部视角和评分锚点逐项判断。</p></div><span id="detail-review-mode-pill" class="badge pending">尚未开始</span></div>
       <div id="detail-review-start" class="panel review-start">
-        <div><h3>一轮评审，一个匿名候选</h3><p>十张可评分卡片。窗户、入口、构造与装饰按类别分别汇总；后立面装饰因缺少要求已预先排除。</p><p class="muted">看过条件标签或进行界面测试时，请选练习模式。</p></div>
+        <div><h3>一轮评审，一个匿名候选</h3><p>先选择示例，再逐项检查该示例的必需卡片。不同对象的卡片、参考和评分记录分别保存。</p><p class="muted">看过条件标签或进行界面测试时，请选练习模式。</p></div>
         <form id="detail-review-form">
+          <label>评分示例<select id="detail-review-example"></select></label>
           <label>细节评审昵称<input id="detail-reviewer" minlength="2" maxlength="64" required placeholder="例如：detail-reviewer-01" autocomplete="off"></label>
           <label>细节评审模式<select id="detail-review-mode"><option value="practice">练习 · 不计入人工结果</option><option value="human">独立人工评审</option></select></label>
           <button type="submit" class="primary">开始 / 继续逐项评审 →</button>

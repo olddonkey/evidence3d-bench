@@ -60,6 +60,131 @@
         ["historical/flickr-2013-front-left.jpg", "historical_photo"],
         ["historical/flickr-2013-front-right.jpg", "historical_photo"]
       ]
+    },
+    {
+      "id": "gasholders",
+      "title": "Gasholders London",
+      "root": "gasholders-london-kings-cross-2026-07-30",
+      "scope": "Gasholders 10/11/12 exterior and retained circular frames; exclude Gasholder Park / No. 8 and surrounding streets.",
+      "frame_review": "Confirm cylinder identity, shared metric frame, dated plans and photographs before scoring.",
+      "annotation_questions": [
+        "Three cylinder layout and heights",
+        "Retained columns and lattice rings",
+        "Curved panels and balcony depth",
+        "Exclude Gasholder Park / No. 8"
+      ],
+      "files": [
+        [
+          "detail-references/wilkinsoneyre-official/823_n84_16-10.jpg",
+          "photo"
+        ],
+        [
+          "detail-references/technical-drawings/camden-p40-ground-floor-plan.png",
+          "plan"
+        ],
+        [
+          "detail-references/technical-drawings/ebrochure-p131-elevations.png",
+          "plan"
+        ],
+        [
+          "detail-references/wilkinsoneyre-official/823_n64_1-1.jpg",
+          "photo"
+        ],
+        [
+          "detail-references/wilkinsoneyre-official/823_n85_10-16.jpg",
+          "photo"
+        ],
+        [
+          "roof-plan-h030-t000-r160.png",
+          "aerial_proxy"
+        ]
+      ]
+    },
+    {
+      "id": "stanford-dish",
+      "title": "The Stanford Dish",
+      "root": "stanford-campus-landmarks-2026-08-31/09-stanford-dish",
+      "scope": "Reflector, visible feed and support structure only; exclude terrain, trails, trees and background infrastructure.",
+      "frame_review": "Photographs are dated 2013 and often distant. Independent scale, reflector pose, epoch and visible support geometry need review.",
+      "annotation_questions": [
+        "Reflector concavity and diameter",
+        "Feed assembly and support members",
+        "Front versus rear evidence",
+        "Unresolvable lattice details"
+      ],
+      "files": [
+        [
+          "visual-references/dish-2013-015.jpg",
+          "historical_photo"
+        ],
+        [
+          "visual-references/dish-2013-016.jpg",
+          "historical_photo"
+        ],
+        [
+          "visual-references/dish-2013-011.jpg",
+          "historical_photo"
+        ],
+        [
+          "visual-references/dish-2013-013.jpg",
+          "historical_photo"
+        ],
+        [
+          "visual-references/dish-2013-029.jpg",
+          "historical_photo"
+        ],
+        [
+          "aerial-and-maps/esri-site.jpg",
+          "aerial_proxy"
+        ]
+      ]
+    },
+    {
+      "id": "stanford-green-library",
+      "title": "Green Library / Bing Wing",
+      "root": "stanford-campus-landmarks-2026-08-31/06-green-library",
+      "scope": "Historic Bing Wing exterior; distinguish later additions and exclude surrounding campus scenery.",
+      "frame_review": "Reconcile HABS drawings and archive photos with the intended historical state. Coordinate frame, dimensions, masks and tolerances need independent review.",
+      "annotation_questions": [
+        "Arch and window layout",
+        "HABS measured plans and elevations",
+        "Roof, cornice and pilasters",
+        "Historical versus later additions"
+      ],
+      "files": [
+        [
+          "official-docs/habs-photos/habs-green-west-front-detail.jpg",
+          "historical_photo"
+        ],
+        [
+          "visual-references/bing-wing-overview.jpg",
+          "photo"
+        ],
+        [
+          "official-docs/habs-photos/habs-green-northwest.jpg",
+          "historical_photo"
+        ],
+        [
+          "official-docs/habs-photos/habs-green-east-connection.jpg",
+          "historical_photo"
+        ],
+        [
+          "official-docs/habs-sheets/sheet-01.jpg",
+          "plan"
+        ],
+        [
+          "official-docs/habs-sheets/sheet-02.jpg",
+          "plan"
+        ],
+        [
+          "official-docs/habs-sheets/sheet-03.jpg",
+          "plan"
+        ],
+        [
+          "aerial-and-maps/esri-site.jpg",
+          "aerial_proxy"
+        ]
+      ]
     }
   ]
 }

@@ -1,6 +1,6 @@
 {
   "name": "evidence3d-bench",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -9,6 +9,7 @@
   "scripts": {
     "demo": "node cli.mjs demo",
     "demo:details": "node cli.mjs demo-details",
+    "demo:examples": "node cli.mjs demo-examples",
     "prepare:local": "node cli.mjs prepare",
     "test": "node --test test/*.test.mjs",
     "start": "node cli.mjs serve",

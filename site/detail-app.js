@@ -1,7 +1,7 @@
 import {createViewers,overviewCamera} from './viewer.js';
 const $=id=>document.getElementById(id);
 const el=(tag,cls,text)=>{const node=document.createElement(tag);if(cls)node.className=cls;if(text!==undefined)node.textContent=text;return node;};
-let data,preview,previewGeneration=0,currentEntry,currentCard,currentView;
+let data,preview,previewGeneration=0,currentEntry,currentCard,currentView,exampleGeneration=0;
 let ratingView,rating,ratingCamera,selectedScore,unknown=false,ratingGeneration=0;
 async function api(path,payload){
   const res=await fetch(path,payload===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
@@ -9,14 +9,15 @@ async function api(path,payload){
 }
 function error(e){$('error').textContent=e.message||String(e);$('error').hidden=false;}
 function badge(text,good){return el('span','badge '+(good?'good':'pending'),text);}
-function fillViews(target,views,onSelect){
+function fillViews(target,views,frame,onSelect){
   target.replaceChildren();
   for(const view of [...views,{id:'overview'}]){
-    const button=el('button','secondary',view.id==='overview'?'全貌':view.id==='front'?'固定正面':'固定斜视');
+    const names={overview:'全貌',front:'固定正面',oblique:'固定斜视',rear:'固定背面','rear-oblique':'背面斜视',left:'固定左侧',side:'固定侧面',top:'固定俯视'};
+    const button=el('button','secondary',names[view.id]||view.id);
     button.type='button';button.dataset.view=view.id;
     button.addEventListener('click',()=>{
       for(const other of target.children)other.classList.toggle('selected',other===button);
-      onSelect(view.id==='overview'?overviewCamera(data.frame):view);
+      onSelect(view.id==='overview'?overviewCamera(frame):view);
     });target.append(button);
   }
   target.firstElementChild?.classList.add('selected');
@@ -38,7 +39,7 @@ function drawMetrics(viewId){
     fig.append(img,el('figcaption','',names[key]+(key==='depth_difference'?' · 亮端 ≥ '+view.depth_difference_scale_m.toFixed(2)+' m':'')));return fig;
   }));
 }
-async function showPreview(){
+async function showPreview(initialOverview=false){
   const generation=++previewGeneration;preview?.dispose();preview=null;
   currentEntry=data.entries.find(e=>e.submission_id===$('detail-variant').value);
   currentCard=data.cards.find(c=>c.id===$('detail-card').value);
@@ -48,21 +49,22 @@ async function showPreview(){
   const result=currentEntry.report.detail_geometry.cards.find(c=>c.id===currentCard.id);
   $('detail-card-status').replaceChildren(badge(currentCard.scoreable?(result.auto_checks_pass?'局部几何检查通过':'检出局部几何差异'):'预先排除',currentCard.scoreable&&result.auto_checks_pass));
   $('detail-viewer-status').textContent=currentCard.scoreable?'正在加载固定视角…':currentCard.exclusion_reason;
-  currentView=currentCard.views[0]||overviewCamera(data.frame);
-  fillViews($('detail-view-buttons'),currentCard.views,view=>{currentView=view;preview?.setView(view);drawMetrics(view.id);});
+  currentView=initialOverview?overviewCamera(data.frame):(currentCard.views[0]||overviewCamera(data.frame));
+  fillViews($('detail-view-buttons'),currentCard.views,data.frame,view=>{currentView=view;preview?.setView(view);drawMetrics(view.id);});
+  if(initialOverview)for(const b of $('detail-view-buttons').children)b.classList.toggle('selected',b.dataset.view==='overview');
   drawMetrics(currentCard.scoreable?currentView.id:'overview');
   try{
     const loaded=await createViewers([
-      {element:'detail-reference',url:'/api/detail-preview/'+currentEntry.submission_id+'/reference?style=material',label:'局部参考'},
-      {element:'detail-candidate',url:'/api/detail-preview/'+currentEntry.submission_id+'/model?style=material',label:'局部候选'}
+      {element:'detail-reference',url:'/api/detail-preview/'+currentEntry.submission_id+'/reference?style=material&task='+encodeURIComponent(data.task.id),label:'局部参考'},
+      {element:'detail-candidate',url:'/api/detail-preview/'+currentEntry.submission_id+'/model?style=material&task='+encodeURIComponent(data.task.id),label:'局部候选'}
     ],data.frame,{view:currentView,style:$('detail-style').value});
     if(generation!==previewGeneration){loaded.dispose();return;}preview=loaded;
     preview.setView(currentView);preview.setStyle($('detail-style').value);
-    $('detail-viewer-status').textContent=currentCard.scoreable?'已加载。正面、斜视和全貌使用参考预设；拖动或缩放会同步两个视窗。':currentCard.exclusion_reason;
+    $('detail-viewer-status').textContent=currentCard.scoreable?'已加载。固定视角与全貌使用参考预设；拖动或缩放会同步两个视窗。':currentCard.exclusion_reason;
   }catch(e){if(generation===previewGeneration)error(e);}
 }
 function drawHuman(summary){
-  const target=$('detail-human-summary');target.replaceChildren(el('h3','','人工细节评分'));
+  const target=$('detail-human-summary');target.replaceChildren(el('h3','','人工细节评分'+(summary.task_title?' · '+summary.task_title:'')));
   const row=el('div','human-counts');
   for(const [value,label] of [[summary.independent_reviewers,'独立评审者'],[summary.human_ratings,'人工卡片评分'],[summary.practice_ratings,'练习卡片评分']]){
     const item=el('span');item.append(el('strong','',String(value)),document.createTextNode(label));row.append(item);
@@ -83,7 +85,7 @@ async function showRating(next){
     $('individual-detail-feedback').textContent=next.individual_detail?.score!==null&&next.individual_detail?.score!==undefined?
       '本轮个人'+(next.mode==='practice'?'练习':'')+'分：'+next.individual_detail.score.toFixed(1)+' / 100。此数值不是多人一致性结论。':
       '本轮存在未确定的卡片，个人总分暂不计算。';
-    drawHuman(await api('/api/detail-summary'));return;
+    drawHuman(await api('/api/detail-summary?task='+encodeURIComponent(next.task_id)));return;
   }
   $('rating-title').textContent=next.card.title;$('rating-progress').textContent=(next.progress.done+1)+' / '+next.progress.total;
   $('rating-question').textContent=next.question;$('rating-requirements').replaceChildren(...next.card.requirements.map(t=>el('li','',t)));
@@ -99,7 +101,7 @@ async function showRating(next){
     });return button;
   }));
   ratingCamera=next.card.views[0];
-  fillViews($('rating-views'),next.card.views,view=>{ratingCamera=view;ratingView?.setView(view);});
+  fillViews($('rating-views'),next.card.views,next.frame,view=>{ratingCamera=view;ratingView?.setView(view);});
   $('rating-evidence').replaceChildren(...next.evidence.map(source=>{
     const link=el('a','secondary',source.id+' · 原始依据');link.href=source.url;link.target='_blank';link.rel='noopener';return link;
   }));
@@ -110,17 +112,21 @@ async function showRating(next){
     ],next.frame,{view:next.card.views[0],style:'gray'});
     if(generation!==ratingGeneration){loaded.dispose();return;}ratingView=loaded;
     ratingView.setView(ratingCamera);ratingView.setStyle($('rating-style').value);
-    $('rating-load-status').textContent='两个模型均已加载；请结合正面与斜视检查，颜色不计入几何细节分。';
+    $('rating-load-status').textContent='两个模型均已加载；请结合卡片的多个预设视角检查，颜色不计入几何细节分。';
     for(const button of $('rating-options').children)button.disabled=false;$('rating-unknown').disabled=false;
   }catch(e){if(generation===ratingGeneration)error(e);}
 }
-$('detail-variant').addEventListener('change',()=>showPreview().catch(error));
+$('detail-variant').addEventListener('change',()=>{
+  const next=data.entries.find(e=>e.submission_id===$('detail-variant').value);
+  if(next.target&&data.cards.some(c=>c.id===next.target))$('detail-card').value=next.target;
+  showPreview().catch(error);
+});
 $('detail-card').addEventListener('change',()=>showPreview().catch(error));
 $('detail-style').addEventListener('change',()=>preview?.setStyle($('detail-style').value));
 $('rating-style').addEventListener('change',()=>ratingView?.setStyle($('rating-style').value));
 $('detail-review-form').addEventListener('submit',async event=>{
   event.preventDefault();const button=event.currentTarget.querySelector('button');button.disabled=true;$('error').hidden=true;
-  try{await showRating(await api('/api/detail-reviews/start',{reviewer:$('detail-reviewer').value,mode:$('detail-review-mode').value}));}
+  try{await showRating(await api('/api/detail-reviews/start',{reviewer:$('detail-reviewer').value,mode:$('detail-review-mode').value,task_id:$('detail-review-example').value}));}
   catch(e){error(e);}finally{button.disabled=false;}
 });
 $('rating-unknown').addEventListener('click',()=>{
@@ -134,23 +140,33 @@ $('save-rating').addEventListener('click',async()=>{
   try{
     const result=await api('/api/detail-reviews/'+rating.session_id+'/rating',{item_id:rating.item_id,score:selectedScore,
       insufficient_evidence:unknown,notes:$('rating-notes').value});
-    await showRating(result.next);drawHuman(await api('/api/detail-summary'));
+    await showRating(result.next);drawHuman(await api('/api/detail-summary?task='+encodeURIComponent(result.next.task_id)));
   }catch(e){error(e);$('save-rating').disabled=false;for(const b of $('rating-options').children)b.disabled=false;$('rating-unknown').disabled=false;}
 });
 $('detail-new-reviewer').addEventListener('click',()=>{$('detail-rating-complete').hidden=true;$('detail-review-start').hidden=false;});
 $('detail-next-round').addEventListener('click',async()=>{
   $('detail-next-round').disabled=true;
-  try{await showRating(await api('/api/detail-reviews/start',{reviewer:$('detail-reviewer').value,mode:$('detail-review-mode').value,new_round:true}));}
+  try{await showRating(await api('/api/detail-reviews/start',{reviewer:$('detail-reviewer').value,mode:$('detail-review-mode').value,new_round:true,task_id:rating.task_id}));}
   catch(e){error(e);$('detail-next-round').disabled=false;}
 });
-try{
-  data=await api('/api/detail-overview');
+async function loadExample(taskId,initialOverview=false){
+  const generation=++exampleGeneration;++previewGeneration;preview?.dispose();preview=null;
+  for(const id of ['detail-variant','detail-card'])$(id).disabled=true;
+  const result=await api('/api/detail-overview'+(taskId?'?task='+encodeURIComponent(taskId):''));
+  if(generation!==exampleGeneration)return;
+  data=result;
   if(!data.available){$('detail-unavailable').hidden=false;$('detail-calibration-status').textContent='未生成';}
   else{
+    $('detail-unavailable').hidden=true;
+    $('detail-example').replaceChildren(...data.examples.map(item=>{const o=el('option','',item.title);o.value=item.task_id;return o;}));
+    $('detail-example').value=data.task.id;
+    $('detail-review-example').replaceChildren(...data.examples.map(item=>{const o=el('option','',item.title);o.value=item.task_id;return o;}));
+    $('detail-review-example').value=rating?.task_id||data.task.id;
+    $('detail-example-focus').textContent=data.task.title+' · '+data.focus.join(' / ');
     $('detail-workspace').hidden=false;$('detail-calibration-status').textContent=data.calibration.checks.filter(c=>c.passed).length+' / '+data.calibration.checks.length+' 项校准通过';
     $('detail-statistics').replaceChildren(...[
-      ['可评分细节卡片',data.calibration.scoreable_cards,'另有 1 张资料不足卡片已预先排除'],
-      ['对照样例',data.entries.length,'颜色不变性与八种局部缺陷'],
+      ['可评分细节卡片',data.calibration.scoreable_cards,data.calibration.excluded_cards?'另有 '+data.calibration.excluded_cards+' 张卡片已预先排除':'全部卡片均有解析参考'],
+      ['对照与提交',data.entries.length,'控制组、已知缺陷与登记的提交'],
       ['局部测量视角',data.cards.reduce((n,c)=>n+c.views.length,0),'参考固定取景，逐卡片对照'],
       ['人工卡片评分数',data.human.human_ratings,'未评分时不生成总分']
     ].map(([title,value,note])=>{const node=el('div','stat');node.append(el('div','stat-label',title),el('div','stat-value',String(value)),el('div','stat-note',note));return node;}));
@@ -158,6 +174,14 @@ try{
     $('detail-card').replaceChildren(...data.cards.map(card=>{const option=el('option','',card.title+(card.scoreable?'':' · 不评分'));option.value=card.id;return option;}));
     $('detail-check-total').textContent=data.calibration.checks.length+' CHECKS';
     $('detail-checks').replaceChildren(...data.calibration.checks.map(c=>{const row=el('div','check');row.append(el('span','',c.passed?'✓':'×'),document.createTextNode(c.description));return row;}));
-    drawHuman(data.human);await showPreview();
+    if(!rating)drawHuman(data.human);
+    for(const id of ['detail-variant','detail-card'])$(id).disabled=false;
+    await showPreview(initialOverview);
   }
-}catch(e){error(e);}
+}
+$('detail-example').addEventListener('change',()=>{
+  const url=new URL(location.href);url.searchParams.set('example',$('detail-example').value);history.replaceState(null,'',url);
+  loadExample($('detail-example').value,true).catch(error);
+});
+$('detail-review-example').addEventListener('change',()=>api('/api/detail-summary?task='+encodeURIComponent($('detail-review-example').value)).then(drawHuman).catch(error));
+loadExample(new URL(location.href).searchParams.get('example')||undefined).catch(error);
