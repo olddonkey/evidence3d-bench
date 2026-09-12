@@ -11,7 +11,8 @@ async function inspect(task) {
   for (const row of $('pilot-rows').children) row.classList.toggle('selected', row.dataset.id === task.id);
   const m = task.metrics;
   $('pilot-measurement').textContent = m ? `最大尺寸误差 ${(m.max_dimension_error * 100).toFixed(3)}% · 最低固定视角 IoU ${m.min_silhouette_iou.toFixed(4)}。这些是几何测量，没有换算为人工视觉分。`
-    : '准确性未计分：该任务尚无独立核验的真值。模型可导入不等于建筑还原准确。';
+    : task.eligibility === 'annotation_pending' ? '准确性未计分：该任务尚无独立核验的真值。模型可导入不等于建筑还原准确。'
+      : task.status === 'pending' ? '本题尚未完成交付与评测。' : '本题未得到有效几何测量；请查看交付状态和原始运行记录。';
   $('pilot-details').hidden = !task.detail_url; if (task.detail_url) $('pilot-details').href = task.detail_url;
   $('pilot-sources').replaceChildren(...task.inputs.map(input => {
     const figure = el('figure'), link = el('a'); link.href = input.url; link.target = '_blank'; link.rel = 'noopener';
@@ -29,7 +30,9 @@ async function load(id) {
   if (request !== loadEpoch) return;
   overview = data;
   const u = new URL(location.href); u.searchParams.set('run', id); history.replaceState(null, '', u);
-  $('pilot-meta').textContent = `${overview.model} · ${overview.reasoning_effort} · ${overview.tools.codex} · ${overview.complete ? '本批完成' : '运行中，刷新查看新增结果'}`;
+  $('pilot-meta').textContent = `${overview.model} · ${overview.reasoning_effort} · ${overview.harness} · ${overview.tools.codex} · ${overview.complete ? '本批完成' : '运行中，刷新查看新增结果'}`;
+  $('pilot-conditions').replaceChildren(...overview.notes.map(note => el('p', note)));
+  $('pilot-conditions').hidden = !overview.notes.length;
   $('pilot-rows').replaceChildren(...overview.tasks.map(task => {
     const row = el('tr'); row.tabIndex = 0; row.dataset.id = task.id;
     const detail = task.detail_checks ? `${task.detail_checks.passed} / ${task.detail_checks.total}` : '—';
