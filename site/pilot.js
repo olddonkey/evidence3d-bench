@@ -29,6 +29,8 @@ async function load(id) {
   const request = ++loadEpoch, data = await api('/api/pilots/' + id);
   if (request !== loadEpoch) return;
   overview = data;
+  const option = [...$('pilot-batch').options].find(o => o.value === id);
+  if (option) option.textContent = `${id} · ${overview.tasks.filter(t => !['pending','running'].includes(t.status)).length}/${overview.tasks.length}`;
   const u = new URL(location.href); u.searchParams.set('run', id); history.replaceState(null, '', u);
   $('pilot-meta').textContent = `${overview.model} · ${overview.reasoning_effort} · ${overview.harness} · ${overview.tools.codex} · ${overview.complete ? '本批完成' : '运行中，刷新查看新增结果'}`;
   $('pilot-conditions').replaceChildren(...overview.notes.map(note => el('p', note)));
