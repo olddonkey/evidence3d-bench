@@ -16,7 +16,7 @@ try {
       taskIds: options.tasks ? options.tasks.split(',') : DEFAULT_PILOT_TASKS,
       model: options.model || 'gpt-6-astra',
       codex: options.codex || '/Users/olddonkey/.local/bin/codex.opencodex-real',
-      blender: options.blender || '/Applications/Blender.app/Contents/MacOS/Blender' });
+      blender: options.blender });
     console.log(JSON.stringify({ event: 'prepared', batch: prepared.batch, tasks: prepared.manifest.tasks.map(t => t.id) }));
   } else if (command === 'preflight') {
     console.log(JSON.stringify(await preflightPilot(resolve(options.batch), root), null, 2));

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark"><title>生成试跑 · Evidence3D Bench</title>
+  <link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/pilot.css">
+  <script type="importmap">{"imports":{"three":"/vendor/three.module.js","three/addons/":"/vendor/addons/"}}</script>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/">Evidence<span class="mint">3D</span></a><a class="tab" href="/">返回评测工作台</a><span class="local">本地生成记录</span></header>
+  <main>
+    <section class="hero"><div><div class="eyebrow">GENERATION → ARTIFACT → MEASUREMENT</div><h1>看实际交付，再看误差。</h1><p>每题一次独立作答。几何检查、人工视觉评价与运行成本分别记录。</p></div></section>
+    <div id="pilot-error" class="error" role="alert" hidden></div>
+    <div class="pilot-toolbar"><label>运行批次<select id="pilot-batch"></select></label><button id="pilot-refresh" type="button">刷新结果</button><span id="pilot-meta"></span></div>
+    <p id="pilot-boundary" class="muted">开发试跑，不生成综合排行榜；真实对象的准确性等待独立标注。</p>
+    <section class="panel table-scroll"><table><thead><tr><th>任务</th><th>交付</th><th>耗时</th><th>全局几何</th><th>局部检查</th><th>人工视觉分</th></tr></thead><tbody id="pilot-rows"></tbody></table></section>
+    <section id="pilot-inspection" hidden>
+      <div class="section-top"><div><h2 id="pilot-title"></h2><p id="pilot-measurement"></p></div><a id="pilot-details" class="tab" hidden>查看固定视角与逐项误差 →</a></div>
+      <div class="pilot-panels">
+        <section class="panel"><div class="panel-label">实际 GLB <label>显示<select id="pilot-style"><option value="gray">统一灰模</option><option value="material">基础材质色块</option><option value="normal">法线</option></select></label></div><div id="pilot-view" class="pilot-canvas"></div><p class="pilot-caption" id="pilot-view-status">正在加载…</p></section>
+        <section class="panel"><div class="panel-label">生成时提供的原始资料</div><div id="pilot-sources" class="pilot-sources"></div></section>
+      </div>
+    </section>
+  </main>
+  <script type="module" src="/pilot.js"></script>
+</body></html>
