@@ -176,6 +176,12 @@ test('task export contains only allow-listed inputs, never private truth or extr
   const out=join(root,'exported');await exportTask(files.taskPath,out);
   assert.deepEqual((await readdir(out)).sort(),['input-lock.json','inputs','task.json']);
   assert.equal((await verifySources(task,out)).length,2);
+  const lock=await readJSON(join(out,'input-lock.json')),exported=await readJSON(join(out,'task.json'));
+  assert.equal(lock.task_file_sha256,sha256(await readFile(join(out,'task.json'))));
+  assert.match(lock.task_sha256_method,/not the hash of the pretty-printed/);
+  await writeFile(join(out,'task.json'),JSON.stringify(exported));
+  assert.equal(lock.task_sha256,objectHash(await readJSON(join(out,'task.json'))));
+  assert.notEqual(lock.task_file_sha256,sha256(await readFile(join(out,'task.json'))));
   await assert.rejects(()=>exportTask(files.taskPath,out),/must be empty/);
 });
 test('symlink inputs cannot leave their source root',async()=>{

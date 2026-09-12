@@ -19,7 +19,9 @@ try {
       blender: options.blender });
     console.log(JSON.stringify({ event: 'prepared', batch: prepared.batch, tasks: prepared.manifest.tasks.map(t => t.id) }));
   } else if (command === 'preflight') {
-    console.log(JSON.stringify(await preflightPilot(resolve(options.batch), root), null, 2));
+    const report = await preflightPilot(resolve(options.batch), root);
+    console.log(JSON.stringify(report, null, 2));
+    if (!report.passed) process.exitCode = 1;
   } else if (command === 'run') {
     await executePilot({ root, batch: resolve(options.batch), onProgress: event => console.log(JSON.stringify(event)) });
   } else throw new Error('Mode must be prepare, preflight, or run');
