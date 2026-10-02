@@ -1,0 +1,12 @@
+{
+  "name": "dev",
+  "note": "Public development set. Seeds here are not secret; a test set keeps its seed file out of version control.",
+  "variants": ["t1", "t2", "t3", "t4", "c1"],
+  "objects": [
+    { "archetype": "house", "seed": 11 },
+    { "archetype": "retail", "seed": 12 },
+    { "archetype": "tower", "seed": 13 },
+    { "archetype": "hall", "seed": 14 },
+    { "archetype": "structure", "seed": 15 }
+  ]
+}
