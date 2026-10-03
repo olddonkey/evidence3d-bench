@@ -4,6 +4,10 @@ export const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&'
 
 const isNumber = value => typeof value === 'number' && Number.isFinite(value);
 export const NOT_EVALUATED = '<span class="na" title="not evaluated or not reported">n/a</span>';
+// File-name-safe form of an id (task, batch, object).
+export const slug = text => String(text).replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 80);
+// A tolerance fraction as a percentage without false rounding: 0.0025 -> 0.25%.
+export const fractionLabel = fraction => String(Math.round(fraction * 1e4) / 100) + '%';
 
 export function num(value, digits = 1, { signed = false, suffix = '' } = {}) {
   if (!isNumber(value)) return NOT_EVALUATED;
@@ -14,7 +18,8 @@ export function num(value, digits = 1, { signed = false, suffix = '' } = {}) {
 export const percent = (fraction, digits = 0) => isNumber(fraction) ? num(fraction * 100, digits, { suffix: '%' }) : NOT_EVALUATED;
 
 // A summarised metric (stats.summarise) as a table cell: value, interval and n.
-export function statCell(stat, { digits = 1, signed = false, suffix = '', scale = 1, unit = 'objects' } = {}) {
+// `extra` is trusted HTML appended under the interval (e.g. a t interval).
+export function statCell(stat, { digits = 1, signed = false, suffix = '', scale = 1, unit = 'objects', extra = '' } = {}) {
   if (!stat || !isNumber(stat.mean)) {
     const n = stat?.objects ? ' (n = ' + stat.objects + ')' : '';
     return '<td class="num">' + NOT_EVALUATED + (n ? '<small>' + esc(n) + '</small>' : '') + '</td>';
@@ -24,7 +29,15 @@ export function statCell(stat, { digits = 1, signed = false, suffix = '', scale 
   const n = 'n = ' + stat.objects + ' ' + (stat.objects === 1 ? unit.replace(/s$/, '') : unit) + (isNumber(stat.attempts) ? ', ' + stat.attempts + ' att.' : '');
   const title = n + (stat.basis ? '; ' + stat.basis : '') + (stat.low_evidence ? '; LOW EVIDENCE: fewer than 3 objects' : '');
   return '<td class="num' + (stat.low_evidence ? ' low' : '') + '" title="' + esc(title) + '">' + value + (stat.low_evidence ? '<span class="dagger">&dagger;</span>' : '') +
-    '<small>' + ci + '</small><small>' + esc(n) + '</small></td>';
+    '<small>' + ci + '</small>' + extra + '<small>' + esc(n) + '</small></td>';
+}
+
+// A standard deviation (aggregate sdEntry) as a cell: value, 95 % range, df.
+export function sdCell(entry, { digits = 1, note = '' } = {}) {
+  if (!entry || !isNumber(entry.sd)) return '<td class="num">' + NOT_EVALUATED + (note ? '<small>' + esc(note) + '</small>' : '') + '</td>';
+  const range = entry.ci95 ? '<small>95% range ' + num(entry.ci95[0], digits) + '&ndash;' + num(entry.ci95[1], digits) + '</small>' : '';
+  return '<td class="num' + (entry.little_data ? ' low' : '') + '"' + (entry.basis ? ' title="' + esc(entry.basis) + '"' : '') + '>' + num(entry.sd, digits) +
+    (entry.little_data ? '<span class="dagger" title="little data">&Dagger;</span>' : '') + range + '<small>' + entry.df + ' df' + (note ? ' · ' + esc(note) : '') + '</small></td>';
 }
 
 export function page({ title, body, root = '.' }) {
@@ -57,7 +70,7 @@ code { font: 0.92em ui-monospace, SFMono-Regular, Menlo, monospace; }
 table { border-collapse: collapse; font-variant-numeric: tabular-nums; width: max-content; min-width: 100%; }
 th, td { padding: 6px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
 thead th { background: var(--head); font-weight: 600; position: sticky; top: 0; }
-tbody tr:last-child td { border-bottom: 0; }
+tbody tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
 td.num, th.num { text-align: right; }
 td small { display: block; font-size: 0.78em; line-height: 1.3; }
 td.low { color: var(--low); }
@@ -85,9 +98,34 @@ figcaption { font-size: 0.85em; margin-top: 6px; }
 pre.notes { white-space: pre-wrap; max-height: 320px; overflow: auto; font-size: 0.85em; background: var(--head); padding: 8px; border-radius: 4px; }
 details > summary { cursor: pointer; color: var(--accent); }
 nav.crumbs { font-size: 0.9em; margin-bottom: 12px; }
+th small { display: block; font-weight: 400; color: var(--muted); font-size: 0.78em; }
+h2 small, h3 small { font-weight: 400; color: var(--muted); font-size: 0.75em; }
+.notice { border: 1px solid var(--low); border-left-width: 4px; border-radius: 6px; padding: 8px 12px; margin: 10px 0; background: var(--panel); max-width: 110ch; }
+.notice ul { margin: 4px 0 0; padding-left: 20px; }
+ul.statements { max-width: 110ch; padding-left: 20px; }
+ul.statements li { margin: 4px 0; }
+section { margin-bottom: 28px; }
+table.provenance tbody th { font-weight: 600; color: var(--muted); white-space: nowrap; }
+td.differs { background: color-mix(in srgb, var(--bad) 14%, transparent); }
+.scroll + .scroll { margin-top: 14px; }
+.notice.dev { border-color: var(--bad); }
+.notice.plain { border-color: var(--line); }
+.notice p { margin: 4px 0; }
+.group-head { font-size: 0.88em; color: var(--muted); margin: 14px 0 2px; padding-top: 6px; border-top: 1px solid var(--line); }
+.role { display: inline-block; font-size: 0.78em; padding: 0 5px; border: 1px solid var(--line); border-radius: 3px; margin-right: 4px; color: var(--muted); }
+.maps { display: grid; gap: 8px; }
+.map-row { display: grid; grid-template-columns: 180px repeat(var(--maps), minmax(140px, 1fr)); gap: 8px; align-items: start; }
+.map-row .label { font-size: 0.88em; overflow-wrap: anywhere; }
+.map-row .label small { display: block; }
+.map-row img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 4px; }
+th .col-head { display: inline-block; max-width: 13em; white-space: normal; overflow-wrap: anywhere; }
+details.more { margin: 10px 0; }
+details.more > summary { margin-bottom: 6px; }
 @media (max-width: 720px) {
   .render-row { grid-template-columns: repeat(var(--views), minmax(140px, 1fr)); }
   .render-row .label { grid-column: 1 / -1; }
   .render-row .corner { display: none; }
+  .map-row { grid-template-columns: repeat(var(--maps), minmax(140px, 1fr)); }
+  .map-row .label { grid-column: 1 / -1; }
 }
 `;

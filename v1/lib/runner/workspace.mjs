@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { readFile, writeFile, mkdir, readdir, lstat, readlink, copyFile, link, chmod, rename, realpath, open } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readdir, lstat, readlink, copyFile, link, chmod, rename, realpath, open, unlink } from 'node:fs/promises';
+import { writeFileSync, renameSync } from 'node:fs';
 import { join, dirname, resolve, relative, isAbsolute, sep } from 'node:path';
 import { canonical } from '../../../lib/io.mjs';
 import { validateTask } from '../contract.mjs';
@@ -27,17 +28,41 @@ export async function sha256File(path) {
 
 export async function readJSON(path) { return JSON.parse(await readFile(path, 'utf8')); }
 
-// Atomic JSON write. The temporary name is unique per call, so concurrent
-// attempts writing the batch summary never share a temporary file.
+// Atomic JSON write: a reader (or a restarted runner) sees the old file or the
+// whole new one, never a torn one. The temporary name is unique per call, so
+// concurrent attempts writing the batch summary never share a temporary file.
+// `exclusive` publishes with link(), which fails if the target exists, so a
+// result is written once and whole even if the runner is killed mid-write.
 let writeCounter = 0;
 export async function writeJSON(path, value, { exclusive = false } = {}) {
   await mkdir(dirname(path), { recursive: true });
   const text = JSON.stringify(value, null, 2) + '\n';
-  if (exclusive) { await writeFile(path, text, { flag: 'wx' }); return; }
   const temporary = path + '.' + process.pid + '.' + (++writeCounter) + '.tmp';
-  await writeFile(temporary, text);
-  await rename(temporary, path);
+  await writeFile(temporary, text, { flag: 'wx' });
+  try {
+    if (!exclusive) await rename(temporary, path);
+    else {
+      try { await link(temporary, path); }
+      catch (error) {
+        // A filesystem without hard links still gets an exclusive (if not atomic) write.
+        if (!['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'EXDEV'].includes(error.code)) throw error;
+        await writeFile(path, text, { flag: 'wx' });
+      }
+    }
+  } finally { if (exclusive) await unlink(temporary).catch(() => {}); }
 }
+
+// The same, synchronously: for records that must be on disk before anything
+// else can happen (the pid of a process just spawned, so a restarted runner
+// can always find and stop it).
+export function writeJSONSync(path, value) {
+  const temporary = path + '.' + process.pid + '.' + (++writeCounter) + '.tmp';
+  writeFileSync(temporary, JSON.stringify(value, null, 2) + '\n', { flag: 'wx' });
+  renameSync(temporary, path);
+}
+
+// Temporary files of writeJSON left by a process that is gone.
+export const STALE_TEMPORARY = /\.json\.(\d+)\.\d+\.tmp$/;
 
 export function inside(root, path) {
   const rel = relative(resolve(root), resolve(path));

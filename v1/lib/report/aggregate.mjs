@@ -1,13 +1,37 @@
 import { join, resolve } from 'node:path';
 import { writeJSON } from '../../../lib/io.mjs';
 import { layout, VARIANTS, PROTOCOL } from '../contract.mjs';
-import { collectRuns, DEFAULT_EXCLUDED_STATUSES } from './collect.mjs';
-import { finite, mean, median, summarise, BOOTSTRAP_SAMPLES, LOW_EVIDENCE_OBJECTS } from './stats.mjs';
+import { collectRuns, DEFAULT_EXCLUDED_STATUSES, UNNAMED_SET, UNKNOWN_SET, UNKNOWN_ARCHETYPE, scorerIdentity } from './collect.mjs';
+import { finite, mean, median, sampleSD, summarise, pairedBootstrap, tInterval, pooledSD, sdRange, detectableDifference, BOOTSTRAP_SAMPLES,
+  PAIRWISE_SAMPLES, LOW_EVIDENCE_OBJECTS, SMALL_SAMPLE_OBJECTS, TIE_TOLERANCE } from './stats.mjs';
 
-export const LEADERBOARD_SCHEMA = 'e3d-leaderboard-v1';
+export const LEADERBOARD_SCHEMA = 'e3d-leaderboard-v2';
 export const VARIANT_ORDER = Object.keys(VARIANTS);
-// Each rung adds one kind of evidence; deltas are paired by object.
+// Adjacent rungs of the evidence ladder (kept for readers of earlier
+// leaderboards); evidence_deltas covers every pair of variants present.
 export const LADDER = [['t2', 't1'], ['t3', 't2'], ['t4', 't3']];
+// A standard deviation estimated with fewer degrees of freedom than this is
+// shown with its range and marked as resting on little data: at 10 df its 95 %
+// range is still about x0.69 to x1.75, at 4 df x0.60 to x2.9.
+export const LITTLE_DATA_DF = 10;
+// The test run's planned size; variance projections are made to this many objects.
+export const PLANNED_OBJECTS = 24;
+
+// What a named set is, where the report knows more than its name. A set is
+// recorded per task in truth.json; the dev set's objects were used while the
+// scorer and the pipeline were being tuned.
+export const SET_NOTES = {
+  dev: 'Development set: its seeds are public (v1/sets/dev.json) and its objects were used to develop and tune the scorer (tolerances, ' +
+    'weights) and the task pipeline. Its numbers are development measurements, not test results.',
+};
+
+// Every pair of variants present, later rung minus earlier in VARIANT_ORDER
+// (t1 t2 t3 t4 c1): t4 - t2, c1 - t2, c1 - t4 when t2, t4 and c1 were run.
+export function variantPairs(variants) {
+  const present = VARIANT_ORDER.filter(variant => variants.includes(variant)), pairs = [];
+  for (let j = 1; j < present.length; j++) for (let i = 0; i < j; i++) pairs.push([present[j], present[i]]);
+  return pairs;
+}
 
 export const cellKey = attempt => [attempt.system, attempt.model, attempt.effort ?? '-'].join(' / ');
 
@@ -37,29 +61,90 @@ function conflictCounts(attempts) {
   return counts;
 }
 
-// Per-object values of a metric: attempts are averaged within a task, tasks
-// within an object. valueOf returning a non-number leaves the attempt out.
-function perObject(attempts, valueOf, filter = () => true) {
+// The tolerance rows of one report, whatever fractions the scorer used. Which
+// rows enter shape_score is taken from the report when it says so (a boolean
+// `in_shape_score` on the row, or a list of fractions); otherwise null, which
+// the page shows as "not stated" rather than guessing.
+function shapeFractions(report) {
+  for (const list of [report?.global?.shape_fractions, report?.global?.shape_score_fractions, report?.shape_fractions, report?.shape?.fractions]) {
+    if (Array.isArray(list) && list.length && list.every(finite)) return list;
+  }
+  return null;
+}
+export function toleranceRows(report) {
+  const rows = Array.isArray(report?.global?.thresholds) ? report.global.thresholds : [];
+  const named = shapeFractions(report);
+  return rows.filter(row => row && finite(row.fraction)).map(row => ({
+    fraction: row.fraction, tau_m: finite(row.tau_m) ? row.tau_m : null,
+    precision: finite(row.precision) ? row.precision : null, recall: finite(row.recall) ? row.recall : null, f: finite(row.f) ? row.f : null,
+    in_shape_score: typeof row.in_shape_score === 'boolean' ? row.in_shape_score
+      : named ? named.some(fraction => Math.abs(fraction - row.fraction) < 1e-9) : null,
+  })).sort((a, b) => a.fraction - b.fraction);
+}
+
+// What the collected reports say about tolerances: every fraction that occurs,
+// and the fractions named as entering shape_score (null when no report names them).
+export function toleranceSummary(attempts) {
+  const fractions = new Map(), named = new Map();
+  let reports = 0, naming = 0;
+  for (const attempt of attempts) {
+    if (!attempt.valid) continue;
+    reports++;
+    const rows = toleranceRows(attempt.report);
+    if (rows.some(row => row.in_shape_score !== null)) naming++;
+    for (const row of rows) {
+      const key = String(row.fraction);
+      fractions.set(key, (fractions.get(key) ?? 0) + 1);
+      if (row.in_shape_score) named.set(key, (named.get(key) ?? 0) + 1);
+    }
+  }
+  const sorted = map => [...map.keys()].map(Number).sort((a, b) => a - b);
+  return { fractions: sorted(fractions), shape_score_fractions: naming ? sorted(named) : null, reports, reports_naming_shape_rows: naming,
+    consistent: [...fractions.values()].every(count => count === reports) };
+}
+
+// Hierarchical means, level 1: attempts averaged within a task. valueOf
+// returning a non-number leaves the attempt out.
+export function taskMeans(attempts, valueOf = attempt => attempt.score, filter = () => true) {
   const tasks = new Map();
-  let used = 0;
   for (const attempt of attempts) {
     if (!filter(attempt)) continue;
     const value = valueOf(attempt);
     if (!finite(value)) continue;
-    used++;
     if (!tasks.has(attempt.task_id)) tasks.set(attempt.task_id, { object: attempt.object, values: [] });
     tasks.get(attempt.task_id).values.push(value);
   }
-  const objects = new Map();
-  for (const { object, values } of tasks.values()) {
-    if (!objects.has(object)) objects.set(object, []);
-    objects.get(object).push(mean(values));
-  }
-  return { values: new Map([...objects].map(([object, means]) => [object, mean(means)])), attempts: used, tasks: tasks.size };
+  return new Map([...tasks].map(([task, { object, values }]) => [task, { object, mean: mean(values), attempts: values.length }]));
 }
 
-function cellEntry(key, attempts, seed) {
-  const first = attempts[0], seedFor = metric => seed + '/' + key + '/' + metric;
+// Level 2: tasks averaged within an object, so every object weighs the same
+// however many tasks and attempts it has.
+function perObject(attempts, valueOf, filter = () => true) {
+  const tasks = taskMeans(attempts, valueOf, filter), objects = new Map();
+  for (const { object, mean: value } of tasks.values()) {
+    if (!objects.has(object)) objects.set(object, []);
+    objects.get(object).push(value);
+  }
+  return { values: new Map([...objects].map(([object, means]) => [object, mean(means)])),
+    attempts: [...tasks.values()].reduce((sum, task) => sum + task.attempts, 0), tasks: tasks.size };
+}
+
+// Per object: mean score on variant `high` minus mean score on variant `low`
+// (attempts within a task, tasks within the object), over objects with both.
+function variantDelta(attempts, high, low, seed) {
+  const upper = perObject(attempts, attempt => attempt.score, attempt => attempt.variant === high).values;
+  const lower = perObject(attempts, attempt => attempt.score, attempt => attempt.variant === low).values;
+  const deltas = new Map();
+  for (const [object, value] of upper) if (lower.has(object)) deltas.set(object, value - lower.get(object));
+  return { ...summarise(deltas, { seed, basis: 'paired by object; failures count as 0' }), t_ci95: tInterval([...deltas.values()]),
+    pairs: deltas.size, unpaired_objects: new Set([...upper.keys(), ...lower.keys()]).size - deltas.size };
+}
+
+function cellEntry(key, set, attempts, seed, { deltaPairs = [], archetypes = [] } = {}) {
+  const first = attempts[0];
+  // The unnamed set keeps the seed path it always had, so a report of the
+  // same batches reproduces earlier intervals exactly.
+  const seedFor = metric => seed + '/' + (set === UNNAMED_SET ? '' : set + '/') + key + '/' + metric;
   const metric = (name, valueOf, filter, basis) => {
     const { values, attempts: used, tasks } = perObject(attempts, valueOf, filter);
     return summarise(values, { seed: seedFor(name), attempts: used, tasks, basis });
@@ -70,13 +155,15 @@ function cellEntry(key, attempts, seed) {
     variants[variant] = metric('variant/' + variant, attempt => attempt.score, attempt => attempt.variant === variant, 'all attempts; failures count as 0');
   }
   const ladder = {};
-  for (const [high, low] of LADDER) {
-    const upper = perObject(attempts, attempt => attempt.score, attempt => attempt.variant === high).values;
-    const lower = perObject(attempts, attempt => attempt.score, attempt => attempt.variant === low).values;
-    const deltas = new Map();
-    for (const [object, value] of upper) if (lower.has(object)) deltas.set(object, value - lower.get(object));
-    ladder[high + '-' + low] = { ...summarise(deltas, { seed: seedFor('ladder/' + high + '-' + low), basis: 'paired by object; failures count as 0' }),
-      pairs: deltas.size, unpaired_objects: new Set([...upper.keys(), ...lower.keys()]).size - deltas.size };
+  for (const [high, low] of LADDER) ladder[high + '-' + low] = variantDelta(attempts, high, low, seedFor('ladder/' + high + '-' + low));
+  // Every pair of variants present in the set, not only adjacent rungs; the
+  // same seed as the ladder where they overlap, so both give the same interval.
+  const evidenceDeltas = {};
+  for (const [high, low] of deltaPairs) evidenceDeltas[high + '-' + low] = { high, low, ...variantDelta(attempts, high, low, seedFor('ladder/' + high + '-' + low)) };
+  const byArchetype = {};
+  for (const archetype of archetypes) {
+    if (!attempts.some(attempt => attempt.archetype === archetype)) continue;
+    byArchetype[archetype] = metric('archetype/' + archetype, attempt => attempt.score, attempt => attempt.archetype === archetype, 'all attempts; failures count as 0');
   }
   const conflictAttempts = attempts.filter(attempt => attempt.variant === 'c1');
   const conflict = {
@@ -94,18 +181,24 @@ function cellEntry(key, attempts, seed) {
   const usages = attempts.map(attempt => attempt.usage).filter(Boolean);
   const totals = usages.map(usage => usage.total).filter(finite);
   const costs = attempts.map(attempt => attempt.cost_usd).filter(finite);
+  const perTask = taskMeans(attempts);
+  const attemptCounts = [...perTask.values()].map(task => task.attempts);
   return {
-    key, system: first.system, model: first.model, effort: first.effort,
+    key, set, system: first.system, model: first.model, effort: first.effort,
+    batches: [...new Set(attempts.map(attempt => attempt.batch))].sort(),
     attempts: attempts.length,
     tasks: new Set(attempts.map(attempt => attempt.task_id)).size,
     objects: new Set(attempts.map(attempt => attempt.object)).size,
+    attempts_per_task: { min: Math.min(...attemptCounts), max: Math.max(...attemptCounts), mean: mean(attemptCounts) },
     low_evidence: new Set(attempts.map(attempt => attempt.object)).size < LOW_EVIDENCE_OBJECTS,
     score: metric('score', attempt => attempt.score, undefined, 'all attempts; failures count as 0'),
     variants,
+    archetypes: byArchetype,
     ladder,
+    evidence_deltas: evidenceDeltas,
     conflict,
     shape: metric('shape', attempt => attempt.valid ? attempt.report.shape_score : 0, undefined,
-      'all attempts; failures count as 0; mean of F@1%, F@2%, F@5%'),
+      'all attempts; failures count as 0; shape_score as reported by the scorer'),
     detail: metric('detail', attempt => attempt.valid ? attempt.report.detail?.score : 0, undefined,
       'all attempts; failures count as 0; valid reports without a detail score are left out'),
     frame_error: {
@@ -129,20 +222,420 @@ function cellEntry(key, attempts, seed) {
   };
 }
 
-export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = new Date(), excludeStatuses = DEFAULT_EXCLUDED_STATUSES } = {}) {
-  const counted = collected.attempts.filter(attempt => !attempt.excluded);
-  const cells = new Map();
-  for (const attempt of counted) {
-    const key = cellKey(attempt);
-    if (!cells.has(key)) cells.set(key, []);
-    cells.get(key).push(attempt);
+// ---------------------------------------------------------------- pairwise
+
+// A bound that rounds to 0.0 keeps one significant digit, so "[-0.002, +7.9]"
+// is not printed as "[0.0, +7.9]" next to the words "includes zero".
+export const signedText = (value, digits = 1) => value === 0 ? (0).toFixed(digits)
+  : (value > 0 ? '+' : '') + (Math.abs(value) < 0.5 * 10 ** -digits ? value.toPrecision(1) : value.toFixed(digits));
+export const intervalText = (ci, digits = 1) => '[' + signedText(ci[0], digits) + ', ' + signedText(ci[1], digits) + ']';
+const excludesZero = ci => ci ? ci[0] > 0 || ci[1] < 0 : null;
+// Bootstrap shares in words; "all" and "none" only when literally so.
+export const shareText = (share, samples) => share === 1 ? 'all ' + samples : share === 0 ? 'none of ' + samples
+  : (share > 0.99 || share < 0.01 ? (100 * share).toFixed(2) : Math.round(100 * share)) + '% of ' + samples;
+
+// A versus B on the objects both ran. Per object: on the tasks both have
+// (at least one counted attempt each), attempts are averaged within a task and
+// tasks within the object, then B's mean is subtracted from A's. Objects are
+// resampled for the interval; attempts and tasks are not resampled separately,
+// because their noise is already inside each object's difference.
+export function comparePair(a, b, { seed = 'e3d-pairwise', samples = PAIRWISE_SAMPLES } = {}) {
+  const tasksA = taskMeans(a.attempts), tasksB = taskMeans(b.attempts);
+  const objects = new Map();
+  for (const [task, x] of tasksA) {
+    const y = tasksB.get(task);
+    if (!y) continue;
+    if (!objects.has(x.object)) objects.set(x.object, { a: [], b: [], tasks: [] });
+    const entry = objects.get(x.object);
+    entry.a.push(x.mean); entry.b.push(y.mean); entry.tasks.push(task);
   }
-  const entries = [...cells].map(([key, attempts]) => cellEntry(key, attempts, seed));
-  entries.sort((a, b) => (b.score.mean ?? -Infinity) - (a.score.mean ?? -Infinity) || a.key.localeCompare(b.key));
+  const perObject = [...objects].sort(([p], [q]) => p.localeCompare(q)).map(([object, entry]) => {
+    const scoreA = mean(entry.a), scoreB = mean(entry.b);
+    return { object, tasks: entry.tasks.length, a: scoreA, b: scoreB, difference: scoreA - scoreB };
+  });
+  const differences = perObject.map(row => row.difference);
+  const won = differences.filter(value => value > TIE_TOLERANCE).length, lost = differences.filter(value => value < -TIE_TOLERANCE).length;
+  const boot = pairedBootstrap(differences, { seed, samples });
+  const objectsA = new Set([...tasksA.values()].map(task => task.object)), objectsB = new Set([...tasksB.values()].map(task => task.object));
+  const pairedTasks = perObject.reduce((sum, row) => sum + row.tasks, 0);
+  const row = {
+    a: a.key, b: b.key,
+    objects: perObject.length, tasks: pairedTasks,
+    unpaired_objects: new Set([...objectsA, ...objectsB]).size - perObject.length,
+    unpaired_tasks: tasksA.size + tasksB.size - 2 * pairedTasks,
+    mean_difference: mean(differences),
+    ci95: boot?.ci95 ?? null,
+    share_a_higher: boot?.share_a_higher ?? null,
+    share_b_higher: boot?.share_b_higher ?? null,
+    samples: boot?.samples ?? null,
+    t_ci95: tInterval(differences),
+    won, tied: differences.length - won - lost, lost,
+    excludes_zero: excludesZero(boot?.ci95 ?? null),
+    small_sample: perObject.length < SMALL_SAMPLE_OBJECTS,
+    low_evidence: perObject.length < LOW_EVIDENCE_OBJECTS,
+    per_object: perObject,
+  };
+  row.t_excludes_zero = excludesZero(row.t_ci95);
+  // The percentile bootstrap undercovers with few objects (measured on the
+  // synthetic design: 84 % coverage at 5 objects, 92 % at 10, 93 % at 24;
+  // the t interval 94-96 %), so a pair counts as separated only when both
+  // intervals exclude zero, and as unsettled when they disagree.
+  row.verdict = !row.ci95 || !row.t_ci95 ? 'not_evaluated'
+    : row.excludes_zero && row.t_excludes_zero ? (row.ci95[0] > 0 ? 'a_higher' : 'b_higher')
+      : !row.excludes_zero && !row.t_excludes_zero ? 'not_separated' : 'unsettled';
+  row.statement = pairStatement(row);
+  return row;
+}
+
+// The verdict in words. It is about these objects and this design, and says so.
+export function pairStatement(row) {
+  const record = 'won ' + row.won + ', tied ' + row.tied + ', lost ' + row.lost + ' of ' + row.objects + ' object' + (row.objects === 1 ? '' : 's');
+  if (row.verdict === 'not_evaluated') {
+    return row.a + ' vs ' + row.b + ': not evaluated, ' + (row.objects ? 'only ' + row.objects + ' object' : 'no object') + ' run by both' +
+      (row.objects ? ' (' + record + ')' : '') + '.';
+  }
+  const facts = ' (A ahead in ' + shareText(row.share_a_higher, row.samples) + ' resamples; A ' + record + ').';
+  const difference = signedText(row.mean_difference) + ' points per object';
+  const boot = '95% bootstrap interval ' + intervalText(row.ci95), t = 'Student-t interval ' + intervalText(row.t_ci95);
+  let text;
+  if (row.verdict === 'a_higher') text = row.a + ' scored higher than ' + row.b + ': A - B = ' + difference + '; the ' + boot + ' and the ' + t + ' both exclude zero' + facts;
+  else if (row.verdict === 'b_higher') text = row.b + ' scored higher than ' + row.a + ' on the objects both ran: A - B = ' + difference + '; the ' + boot + ' and the ' + t + ' both exclude zero' + facts;
+  else if (row.verdict === 'not_separated') text = 'Not separated: ' + row.a + ' - ' + row.b + ' = ' + difference + '; the ' + boot + ' and the ' + t + ' both include zero' + facts;
+  else {
+    text = 'Unsettled: ' + row.a + ' - ' + row.b + ' = ' + difference + '; the ' + boot + (row.excludes_zero ? ' excludes' : ' includes') + ' zero but the ' + t +
+      (row.t_excludes_zero ? ' excludes' : ' includes') + ' it' + facts;
+  }
+  if (row.small_sample) text += ' Only ' + row.objects + ' objects: at this size the bootstrap interval runs too narrow.';
+  return text;
+}
+
+// --------------------------------------------------------------- variance
+//
+// Where the noise is. Three standard deviations, all on report.score with
+// failures as 0 and excluded attempts left out, as everywhere else:
+//   between attempts  on the same task, pooled over every task of a
+//                     configuration with at least two counted attempts;
+//   between objects   of a configuration's per-object mean scores (what its
+//                     own leaderboard interval resamples);
+//   paired difference of the per-object differences of two configurations
+//                     (what a pairwise interval resamples: pairing removes the
+//                     object effect both share, so this is usually far smaller).
+// From the last, the smallest difference the design resolves. Each SD carries
+// its degrees of freedom and an approximate 95 % range, and is marked when it
+// rests on fewer than LITTLE_DATA_DF degrees of freedom.
+
+// Per task: its object and the counted scores of its attempts.
+function taskScores(attempts) {
   const tasks = new Map();
-  for (const attempt of collected.attempts) {
+  for (const attempt of attempts) {
+    if (!finite(attempt.score)) continue;
+    if (!tasks.has(attempt.task_id)) tasks.set(attempt.task_id, { object: attempt.object, values: [], failures: 0 });
+    const task = tasks.get(attempt.task_id);
+    task.values.push(attempt.score);
+    if (!attempt.valid) task.failures++;
+  }
+  return tasks;
+}
+
+const sdEntry = (sd, df, extra = {}) => ({ sd, df, ci95: sdRange(sd, df), little_data: df < LITTLE_DATA_DF, ...extra });
+
+// Between-attempt noise of one configuration.
+export function attemptNoise(attempts) {
+  const repeated = [...taskScores(attempts).values()].filter(task => task.values.length >= 2);
+  const pooled = pooledSD(repeated.map(task => task.values));
+  return sdEntry(pooled.sd, pooled.df, { tasks: pooled.groups, attempts: pooled.values, failures: repeated.reduce((sum, task) => sum + task.failures, 0),
+    basis: 'pooled over tasks with at least two counted attempts; failures count as 0' });
+}
+
+// sum over the given tasks of 1 / attempts, divided by tasks^2, per object: times an
+// attempt variance, the variance that attempt noise adds to that object's mean.
+function attemptWeights(tasks, objectFilter = () => true) {
+  const weights = new Map();
+  for (const task of tasks) {
+    if (!objectFilter(task.object)) continue;
+    if (!weights.has(task.object)) weights.set(task.object, { sum: 0, tasks: 0 });
+    const entry = weights.get(task.object);
+    entry.sum += 1 / task.attempts; entry.tasks++;
+  }
+  return new Map([...weights].map(([object, { sum, tasks: count }]) => [object, sum / count ** 2]));
+}
+
+function configurationVariance(entry, attempts) {
+  const attempt = attemptNoise(attempts);
+  const objects = [...perObject(attempts, item => item.score).values.values()];
+  const sd = sampleSD(objects);
+  // How much of the spread between object means is only attempt noise.
+  let share = null;
+  if (finite(attempt.sd) && finite(sd) && sd > 0) {
+    const weights = [...attemptWeights([...taskMeans(attempts).values()]).values()];
+    share = attempt.sd ** 2 * mean(weights) / sd ** 2;
+  }
+  return { key: entry.key, attempts_per_task: entry.attempts_per_task, attempt_sd: attempt,
+    object_sd: sdEntry(sd, objects.length - 1, { objects: objects.length, attempt_share: share,
+      basis: 'standard deviation of the per-object mean scores (attempts within a task, tasks within the object)' }) };
+}
+
+function pairVariance(pair, attemptsA, attemptsB, noiseA, noiseB, plannedObjects) {
+  const differences = pair.per_object.map(row => row.difference), n = differences.length;
+  const sd = sampleSD(differences), range = sdRange(sd, n - 1);
+  const current = detectableDifference(sd, n);
+  const projectAt = objects => {
+    const at = detectableDifference(sd, objects);
+    return at ? { objects, resolution: at.resolution, detectable: at.detectable,
+      detectable_range: range ? [detectableDifference(range[0], objects).detectable, detectableDifference(range[1], objects).detectable] : null } : null;
+  };
+  // Attempt noise inside each per-object difference: sigma_A^2 * w_A + sigma_B^2 * w_B,
+  // with w the per-object attempt weights over the paired tasks.
+  const paired = new Set(pair.per_object.map(row => row.object));
+  const tasksA = taskMeans(attemptsA), tasksB = taskMeans(attemptsB);
+  const common = [...tasksA.keys()].filter(task => tasksB.has(task) && paired.has(tasksA.get(task).object));
+  const weightsA = attemptWeights(common.map(task => tasksA.get(task))), weightsB = attemptWeights(common.map(task => tasksB.get(task)));
+  const part = (noise, weights) => finite(noise.sd) ? noise.sd ** 2 * mean([...weights.values()]) : null;
+  const partA = part(noiseA, weightsA), partB = part(noiseB, weightsB);
+  let attemptShare = null, attemptShareAtLeast = null, floor = null;
+  if (finite(sd) && sd > 0) {
+    if (partA !== null && partB !== null) {
+      attemptShare = (partA + partB) / sd ** 2;
+      // With attempt noise averaged away entirely (many attempts per task),
+      // what would remain of the per-object difference SD.
+      const structural = Math.sqrt(Math.max(0, sd ** 2 - partA - partB));
+      floor = { sd: structural, at_objects: detectableDifference(structural, n)?.detectable ?? null,
+        at_planned: detectableDifference(structural, Math.max(n, plannedObjects))?.detectable ?? null };
+    } else if (partA !== null || partB !== null) attemptShareAtLeast = (partA ?? partB) / sd ** 2;
+  }
+  const row = {
+    a: pair.a, b: pair.b, objects: n,
+    difference_sd: sdEntry(sd, n - 1, { basis: 'standard deviation of the per-object differences A - B on the tasks both ran' }),
+    resolution: current?.resolution ?? null, detectable: current?.detectable ?? null,
+    detectable_range: current && range ? [detectableDifference(range[0], n).detectable, detectableDifference(range[1], n).detectable] : null,
+    projected: plannedObjects > n ? projectAt(plannedObjects) : null,
+    attempt_share: attemptShare, attempt_share_at_least: attemptShareAtLeast, without_attempt_noise: floor,
+    attempts_estimated: { a: finite(noiseA.sd), b: finite(noiseB.sd) },
+  };
+  row.statement = varianceStatement(row);
+  return row;
+}
+
+const fixed = (value, digits = 1) => finite(value) ? value.toFixed(digits) : 'n/a';
+
+// An attempt-noise share as text. Estimated from two noisy variances, it can
+// exceed 100 %: attempt noise alone would then predict more spread than was
+// observed, which is reported as "all", with the estimate, never as a cap.
+export function attemptShareText(share, { atLeast = false } = {}) {
+  if (!finite(share)) return null;
+  const percent = Math.round(100 * share) + '%';
+  if (share > 1) return 'all (' + (atLeast ? 'lower bound ' : '') + 'estimate ' + percent + ')';
+  return (atLeast ? '≥ ' : '') + percent;
+}
+
+export function varianceStatement(row) {
+  if (!finite(row.difference_sd.sd)) return row.a + ' vs ' + row.b + ': fewer than two paired objects, no spread can be estimated.';
+  const sd = row.difference_sd, range = sd.ci95 ? ' (95% range ' + fixed(sd.ci95[0]) + ' to ' + fixed(sd.ci95[1]) + ')' : '';
+  let text = row.a + ' vs ' + row.b + ': the per-object difference varies with SD ' + fixed(sd.sd) + ' over ' + row.objects + ' objects' + range +
+    (sd.little_data ? ', which rests on little data' : '') + '. With these objects an observed mean difference must exceed ' + fixed(row.resolution) +
+    ' points for its t interval to exclude zero; a true difference of ' + fixed(row.detectable) + ' would be found about 80% of the time' +
+    (row.detectable_range ? ' (' + fixed(row.detectable_range[0]) + ' to ' + fixed(row.detectable_range[1]) + ' given the uncertainty of the SD)' : '') + '.';
+  if (row.projected) {
+    text += ' At ' + row.projected.objects + ' objects with the same attempts and tasks per object: ' + fixed(row.projected.resolution) + ' and ' +
+      fixed(row.projected.detectable) + (row.projected.detectable_range ? ' (' + fixed(row.projected.detectable_range[0]) + ' to ' + fixed(row.projected.detectable_range[1]) + ')' : '') + '.';
+  }
+  if (finite(row.attempt_share) && row.attempt_share >= 1) {
+    text += ' Attempt noise alone accounts for all of that variance (its estimate is ' + Math.round(100 * row.attempt_share) + '% of it): beyond attempt noise, ' +
+      'no object-to-object variation in the difference is measurable here, and more attempts per task would narrow the comparison.';
+  } else if (finite(row.attempt_share)) {
+    text += ' Attempt noise makes up about ' + Math.round(100 * row.attempt_share) + '% of that variance' +
+      (row.without_attempt_noise ? '; with it averaged away the detectable difference would be ' + fixed(row.without_attempt_noise.at_objects) +
+        (row.projected ? ' (' + fixed(row.without_attempt_noise.at_planned) + ' at ' + row.projected.objects + ' objects)' : '') : '') + '.';
+  } else if (finite(row.attempt_share_at_least) && row.attempt_share_at_least >= 1) {
+    text += ' The attempt noise of the configuration that ran tasks more than once already accounts for all of that variance (estimate ' +
+      Math.round(100 * row.attempt_share_at_least) + '%); the other ran each task once, so its share cannot be estimated.';
+  } else if (finite(row.attempt_share_at_least)) {
+    text += ' Attempt noise makes up at least ' + Math.round(100 * row.attempt_share_at_least) + '% of that variance (only one of the two ran a task more than once).';
+  } else text += ' How much of it is attempt noise cannot be estimated: neither configuration ran a task more than once.';
+  return text;
+}
+
+function setVariance(ranked, cells, pairs, plannedObjects) {
+  const configurations = ranked.map(entry => configurationVariance(entry, cells.get(entry.key)));
+  const noise = new Map(configurations.map(item => [item.key, item.attempt_sd]));
+  const pairRows = pairs.map(pair => pairVariance(pair, cells.get(pair.a), cells.get(pair.b), noise.get(pair.a), noise.get(pair.b), plannedObjects));
+  // One sentence on where the noise is, from the medians across configurations and pairs.
+  const all = pooledSD(ranked.flatMap(entry => [...taskScores(cells.get(entry.key)).values()].map(task => task.values)));
+  const objectSD = median(configurations.map(item => item.object_sd.sd)), pairSD = median(pairRows.map(row => row.difference_sd.sd));
+  const parts = [];
+  if (finite(objectSD)) parts.push('scores of one configuration spread between objects with SD ' + fixed(objectSD) + ' (median over configurations)');
+  if (finite(all.sd)) parts.push('between attempts on the same task with SD ' + fixed(all.sd) + ' (pooled, ' + all.df + ' degrees of freedom' + (all.df < LITTLE_DATA_DF ? ', little data' : '') + ')');
+  if (finite(pairSD)) parts.push('the paired per-object difference between two configurations with SD ' + fixed(pairSD) + ' (median over pairs)');
+  if (parts.length > 1) parts[parts.length - 1] = 'and ' + parts[parts.length - 1];
+  const repeats = finite(all.sd) ? '' : ' No task was run more than once, so the noise between attempts cannot be separated from the rest: it is inside every number above.';
+  return {
+    planned_objects: plannedObjects, little_data_df: LITTLE_DATA_DF,
+    attempt_sd_pooled: sdEntry(all.sd, all.df, { tasks: all.groups, basis: 'all configurations of the set pooled' }),
+    configurations, pairs: pairRows,
+    summary: parts.length ? 'In this set, ' + parts.join(', ') + '.' + repeats : null,
+  };
+}
+
+// ------------------------------------------------------------- provenance
+
+// Fields that must agree between the batches merged into one configuration, and
+// between configurations compared within a set. A field nobody recorded is no
+// disagreement (it shows as not recorded on the page); a field recorded for
+// some batches and missing for others is one, since it usually means the
+// batches came from different versions of the runner or scorer.
+const CONFIGURATION_FIELDS = [
+  ['cli_version', 'CLI version'], ['cli_sha256', 'CLI binary'], ['prompt_version', 'prompt version'], ['prompt_sha256', 'prompt hash'],
+  ['runner_sha256', 'runner source'], ['tools_sha256', 'contestant tool kit'], ['runtime_sha256', 'three.js runtime'], ['protocol', 'protocol'],
+  ['scorer_source', 'scorer source frozen in the manifest'],
+];
+const SET_FIELDS = [['tools_sha256', 'contestant tool kit'], ['protocol', 'protocol'], ['prompt_version', 'prompt version']];
+
+// 'scorer' is the stamp each report carries (what actually computed the
+// numbers, after any rescore); 'scorer_source' the runner's hash in the
+// manifest. They are different hash schemes over the same code, so each is
+// compared only with itself.
+function batchValue(batch, field) {
+  if (field === 'scorer') {
+    const stamps = batch.scorer_sha256 ?? [];
+    if (!stamps.length) return null;
+    return stamps.join(',') + (batch.reports_unstamped ? ',' + batch.reports_unstamped + ' reports unstamped' : '');
+  }
+  if (field === 'scorer_source') return batch.manifest?.scorer_sha256 ?? null;
+  if (field === 'report_protocol') return batch.report_protocols?.length ? batch.report_protocols.join(',') : null;
+  const value = batch.manifest?.[field];
+  return Array.isArray(value) ? (value.length ? value.join(',') : null) : value ?? null;
+}
+
+function disagreements(batches, fields) {
+  const found = [];
+  for (const [field, label] of fields) {
+    const values = new Map(batches.map(batch => [batch.id, batchValue(batch, field)]));
+    if (![...values.values()].some(value => value !== null)) continue;
+    if (new Set(values.values()).size > 1) {
+      found.push({ field, label, values: Object.fromEntries([...values].map(([batch, value]) => [batch, value ?? 'not recorded'])) });
+    }
+  }
+  return found;
+}
+
+// --------------------------------------------------------------- leaderboard
+
+// What the report knows about a set beyond its id: a note for known sets
+// (dev), the set file and build record under the data root, and for tasks
+// without a recorded set, which built sets list them.
+function describeSet(id, taskIds, setFiles) {
+  const file = setFiles?.get(id) ?? null;
+  const listedIn = [...(setFiles?.values() ?? [])].filter(item => item.built_tasks.some(task => taskIds.has(task))).map(item => item.id).sort();
+  const facts = file ? { file: file.file, private: file.private, created_at: file.created_at, built_at: file.built_at, objects_in_file: file.objects } : null;
+  let kind, text;
+  if (id === UNNAMED_SET) {
+    kind = 'unnamed';
+    text = 'The truth.json of these tasks records no set, so the report cannot tell development tasks from test tasks.' +
+      (listedIn.length ? ' Their tasks are listed in the build record of set' + (listedIn.length > 1 ? 's ' : ' ') + listedIn.map(name => '"' + name + '"').join(', ') + '.' +
+        (listedIn.some(name => SET_NOTES[name]) ? ' ' + listedIn.filter(name => SET_NOTES[name]).map(name => SET_NOTES[name]).join(' ') : '') : '');
+  } else if (id === UNKNOWN_SET) {
+    kind = 'unknown';
+    text = 'These tasks have no readable truth.json, so their set is unknown; they are kept apart from every named set.';
+  } else if (SET_NOTES[id]) {
+    kind = 'development';
+    text = SET_NOTES[id];
+  } else {
+    kind = 'named';
+    text = 'Named set "' + id + '"' + (file?.private === true ? ', marked private in its set file (seeds not published)' : '') + '. ' +
+      'If it was built after the scorer was frozen and never used to tune it, its numbers are test results; the report cannot verify either.';
+  }
+  // Development numbers are not test results: the dev set itself, or tasks
+  // with no recorded set that the dev build record lists.
+  const development = kind === 'development' || (kind === 'unnamed' && listedIn.some(name => SET_NOTES[name]));
+  return { kind, development, text, listed_in: listedIn, ...(facts ? { set_file: facts } : {}) };
+}
+
+export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = new Date(), excludeStatuses = DEFAULT_EXCLUDED_STATUSES, plannedObjects = PLANNED_OBJECTS } = {}) {
+  const problems = [...(collected.problems ?? [])];
+  const batchById = new Map((collected.batches ?? []).map(batch => [batch.id, batch]));
+  // Attempts assembled by hand (tests, calibration) may carry no set or archetype.
+  const all = collected.attempts.map(attempt => attempt.set && attempt.archetype ? attempt
+    : { ...attempt, set: attempt.set || UNNAMED_SET, archetype: attempt.archetype || UNKNOWN_ARCHETYPE });
+  const setIds = [...new Set(all.map(attempt => attempt.set))]
+    .sort((p, q) => (p === UNKNOWN_SET) - (q === UNKNOWN_SET) || (p === UNNAMED_SET) - (q === UNNAMED_SET) || p.localeCompare(q));
+  const entries = [], sets = [];
+  for (const set of setIds) {
+    const inSet = all.filter(attempt => attempt.set === set);
+    const counted = inSet.filter(item => !item.excluded);
+    const cells = new Map();
+    for (const attempt of counted) {
+      const key = cellKey(attempt);
+      if (!cells.has(key)) cells.set(key, []);
+      cells.get(key).push(attempt);
+    }
+    // Breakdowns use what the set contains, so every configuration of the set
+    // has the same columns (a configuration that ran none shows n/a).
+    const deltaPairs = variantPairs([...new Set(counted.map(attempt => attempt.variant))]);
+    const archetypeIds = [...new Set(counted.map(attempt => attempt.archetype))].sort((p, q) => (p === UNKNOWN_ARCHETYPE) - (q === UNKNOWN_ARCHETYPE) || p.localeCompare(q));
+    const ranked = [...cells].map(([key, attempts]) => cellEntry(key, set, attempts, seed, { deltaPairs, archetypes: archetypeIds }));
+    ranked.sort((a, b) => (b.score.mean ?? -Infinity) - (a.score.mean ?? -Infinity) || a.key.localeCompare(b.key));
+    ranked.forEach((entry, index) => { entry.rank = index + 1; });
+    for (const entry of ranked) {
+      entry.provenance_conflicts = disagreements(entry.batches.map(id => batchById.get(id)).filter(Boolean),
+        [...CONFIGURATION_FIELDS, ['scorer', 'scorer stamped in the reports'], ['report_protocol', 'report protocol']]);
+      for (const conflict of entry.provenance_conflicts) {
+        problems.push('set ' + set + ': ' + entry.key + ' merges batches that differ in ' + conflict.label + ': ' +
+          Object.entries(conflict.values).map(([batch, value]) => batch + ' = ' + value).join('; '));
+      }
+    }
+    // Configurations present in the set whose every attempt was excluded: no
+    // rank and no score, but listed so they do not silently vanish.
+    const unranked = [...new Set(inSet.filter(attempt => attempt.excluded).map(cellKey))].filter(key => !cells.has(key)).sort()
+      .map(key => ({ key, excluded_attempts: inSet.filter(attempt => cellKey(attempt) === key).length }));
+    const pairs = [];
+    for (let i = 0; i < ranked.length; i++) {
+      for (let j = i + 1; j < ranked.length; j++) {
+        const pairSeed = seed + '/pairwise/' + (set === UNNAMED_SET ? '' : set + '/') + ranked[i].key + '|' + ranked[j].key;
+        pairs.push(comparePair({ key: ranked[i].key, attempts: cells.get(ranked[i].key) }, { key: ranked[j].key, attempts: cells.get(ranked[j].key) }, { seed: pairSeed }));
+      }
+    }
+    // Comparisons within a set are only fair if every configuration saw the
+    // same tool kit and protocol and was scored by the same scorer.
+    const setBatches = [...new Set(inSet.map(attempt => attempt.batch))].map(id => batchById.get(id)).filter(Boolean);
+    const warnings = disagreements(setBatches, [...SET_FIELDS, ['scorer', 'scorer stamped in the reports'], ['report_protocol', 'report protocol']])
+      .map(conflict => 'batches compared in this set differ in ' + conflict.label + ': ' +
+        Object.entries(conflict.values).map(([batch, value]) => batch + ' = ' + value).join('; '));
+    for (const warning of warnings) problems.push('set ' + set + ': ' + warning);
+    const objectsByArchetype = archetypeIds.map(id => ({ id, objects: new Set(counted.filter(attempt => attempt.archetype === id).map(attempt => attempt.object)).size }));
+    sets.push({
+      id: set, named: set !== UNNAMED_SET && set !== UNKNOWN_SET,
+      description: describeSet(set, new Set(inSet.map(attempt => attempt.task_id)), collected.setFiles),
+      configurations: ranked.map(entry => entry.key),
+      objects: new Set(inSet.map(attempt => attempt.object)).size,
+      variants: VARIANT_ORDER.filter(variant => counted.some(attempt => attempt.variant === variant)),
+      variant_pairs: deltaPairs.map(([high, low]) => high + '-' + low),
+      archetypes: objectsByArchetype,
+      tasks: new Set(inSet.map(attempt => attempt.task_id)).size,
+      attempts: inSet.length, counted: inSet.filter(attempt => !attempt.excluded).length,
+      batches: setBatches.map(batch => batch.id).sort(),
+      first_started_at: inSet.map(attempt => attempt.started_at).filter(Boolean).sort()[0] ?? null,
+      last_finished_at: inSet.map(attempt => attempt.finished_at).filter(Boolean).sort().at(-1) ?? null,
+      unranked, warnings,
+      tolerances: toleranceSummary(inSet.filter(attempt => !attempt.excluded)),
+      pairwise: {
+        pairs,
+        comparisons: pairs.length,
+        multiple_comparisons: pairs.length > 1
+          ? pairs.length + ' pairs, each with its own 95% interval and no correction for multiple comparisons: if no configuration truly differed, ' +
+            'the chance that at least one interval would still exclude zero is about ' + Math.round(100 * (1 - 0.95 ** pairs.length)) +
+            '% (1 - 0.95^' + pairs.length + ', for independent pairs).'
+          : null,
+      },
+      variance: setVariance(ranked, cells, pairs, plannedObjects),
+    });
+    entries.push(...ranked);
+  }
+
+  const tasks = new Map();
+  for (const attempt of all) {
     if (!tasks.has(attempt.task_id)) {
-      tasks.set(attempt.task_id, { task_id: attempt.task_id, object: attempt.object, variant: attempt.variant, scale_evidence: attempt.scale_evidence, cells: {} });
+      tasks.set(attempt.task_id, { task_id: attempt.task_id, set: attempt.set, object: attempt.object, archetype: attempt.archetype, variant: attempt.variant,
+        scale_evidence: attempt.scale_evidence, cells: {} });
     }
     const task = tasks.get(attempt.task_id), key = cellKey(attempt);
     task.cells[key] ??= { attempts: [], mean: null };
@@ -156,25 +649,44 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
     }
   }
   const variantRank = variant => VARIANT_ORDER.indexOf(variant);
+  const tolerances = toleranceSummary(all.filter(attempt => !attempt.excluded));
   return {
     schema: LEADERBOARD_SCHEMA,
     protocol: PROTOCOL,
     generated_at: now.toISOString(),
-    batches: collected.batches.map(batch => ({ id: batch.id, attempts: batch.attempts, summary: batch.summary })),
+    batches: collected.batches ?? [],
     method: {
-      score: 'mean of report.score = (shape_score + detail.score) / 2, where shape_score = 100 x mean of F@1%, F@2%, F@5%; attempts without a valid report count as 0',
-      averaging: 'attempts are averaged within a task, tasks within an object, then objects are averaged; every object weighs the same',
+      score: 'report.score as computed by the scorer: (shape_score + detail.score) / 2 (DESIGN.md section 9); attempts without a valid report count as 0',
+      tolerances: 'tolerance rows reported: ' + (tolerances.fractions.length ? tolerances.fractions.map(fraction => fraction * 100 + '%').join(', ') : 'none') +
+        '; rows named as entering shape_score: ' + (tolerances.shape_score_fractions ? tolerances.shape_score_fractions.map(fraction => fraction * 100 + '%').join(', ') || 'none' : 'not stated by the reports'),
+      averaging: 'attempts are averaged within a task, tasks within an object, then objects are averaged; every object weighs the same however many attempts it has',
       ci95: 'percentile bootstrap over objects (' + BOOTSTRAP_SAMPLES + ' resamples, seeded with "' + seed + '"); null with fewer than 2 objects',
+      pairwise: 'per pair, on the tasks both configurations ran: per-object mean score of A minus that of B; 95% percentile bootstrap over objects (' +
+        PAIRWISE_SAMPLES + ' resamples, seeded) and a Student-t interval of the per-object differences; separated only when both exclude zero, unsettled when they disagree; ' +
+        'share of resamples with A ahead; objects won / tied / lost. Intervals are not corrected for multiple comparisons.',
+      sets: 'tasks are grouped by the optional `set` of their truth.json ("' + UNNAMED_SET + '" when absent, "' + UNKNOWN_SET +
+        '" when truth.json is missing); results from different sets are never pooled',
       low_evidence: 'flagged when fewer than ' + LOW_EVIDENCE_OBJECTS + ' objects back the number',
       ladder: 'per object: mean score on the higher rung minus mean score on the lower rung; only objects with both rungs',
+      evidence_deltas: 'every pair of variants present in the set, later minus earlier in ' + VARIANT_ORDER.join(' ') +
+        ': per object, mean score on one minus mean score on the other; only objects with both; bootstrap and Student-t intervals over objects',
+      archetypes: 'per archetype (objects/<id>/model.json): mean over that archetype\'s objects, same averaging as the score',
+      variance: 'between attempts: pooled SD over tasks with >= 2 counted attempts; between objects: SD of per-object means; paired: SD of per-object differences, ' +
+        'from which the half-width of the 95% t interval (resolution) and the true difference detected with 80% power by a two-sided 95% t test, ' +
+        'also projected to ' + plannedObjects + ' objects; SD ranges are 95% chi-square intervals (normal noise assumed); fewer than ' + LITTLE_DATA_DF +
+        ' degrees of freedom is marked as little data',
       conflict: 'c1 tasks: share of contested probes whose measurement is closer to the as-photographed state',
       excluded_statuses: excludeStatuses,
     },
+    tolerances,
+    sets,
     entries,
-    tasks: [...tasks.values()].sort((a, b) => a.object.localeCompare(b.object) || variantRank(a.variant) - variantRank(b.variant) || a.task_id.localeCompare(b.task_id)),
-    excluded: collected.attempts.filter(attempt => attempt.excluded)
-      .map(attempt => ({ batch: attempt.batch, task_id: attempt.task_id, attempt: attempt.attempt, cell: cellKey(attempt), status: attempt.status })),
-    problems: collected.problems,
+    tasks: [...tasks.values()].sort((a, b) => setIds.indexOf(a.set) - setIds.indexOf(b.set) || a.object.localeCompare(b.object) ||
+      variantRank(a.variant) - variantRank(b.variant) || a.task_id.localeCompare(b.task_id)),
+    excluded: all.filter(attempt => attempt.excluded)
+      .map(attempt => ({ batch: attempt.batch, set: attempt.set, task_id: attempt.task_id, attempt: attempt.attempt, cell: cellKey(attempt), status: attempt.status,
+        reason: attempt.status_reason ?? null })),
+    problems: [...new Set(problems)],
   };
 }
 
@@ -182,10 +694,12 @@ export const reportName = batches => (batches?.length ? batches.join('+') : 'all
 
 // -> leaderboard object. Also written as JSON to `outFile`, by default
 // <data>/reports/<batches>/leaderboard.json; outFile: null writes nothing.
-export async function aggregate({ dataRoot, batches, outFile, seed, now, excludeStatuses = DEFAULT_EXCLUDED_STATUSES } = {}) {
+export async function aggregate({ dataRoot, batches, outFile, seed, now, excludeStatuses = DEFAULT_EXCLUDED_STATUSES, plannedObjects } = {}) {
   const collected = await collectRuns({ dataRoot, batches, excludeStatuses });
-  const board = buildLeaderboard(collected, { seed, now, excludeStatuses });
+  const board = buildLeaderboard(collected, { seed, now, excludeStatuses, plannedObjects });
   const target = outFile === undefined ? join(layout(resolve(dataRoot)).reports, reportName(batches), 'leaderboard.json') : outFile;
   if (target) await writeJSON(target, board);
   return board;
 }
+
+export { scorerIdentity };

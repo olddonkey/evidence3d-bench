@@ -1,6 +1,7 @@
 import { scoreSoup } from './index.mjs';
 import { mutations } from './mutations.mjs';
 import { FACADE_NORMALS } from './detail.mjs';
+import { SHAPE_FRACTIONS } from './metrics.mjs';
 
 // Runs every mutation against the context's own ground truth and checks it
 // against what DESIGN.md section 10 says the scorer must do with it. Rows are
@@ -9,7 +10,10 @@ export const SCALE_STEPS = [1.05, 1.1, 1.2];
 
 function summary(report) {
   const at2 = report.global?.thresholds?.find(row => row.fraction === 0.02);
+  const shapeRows = (report.global?.thresholds ?? []).filter(row => row.in_shape_score);
   return {
+    shape_rows: Object.fromEntries(shapeRows.map(row => [row.fraction, row.f])), shape_min_f: shapeRows.length ? Math.min(...shapeRows.map(row => row.f)) : null,
+    shape_stage: report.alignment?.shape_pose?.stage ?? null,
     valid: report.valid, error: report.error, score: report.score, shape: report.shape_score ?? null, detail: report.detail?.score ?? null,
     precision: at2?.precision ?? null, recall: at2?.recall ?? null, strict_f: report.strict?.f ?? null,
     shape_f: report.shape?.f ?? null, shape_scale: report.shape?.scale ?? null, scale: report.alignment?.scale ?? null,
@@ -30,35 +34,40 @@ export function calibrate(context) {
   const identity = run(mutations.identity());
   const delta = row => row.score - identity.score, deltaShape = row => row.shape - identity.shape;
   const add = (id, row, expectation, ok) => { rows.push({ id, expectation, ok: Boolean(ok && row.valid), ...row }); return row; };
-  add('identity', identity, 'the truth scores >= 98', identity.score >= 98);
+  // The truth and every benign change must agree with the truth at every
+  // shape tolerance (F >= 0.995): anything less is the measurement's own noise.
+  const clean = row => row.shape_min_f !== null && row.shape_min_f >= 0.995;
+  const cleanText = 'F >= 0.995 at ' + SHAPE_FRACTIONS.map(fraction => fraction * 100 + ' %').join(', ');
+  add('identity', identity, 'the truth scores >= 98, ' + cleanText, identity.score >= 98 && clean(identity));
 
   for (const [mutation, label] of [[mutations.retessellate(2), 'retessellate(2)'], [mutations.rename(), 'rename'], [mutations.recolor(), 'recolor']]) {
     const row = run(mutation);
     const colourOk = label !== 'recolor' || (row.delta_e ?? 0) > (identity.delta_e ?? 0) + 5;
-    add(label, row, 'geometry score unchanged (|delta| <= 0.5)' + (label === 'recolor' ? ', colour difference rises' : ''), Math.abs(delta(row)) <= 0.5 && colourOk);
+    add(label, row, 'geometry score unchanged (|delta| <= 0.5), ' + cleanText + (label === 'recolor' ? ', colour difference rises' : ''), Math.abs(delta(row)) <= 0.5 && clean(row) && colourOk);
   }
 
   const offset = [0.21, 0.03, -0.14].map(value => value * context.diagonal);
   const shifted = run(mutations.shift(offset));
-  add('shift', shifted, 'score unchanged (|delta| <= 1), offset reported in frame_error',
-    Math.abs(delta(shifted)) <= 1 && Math.abs(shifted.frame_error.offset_m - Math.hypot(...offset)) <= 0.01 * context.diagonal);
+  add('shift', shifted, 'score unchanged (|delta| <= 1), ' + cleanText + ', offset reported in frame_error',
+    Math.abs(delta(shifted)) <= 1 && clean(shifted) && Math.abs(shifted.frame_error.offset_m - Math.hypot(...offset)) <= 0.01 * context.diagonal);
   for (const degrees of [37, 180, -150]) {
     const row = run(mutations.yaw(degrees));
     const reported = row.frame_error?.yaw_deg ?? NaN, error = Math.abs(((reported + degrees) % 360 + 540) % 360 - 180);
-    add('yaw(' + degrees + ')', row, 'score unchanged (|delta| <= 1), yaw reported in frame_error', Math.abs(delta(row)) <= 1 && error <= 1);
+    add('yaw(' + degrees + ')', row, 'score unchanged (|delta| <= 1), ' + cleanText + ', yaw reported in frame_error', Math.abs(delta(row)) <= 1 && clean(row) && error <= 1);
   }
 
   let previous = identity;
   for (const factor of SCALE_STEPS) {
     const row = run(mutations.scale(factor));
     if (context.scaleEvidence === 'metric') {
-      // DESIGN.md asks for a monotonic fall; how far 5 % falls depends on how
-      // much of the object lies further than tau from its centre (see README).
-      add('scale(' + factor + ')', row, 'metric task: score falls with every step (' + previous.score + ' before), shape names the scale', row.score < previous.score &&
-        Math.abs(Math.log(row.shape_scale * factor)) <= 0.02);
+      // DESIGN.md asks for a monotonic fall of the score; the shape score must
+      // fall too (a pose fitted at 2 % alone let 5 % too large score lower
+      // than 10 %, see the fit's fine stage in index.mjs).
+      add('scale(' + factor + ')', row, 'metric task: score and shape fall with every step (' + previous.score + ', ' + previous.shape + ' before), shape names the scale',
+        row.score < previous.score && row.shape < previous.shape && Math.abs(Math.log(row.shape_scale * factor)) <= 0.02);
     } else {
-      add('scale(' + factor + ')', row, 'scale-free task: score unchanged (|delta| <= 1), scale fitted to 1/k',
-        Math.abs(delta(row)) <= 1 && Math.abs(Math.log(row.scale * factor)) <= 0.02);
+      add('scale(' + factor + ')', row, 'scale-free task: score unchanged (|delta| <= 1), ' + cleanText + ', scale fitted to 1/k',
+        Math.abs(delta(row)) <= 1 && clean(row) && Math.abs(Math.log(row.scale * factor)) <= 0.02);
     }
     previous = row;
   }
@@ -83,7 +92,9 @@ export function calibrate(context) {
     if (!normal || !group.scored) continue;
     const axis = normal.findIndex(value => value !== 0), relief = group.box.max[axis] - group.box.min[axis];
     const row = run(mutations.flattenGroup(group.id));
-    const small = relief <= 0.02 * context.diagonal;
+    // Relief within the coarsest shape tolerance is a small detail: shape must
+    // barely notice it being flattened (deeper relief is massing, and counts).
+    const small = relief <= Math.max(...SHAPE_FRACTIONS) * context.diagonal;
     const groupDrop = (identity.groups[group.id] ?? 0) - (row.groups[group.id] ?? 0);
     add('flattenGroup(' + group.id + ')', row, (small ? 'small relief (' + relief.toFixed(2) + ' m): shape score within 2, ' : 'relief ' + relief.toFixed(2) + ' m: ') + 'group F down >= 0.1',
       groupDrop >= 0.1 && (!small || Math.abs(row.shape - identity.shape) <= 2));

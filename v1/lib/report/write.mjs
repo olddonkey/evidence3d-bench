@@ -1,26 +1,55 @@
-import { readFile, writeFile, mkdir, copyFile, stat } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, copyFile, stat, rm } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import { join, resolve, dirname, basename, relative } from 'node:path';
-import { writeJSON, contained } from '../../../lib/io.mjs';
-import { layout, VARIANTS } from '../contract.mjs';
+import { writeJSON, contained, sha256 } from '../../../lib/io.mjs';
+import { layout } from '../contract.mjs';
 import { encodePNG } from '../png.mjs';
-import { soupFromModel, soupFromGLB, transformSoup } from '../soup.mjs';
+import { soupFromModel, soupFromGLB, transformSoup, transformPoint } from '../soup.mjs';
 import { validateModel } from '../model.mjs';
 import { shadeSoup, standardViews, unionBounds } from '../render/shade.mjs';
 import { collectRuns, DEFAULT_EXCLUDED_STATUSES } from './collect.mjs';
-import { buildLeaderboard, cellKey, reportName, conflictShare, VARIANT_ORDER, LADDER } from './aggregate.mjs';
-import { esc, num, percent, statCell, page, STYLE, NOT_EVALUATED } from './html.mjs';
+import { buildLeaderboard, cellKey, reportName } from './aggregate.mjs';
+import { esc, slug, STYLE } from './html.mjs';
+import { indexPage } from './index-page.mjs';
+import { taskPage, candidateLabel, attemptLabel } from './task-page.mjs';
+import { summaryMarkdown } from './markdown.mjs';
 
-// Static results site: index.html (leaderboard + task index), one page per
-// task under tasks/, renders and copied evidence under assets/, and the
+// Static results site: index.html (per set: leaderboard, pairwise, variance,
+// breakdowns, task index), summary.md (the same in Markdown), one page per task
+// under tasks/, renders and copied evidence under assets/, and the full
 // leaderboard as JSON. Opens from disk; no server, no external assets.
+//
+// Scale. Work is bounded per attempt: on a task page only each configuration's
+// best, median and worst counted attempt (REPRESENTATIVES) is parsed, rendered
+// and has its error maps copied; every other attempt costs one table row from
+// the report already in memory. Objects are processed one at a time: the truth
+// is loaded and rendered once per object (all its tasks share one frame), and
+// candidates are parsed, rendered and released one by one, so memory holds one
+// candidate soup at a time. Evidence files are stored once by content hash.
 export const REPORT_VIEWS = ['iso', 'front', 'top', 'iso-rear'];
+export const REPRESENTATIVES = ['best', 'median', 'worst'];
 
 const isNumber = value => typeof value === 'number' && Number.isFinite(value);
-const slug = text => String(text).replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 80);
-const attemptLabel = attempt => cellKey(attempt) + ' · ' + attempt.batch + ' · a' + attempt.attempt;
+const HASH = /^[a-f0-9]{64}$/;
 // The attempt directory name is unique within a batch and task; the attempt
 // number inside result.json is only what the runner reported.
 const attemptSlug = attempt => slug(attempt.batch) + '--' + slug(attempt.slot ?? 'a' + attempt.attempt);
+const slotOrder = attempt => Number(String(attempt.slot ?? '').replace(/^a/, '')) || attempt.attempt || 0;
+
+// A drawn candidate's soup. When result.json recorded the scored artifact's
+// hash, the file must still match it (collect checks only that it is a plain
+// file inside the attempt; the read and hash are paid here, for drawn attempts only).
+// three's GLTFLoader warns once per accessor without min/max, which the
+// kernel's neutral GLB leaves out; hundreds of such lines would bury the CLI's
+// output. Only that message is dropped, and only while a candidate is parsed.
+export class HashMismatch extends Error {}
+async function parseCandidate(attempt) {
+  const bytes = await readFile(attempt.model_path);
+  if (attempt.model_sha256 && sha256(bytes) !== attempt.model_sha256) throw new HashMismatch(attempt.model_path + ' does not match the artifact hash in result.json; not drawn');
+  const warn = console.warn;
+  console.warn = (...args) => { if (!(typeof args[0] === 'string' && args[0].startsWith('THREE.GLTFLoader: Missing min/max'))) warn(...args); };
+  try { return await soupFromGLB(bytes); } finally { console.warn = warn; }
+}
 
 async function readJSON(path) {
   try { return JSON.parse(await readFile(path, 'utf8')); } catch { return null; }
@@ -28,388 +57,282 @@ async function readJSON(path) {
 async function exists(path) {
   try { await stat(path); return true; } catch { return false; }
 }
+// Copy-on-write clone where the file system supports it (APFS, btrfs), else a
+// plain copy: error maps and photographs cost no disk on the same volume, and
+// the report keeps its own bytes if the run directory is rescored later.
+const cloneFile = (source, target) => copyFile(source, target, constants.COPYFILE_FICLONE);
 
-// Frames every model of a task with one set of cameras. A candidate that is far
-// larger than the truth (a unit mistake, a stray triangle) would shrink the
-// truth to a dot, so then the frame is the truth's box grown by half and the
-// page says that the candidate is clipped.
-function frameFor(truthBounds, candidateBounds) {
-  const diagonal = box => Math.hypot(...box.max.map((value, i) => value - box.min[i]));
-  if (!truthBounds) return { bounds: candidateBounds.length ? unionBounds(...candidateBounds) : null, clipped: false };
-  const union = unionBounds(truthBounds, ...candidateBounds);
-  if (diagonal(union) <= 2 * diagonal(truthBounds)) return { bounds: union, clipped: false };
-  const centre = truthBounds.min.map((value, i) => (value + truthBounds.max[i]) / 2);
-  const half = truthBounds.max.map((value, i) => (value - truthBounds.min[i]) * 0.75);
-  return { bounds: { min: centre.map((c, i) => c - half[i]), max: centre.map((c, i) => c + half[i]) }, clipped: true };
-}
-
-async function writeShaded(soup, camera, file) {
-  const image = shadeSoup(soup, camera, { supersample: 2 });
-  await writeFile(file, encodePNG(image.width, image.height, image.pixels, 3));
-  return image.covered;
-}
-
-// -------------------------------------------------------------------- index
-
-// Two tables over the same rows: the scores, then evidence use and cost.
-function leaderboardTables(board) {
-  const variants = VARIANT_ORDER.filter(variant => board.entries.some(entry => entry.variants[variant]));
-  // A ladder column appears once some configuration ran both rungs on one object.
-  const ladder = LADDER.filter(([high, low]) => board.entries.some(entry => entry.ladder[high + '-' + low].pairs > 0));
-  const identity = (entry, index) => '<td class="num">' + (index + 1) + '</td><td>' + esc(entry.system) + '</td><td>' + esc(entry.model) + '</td><td>' +
-    (entry.effort === null ? NOT_EVALUATED : esc(entry.effort)) + '</td>';
-  const identityHead = '<th class="num">#</th><th>System</th><th>Model</th><th>Effort</th>';
-  const table = (head, cells) => '<div class="scroll"><table><thead><tr>' + identityHead + head + '</tr></thead><tbody>' +
-    (board.entries.length ? board.entries.map((entry, index) => '<tr>' + identity(entry, index) + cells(entry).join('') + '</tr>').join('\n')
-      : '<tr><td colspan="99" class="muted">No scored attempts.</td></tr>') + '</tbody></table></div>';
-  const scores = table(
-    '<th class="num">Score</th>' + variants.map(variant => '<th class="num" title="' + esc(VARIANTS[variant].title) + '">' + variant + '</th>').join('') +
-      '<th class="num" title="overall surface agreement: mean of F@1%, F@2%, F@5%">Shape</th><th class="num" title="small features, scored group by group">Detail</th>' +
-      '<th class="num" title="attempts with a valid score report">Success</th>',
-    entry => [
-      statCell(entry.score),
-      ...variants.map(variant => statCell(entry.variants[variant])),
-      statCell(entry.shape),
-      statCell(entry.detail),
-      '<td class="num">' + percent(entry.success.rate) + '<small>' + entry.success.valid + ' / ' + entry.success.attempts + ' att.</small></td>',
-    ]);
-  const diagnostics = table(
-    ladder.map(([high, low]) => '<th class="num" title="paired by object">&Delta; ' + high + '&minus;' + low + '</th>').join('') +
-      '<th class="num" title="share of contested probes closer to the as-photographed state">Conflict</th>' +
-      '<th class="num" title="alignment offset as % of the truth diagonal">Frame offset</th><th class="num" title="absolute alignment yaw">Frame yaw</th>' +
-      '<th class="num" title="|fitted scale - 1| on metric tasks">Scale error</th><th class="num">Median wall</th><th class="num">Tokens / att.</th><th class="num">Cost / att.</th>',
-    entry => [
-      ...ladder.map(([high, low]) => statCell(entry.ladder[high + '-' + low], { signed: true, unit: 'pairs' })),
-      statCell(entry.conflict, { scale: 100, digits: 0, suffix: '%' }),
-      statCell(entry.frame_error.offset_fraction, { scale: 100, digits: 1, suffix: '%' }),
-      statCell(entry.frame_error.yaw_deg, { digits: 1, suffix: '°' }),
-      statCell(entry.scale_error_pct, { digits: 1, suffix: '%' }),
-      '<td class="num">' + (isNumber(entry.wall_seconds.median) ? num(entry.wall_seconds.median / 60, 1, { suffix: ' min' }) : NOT_EVALUATED) +
-        '<small>n = ' + entry.wall_seconds.attempts + '</small></td>',
-      '<td class="num">' + (isNumber(entry.tokens.mean_total) ? esc(Math.round(entry.tokens.mean_total).toLocaleString('en-US')) : NOT_EVALUATED) +
-        '<small>' + entry.tokens.attempts_reporting + ' / ' + entry.tokens.attempts + ' reported</small></td>',
-      '<td class="num">' + (isNumber(entry.cost_usd.mean) ? num(entry.cost_usd.mean, 2, { suffix: ' $' }) : NOT_EVALUATED) +
-        '<small>' + entry.cost_usd.attempts_reporting + ' / ' + entry.attempts + ' reported</small></td>',
-    ]);
-  return { scores, diagnostics };
-}
-
-function taskIndexTable(board) {
-  const keys = board.entries.map(entry => entry.key);
-  const head = '<th>Task</th><th>Object</th><th>Variant</th><th>Scale</th>' + keys.map(key => '<th class="num">' + esc(key) + '</th>').join('');
-  const rows = board.tasks.map(task => {
-    const cells = keys.map(key => {
-      const cell = task.cells[key];
-      if (!cell) return '<td class="num"><span class="na">not run</span></td>';
-      const detail = cell.attempts.map(attempt => attempt.excluded ? 'excl.' : attempt.valid ? num(attempt.score, 1) : '<span class="bad" title="' + esc(attempt.failure) + '">fail</span>').join(' · ');
-      return '<td class="num">' + num(cell.mean, 1) + '<small>' + detail + '</small></td>';
-    });
-    return '<tr><td><a href="tasks/' + esc(slug(task.task_id)) + '.html">' + esc(task.task_id) + '</a></td><td>' + esc(task.object) + '</td><td>' +
-      esc(task.variant) + '</td><td>' + esc(task.scale_evidence) + '</td>' + cells.join('') + '</tr>';
-  });
-  return '<div class="scroll"><table><thead><tr>' + head + '</tr></thead><tbody>' + rows.join('\n') + '</tbody></table></div>';
-}
-
-function indexPage(board) {
-  const batches = board.batches.map(batch => {
-    const summary = batch.summary && typeof batch.summary === 'object'
-      ? Object.entries(batch.summary).filter(([, value]) => ['string', 'number', 'boolean'].includes(typeof value)).slice(0, 8)
-        .map(([key, value]) => esc(key) + ': ' + esc(value)).join(' · ')
-      : 'no summary.json';
-    return '<li><code>' + esc(batch.id) + '</code> &mdash; ' + batch.attempts + ' attempt(s). <small>' + summary + '</small></li>';
-  }).join('');
-  const excluded = board.excluded.length
-    ? '<h2>Excluded attempts</h2><p class="legend">Harness-side failures (' + esc(board.method.excluded_statuses.join(', ')) + ') are left out of every mean.</p><ul>' +
-      board.excluded.map(item => '<li><code>' + esc(item.batch) + '/' + esc(item.task_id) + '/a' + item.attempt + '</code> ' + esc(item.cell) + ': ' + esc(item.status) + '</li>').join('') + '</ul>'
-    : '';
-  const problems = board.problems.length
-    ? '<h2>Data problems</h2><ul>' + board.problems.map(problem => '<li>' + esc(problem) + '</li>').join('') + '</ul>' : '';
-  const tables = leaderboardTables(board);
-  const body = `<h1>Evidence3D results</h1>
-<p class="muted">Protocol ${esc(board.protocol)} · generated ${esc(board.generated_at)} · ${board.entries.length} system configuration(s) · ${board.tasks.length} task(s)</p>
-<h2>Leaderboard</h2>
-${tables.scores}
-<h3>Evidence use, frame and cost</h3>
-${tables.diagnostics}
-<p class="legend">Each cell: mean, 95% bootstrap interval over objects (variants of one object are not independent), and sample size.
-<strong>Score</strong> = 100 &times; F@2% of the bounding-box diagonal after alignment; attempts that produced no valid model count as 0, as does their detail score.
-Attempts are averaged within a task and tasks within an object, so every object weighs the same.
-&Delta; columns pair the two rungs of the evidence ladder by object. <strong>Conflict</strong>: on c1 tasks (drawings out of date), the share of contested
-probes closer to the as-photographed building. Frame and scale errors use valid attempts only; scale error is |fitted scale &minus; 1| on metric tasks.
-Tokens are input (including cached reads) + output as recorded in result.json; cost is whatever the harness reported (Claude Code: its list-price estimate) and stays n/a when not reported.
-<span class="low">&dagger; low evidence: fewer than 3 objects.</span> <span class="na">n/a</span> means not evaluated or not reported, never zero.</p>
-<h2>Tasks</h2>
-${taskIndexTable(board)}
-<h2>Batches</h2>
-<ul>${batches}</ul>
-${excluded}
-${problems}
-<p class="legend">Machine-readable: <a href="leaderboard.json">leaderboard.json</a>.</p>`;
-  return page({ title: 'Evidence3D results', body, root: '.' });
-}
-
-// ---------------------------------------------------------------- task page
-
-function evidenceSection(task, inputs) {
-  if (!task) return '<p class="muted">task.json not found; the evidence given cannot be shown.</p>';
-  const figures = inputs.map(input => {
-    const caption = '<figcaption><strong>' + esc(input.kind) + '</strong> · ' + esc(input.captured_at ?? 'undated') + '<br>' + esc(input.description ?? input.id) + '</figcaption>';
-    if (!input.href) return '<figure><div class="placeholder">missing file ' + esc(input.path) + '</div>' + caption + '</figure>';
-    if (/\.(png|jpe?g|webp|gif)$/i.test(input.href)) {
-      return '<figure><a href="' + esc(input.href) + '"><img loading="lazy" src="' + esc(input.href) + '" alt="' + esc(input.description ?? input.id) + '"></a>' + caption + '</figure>';
-    }
-    const preview = input.text ? '<details><summary>show text</summary><pre class="notes">' + esc(input.text) + '</pre></details>' : '';
-    return '<figure><div class="placeholder"><a href="' + esc(input.href) + '">' + esc(basename(input.href)) + '</a></div>' + caption + preview + '</figure>';
-  });
-  return '<div class="evidence">' + figures.join('\n') + '</div>';
-}
-
-function rendersSection(views, rows, clipped) {
-  const header = '<div class="render-row heading" style="--views:' + views.length + '"><div class="corner"></div>' + views.map(view => '<div class="view"><strong>' + esc(view) + '</strong></div>').join('') + '</div>';
-  const body = rows.map(row => '<div class="render-row" style="--views:' + views.length + '"><div class="label">' + row.label + '</div>' +
-    views.map(view => row.images?.[view] ? '<a href="' + esc(row.images[view]) + '"><img loading="lazy" src="' + esc(row.images[view]) + '" alt="' + esc(row.alt + ', ' + view) + '"></a>'
-      : '<div class="placeholder">' + esc(row.placeholder ?? 'not rendered') + '</div>').join('') + '</div>').join('\n');
-  return (clipped ? '<p class="legend bad">At least one candidate is more than twice the size of the ground truth; the views are framed on the ground truth and the candidate is clipped.</p>' : '') +
-    '<div class="renders-wrap"><div class="renders">' + header + body + '</div></div>';
-}
-
-function numbersTable(attempts) {
-  const metric = (label, value) => '<tr><th>' + label + '</th>' + attempts.map(attempt => '<td class="num">' + value(attempt) + '</td>').join('') + '</tr>';
-  const report = attempt => attempt.valid ? attempt.report : null;
-  const threshold = (attempt, fraction) => report(attempt)?.global?.thresholds?.find(item => Math.abs(item.fraction - fraction) < 1e-9);
-  const rows = [
-    metric('Status', attempt => esc(attempt.status) + (attempt.excluded ? ' <small>(excluded)</small>' : '') + (attempt.valid ? '' : '<small class="bad">' + esc(attempt.failure) + '</small>')),
-    metric('Score <small>(shape + detail) / 2</small>', attempt => attempt.excluded ? NOT_EVALUATED : '<strong>' + num(attempt.score, 1) + '</strong>'),
-    metric('Shape <small>mean F at 1, 2, 5 %</small>', attempt => num(report(attempt)?.shape_score, 1)),
-    ...[0.01, 0.02, 0.05].map(fraction => metric('F@' + fraction * 100 + '% <small>P / R</small>', attempt => {
-      const item = threshold(attempt, fraction);
-      return item ? num(item.f, 3) + '<small>' + num(item.precision, 2) + ' / ' + num(item.recall, 2) + '</small>' : NOT_EVALUATED;
-    })),
-    metric('Strict F <small>no fitting</small>', attempt => num(report(attempt)?.strict?.f, 3)),
-    metric('Shape F <small>scale fitted</small>', attempt => num(report(attempt)?.shape?.f, 3) + '<small>scale ' + num(report(attempt)?.shape?.scale, 3) + '</small>'),
-    metric('Detail score', attempt => num(report(attempt)?.detail?.score, 1)),
-    metric('Frame error', attempt => {
-      const error = report(attempt)?.alignment?.frame_error;
-      return error ? num(error.offset_m, 2, { suffix: ' m' }) + '<small>' + percent(error.offset_fraction, 1) + ' of D · yaw ' + num(error.yaw_deg, 1, { suffix: '°' }) +
-        ' · log scale ' + num(error.scale_log, 3) + '</small>' : NOT_EVALUATED;
-    }),
-    metric('Alignment applied', attempt => {
-      const alignment = report(attempt)?.alignment;
-      return alignment ? 'yaw ' + num(alignment.yaw_deg, 1, { suffix: '°' }) + '<small>scale ' + num(alignment.scale, 3) + (alignment.scale_locked ? ' (locked)' : '') +
-        ' · t [' + (alignment.translation_m ?? []).map(value => num(value, 2)).join(', ') + ']</small>' : NOT_EVALUATED;
-    }),
-    metric('Probes', attempt => {
-      const summary = report(attempt)?.probe_summary;
-      return summary ? num(summary.mean_error_m, 2, { suffix: ' m' }) + '<small>' + summary.evaluated + ' evaluated, ' + summary.missed + ' missed</small>' : NOT_EVALUATED;
-    }),
-    metric('Conflict <small>closer to primary</small>', attempt => {
-      const share = attempt.valid && attempt.variant === 'c1' ? conflictShare(attempt.report) : undefined;
-      return percent(share);
-    }),
-    metric('Appearance &Delta;E', attempt => {
-      const appearance = report(attempt)?.appearance;
-      return appearance ? num(appearance.delta_e_mean, 1) + '<small>' + percent(appearance.match_fraction) + ' matched, ' + (appearance.compared_points ?? 0) + ' pts</small>' : NOT_EVALUATED;
-    }),
-    metric('Triangles', attempt => {
-      const technical = report(attempt)?.technical;
-      return technical && isNumber(technical.triangles) ? esc(technical.triangles.toLocaleString('en-US')) + '<small>' + (technical.mesh_count ?? '?') + ' meshes</small>' : NOT_EVALUATED;
-    }),
-    metric('Wall time', attempt => isNumber(attempt.wall_seconds) ? num(attempt.wall_seconds / 60, 1, { suffix: ' min' }) : NOT_EVALUATED),
-    metric('Tokens <small>input / output</small>', attempt => attempt.usage && isNumber(attempt.usage.total)
-      ? esc(attempt.usage.total.toLocaleString('en-US')) + '<small>' + esc(attempt.usage.input ?? '?') + ' / ' + esc(attempt.usage.output ?? '?') + '</small>' : NOT_EVALUATED),
-    metric('Cost', attempt => isNumber(attempt.cost_usd) ? num(attempt.cost_usd, 2, { suffix: ' $' }) : NOT_EVALUATED),
-  ];
-  return '<div class="scroll"><table><thead><tr><th></th>' + attempts.map(attempt => '<th class="num">' + esc(attemptLabel(attempt)) + '</th>').join('') +
-    '</tr></thead><tbody>' + rows.join('\n') + '</tbody></table></div>';
-}
-
-function detailTable(attempts) {
-  const valid = attempts.filter(attempt => attempt.valid && attempt.report.detail?.groups?.length);
-  if (!valid.length) return '<p class="muted">No detail-group results (no valid report).</p>';
-  const groups = new Map();
-  for (const attempt of valid) for (const group of attempt.report.detail.groups) if (!groups.has(group.id)) groups.set(group.id, group);
-  const rows = [...groups.values()].map(group => '<tr><td>' + esc(group.title ?? group.id) + '<small><code>' + esc(group.id) + '</code></small></td><td>' + esc(group.category) +
-    '</td><td class="num">' + num(group.tau_m, 3, { suffix: ' m' }) + '</td><td class="num">' + percent(group.evidenced_fraction) + '</td>' +
-    valid.map(attempt => {
-      const result = attempt.report.detail.groups.find(item => item.id === group.id);
-      if (!result) return '<td class="num">' + NOT_EVALUATED + '</td>';
-      if (!result.scored) return '<td class="num"><span class="na">not scored</span><small>' + esc(result.reason ?? '') + '</small></td>';
-      return '<td class="num">' + num(result.f, 2) + '<small>P ' + num(result.precision, 2) + ' · R ' + num(result.recall, 2) + ' · shift ' + num(result.local_offset_m, 2, { suffix: ' m' }) + '</small></td>';
-    }).join('') + '</tr>');
-  const categories = '<tr><th colspan="4">Detail score (mean over categories)</th>' + valid.map(attempt => '<td class="num"><strong>' + num(attempt.report.detail.score, 1) + '</strong><small>' +
-    (attempt.report.detail.categories ?? []).map(category => esc(category.id) + ' ' + num(category.f, 2)).join(' · ') + '</small></td>').join('') + '</tr>';
-  return '<div class="scroll"><table><thead><tr><th>Group</th><th>Category</th><th class="num">&tau;</th><th class="num">Evidenced</th>' +
-    valid.map(attempt => '<th class="num">' + esc(attemptLabel(attempt)) + '</th>').join('') + '</tr></thead><tbody>' + rows.join('\n') + categories + '</tbody></table></div>';
-}
-
-function probeTable(attempts) {
-  const valid = attempts.filter(attempt => attempt.valid && attempt.report.probes?.length);
-  if (!valid.length) return '<p class="muted">No probe results (no valid report).</p>';
-  const probes = new Map();
-  for (const attempt of valid) for (const probe of attempt.report.probes) if (!probes.has(probe.id)) probes.set(probe.id, probe);
-  const rows = [...probes.values()].map(probe => '<tr><td>' + esc(probe.label ?? probe.id) + '<small><code>' + esc(probe.id) + '</code></small></td><td class="num">' +
-    num(probe.truth_m, 2, { suffix: ' m' }) + '</td><td>' + (probe.evidenced === false ? '<span class="na">not evidenced</span>' : 'yes') + '</td>' +
-    valid.map(attempt => {
-      const result = attempt.report.probes.find(item => item.id === probe.id);
-      if (!result) return '<td class="num">' + NOT_EVALUATED + '</td>';
-      if (result.evidenced === false) return '<td class="num"><span class="na">skipped</span></td>';
-      if (!isNumber(result.measured_m)) return '<td class="num"><span class="bad">miss</span></td>';
-      return '<td class="num">' + num(result.measured_m, 2, { suffix: ' m' }) + '<small>error ' + num(result.error_m, 2, { suffix: ' m' }) + '</small></td>';
-    }).join('') + '</tr>');
-  return '<div class="scroll"><table><thead><tr><th>Probe</th><th class="num">Truth</th><th>Evidenced</th>' +
-    valid.map(attempt => '<th class="num">' + esc(attemptLabel(attempt)) + '</th>').join('') + '</tr></thead><tbody>' + rows.join('\n') + '</tbody></table></div>';
-}
-
-function alternatesSection(truth, attempts) {
-  const alternates = truth?.alternates ?? [];
-  const valid = attempts.filter(attempt => attempt.valid && attempt.report.alternates?.length);
-  if (!alternates.length && !valid.length) return '';
-  let html = '<h2>Conflict: out-of-date evidence</h2>' + (alternates.length ? '<ul>' + alternates.map(alternate => '<li><code>' + esc(alternate.id) + '</code>: ' +
-    esc(alternate.note ?? '') + ' <small>contested probes: ' + esc((alternate.contested_probes ?? []).join(', ')) + '</small></li>').join('') + '</ul>' : '');
-  for (const attempt of valid) {
-    for (const alternate of attempt.report.alternates) {
-      html += '<h3>' + esc(attemptLabel(attempt)) + ' vs <code>' + esc(alternate.id) + '</code> <small>F against the alternate ' + num(alternate.f, 3) + '</small></h3>' +
-        '<div class="scroll"><table><thead><tr><th>Probe</th><th class="num">Primary</th><th class="num">Alternate</th><th class="num">Measured</th><th>Closer to</th></tr></thead><tbody>' +
-        (alternate.contested ?? []).map(item => '<tr><td><code>' + esc(item.probe) + '</code></td><td class="num">' + num(item.primary_m, 2) + '</td><td class="num">' +
-          num(item.alternate_m, 2) + '</td><td class="num">' + num(item.measured_m, 2) + '</td><td class="' + (item.closer_to === 'primary' ? 'good' : item.closer_to === 'alternate' ? 'bad' : '') + '">' +
-          esc(item.closer_to) + '</td></tr>').join('') + '</tbody></table></div>';
-    }
+// Per configuration: its best, median and worst counted attempt by score (ties
+// broken by batch and attempt directory), with their role; with one or two
+// attempts, those. Every other attempt, excluded ones included, is collapsed.
+// `order` lists configuration keys in leaderboard order; others follow by name.
+export function pickRepresentatives(attempts, order = []) {
+  const cells = new Map();
+  for (const attempt of attempts) {
+    const key = cellKey(attempt);
+    if (!cells.has(key)) cells.set(key, []);
+    cells.get(key).push(attempt);
   }
-  return html;
+  const rank = key => { const index = order.indexOf(key); return index < 0 ? Infinity : index; };
+  const shown = [], collapsed = [];
+  for (const key of [...cells.keys()].sort((p, q) => rank(p) - rank(q) || p.localeCompare(q))) {
+    const list = cells.get(key);
+    const counted = list.filter(attempt => !attempt.excluded)
+      .sort((a, b) => b.score - a.score || a.batch.localeCompare(b.batch) || slotOrder(a) - slotOrder(b));
+    const n = counted.length;
+    const picks = n === 0 ? [] : n === 1 ? [[0, null]] : n === 2 ? [[0, 'best'], [1, 'worst']] : [[0, 'best'], [Math.floor((n - 1) / 2), 'median'], [n - 1, 'worst']];
+    const chosen = new Set(picks.map(([index]) => index));
+    for (const [index, role] of picks) shown.push({ attempt: counted[index], role, of: n });
+    collapsed.push(...counted.filter((_, index) => !chosen.has(index)), ...list.filter(attempt => attempt.excluded));
+  }
+  return { shown, collapsed };
 }
+
+const diagonal = box => Math.hypot(...box.max.map((value, i) => value - box.min[i]));
+
+// The candidate's box in the truth frame, from the scorer's record of its
+// bounds and the alignment, without parsing the GLB: the eight corners of the
+// recorded box, transformed. A rotated box's own box is a little larger than
+// the rotated geometry's, which only loosens the frame.
+const isBox = box => Array.isArray(box?.min) && Array.isArray(box?.max) && box.min.length === 3 && box.max.length === 3 && [...box.min, ...box.max].every(isNumber);
+function alignedBounds(report) {
+  const bounds = report?.technical?.bounds;
+  if (!isBox(bounds)) return null;
+  const transform = alignmentOf(report);
+  const corners = [];
+  for (const x of [bounds.min[0], bounds.max[0]]) for (const y of [bounds.min[1], bounds.max[1]]) for (const z of [bounds.min[2], bounds.max[2]]) corners.push(transformPoint([x, y, z], transform));
+  return { min: [0, 1, 2].map(i => Math.min(...corners.map(corner => corner[i]))), max: [0, 1, 2].map(i => Math.max(...corners.map(corner => corner[i]))) };
+}
+
+// The scorer reports p' = s * Ry(yaw) * p + t from candidate to truth.
+function alignmentOf(report) {
+  const alignment = report?.alignment ?? {};
+  return { scale: isNumber(alignment.scale) ? alignment.scale : 1, yaw: isNumber(alignment.yaw_deg) ? alignment.yaw_deg * Math.PI / 180 : 0,
+    translation: Array.isArray(alignment.translation_m) && alignment.translation_m.length === 3 && alignment.translation_m.every(isNumber) ? alignment.translation_m : [0, 0, 0] };
+}
+
+// One frame for every task of an object: the truth's box, grown to take in the
+// drawn candidates whose union with the truth stays within FRAME_LIMIT times
+// its diagonal. With three tasks, four configurations and three attempts, one
+// object has some 36 drawn candidates; a single one far larger than the truth
+// (a unit mistake, a stray triangle) would shrink the truth on every page of the
+// object, so such a candidate is left out of the frame and drawn clipped, and
+// its row says so. If the accepted candidates together still exceed the
+// limit, the frame is the truth's box grown to the limit.
+export const FRAME_LIMIT = 1.5;
+export function objectFrame(truthBounds, candidateBounds) {
+  const boxes = candidateBounds.filter(Boolean);
+  if (!truthBounds) return { bounds: boxes.length ? unionBounds(...boxes) : null, fallback: false };
+  const limit = FRAME_LIMIT * diagonal(truthBounds);
+  const accepted = boxes.filter(box => diagonal(unionBounds(truthBounds, box)) <= limit);
+  const union = unionBounds(truthBounds, ...accepted);
+  if (diagonal(union) <= limit) return { bounds: union, fallback: false, left_out: boxes.length - accepted.length };
+  const centre = truthBounds.min.map((value, i) => (value + truthBounds.max[i]) / 2);
+  const half = truthBounds.max.map((value, i) => (value - truthBounds.min[i]) * FRAME_LIMIT / 2);
+  return { bounds: { min: centre.map((c, i) => c - half[i]), max: centre.map((c, i) => c + half[i]) }, fallback: true, left_out: boxes.length - accepted.length };
+}
+
+const inside = (box, frame) => {
+  const tolerance = 1e-6 * diagonal(frame);
+  return box.min.every((value, i) => value >= frame.min[i] - tolerance) && box.max.every((value, i) => value <= frame.max[i] + tolerance);
+};
 
 // ------------------------------------------------------------------ writer
 
-export async function writeReport({ dataRoot, batches, outDir, views = REPORT_VIEWS, size = 360, seed, now, excludeStatuses = DEFAULT_EXCLUDED_STATUSES } = {}) {
+export async function writeReport({ dataRoot, batches, outDir, views = REPORT_VIEWS, size = 360, seed, now, excludeStatuses = DEFAULT_EXCLUDED_STATUSES, plannedObjects } = {}) {
   if (typeof dataRoot !== 'string' || !dataRoot) throw new Error('writeReport needs dataRoot');
+  const clock = performance.now(), timing = { collect_s: 0, aggregate_s: 0, parse_s: 0, render_s: 0, pages_s: 0, total_s: 0 };
+  const lap = (key, since) => { timing[key] += (performance.now() - since) / 1000; };
   const root = resolve(dataRoot), paths = layout(root);
   const target = resolve(outDir ?? join(paths.reports, reportName(batches)));
+  let since = performance.now();
   const collected = await collectRuns({ dataRoot: root, batches, excludeStatuses });
-  const board = buildLeaderboard(collected, { seed, now, excludeStatuses });
-  await mkdir(join(target, 'assets'), { recursive: true });
+  lap('collect_s', since);
+  since = performance.now();
+  const board = buildLeaderboard(collected, { seed, now, excludeStatuses, plannedObjects });
+  lap('aggregate_s', since);
+  // Renders and pages of an earlier report in the same directory would be
+  // stale and unlinked. They are removed only when the directory holds a
+  // report (its leaderboard.json), never in a directory the report does not own.
+  const previous = await readJSON(join(target, 'leaderboard.json'));
+  if (typeof previous?.schema === 'string' && previous.schema.startsWith('e3d-leaderboard-')) {
+    for (const sub of ['tasks', 'assets']) await rm(join(target, sub), { recursive: true, force: true });
+  }
+  await mkdir(join(target, 'assets', 'inputs'), { recursive: true });
   await mkdir(join(target, 'tasks'), { recursive: true });
   await writeFile(join(target, 'assets', 'style.css'), STYLE);
-  await writeJSON(join(target, 'leaderboard.json'), board);
   const notes = [];
-  let images = 0;
+  let images = 0, drawn = 0;
 
-  for (const taskInfo of board.tasks) {
-    const taskId = taskInfo.task_id, taskSlug = slug(taskId);
-    const assetDir = join(target, 'assets', 'tasks', taskSlug), renderDir = join(target, 'assets', 'renders', taskSlug);
-    await mkdir(assetDir, { recursive: true });
-    await mkdir(renderDir, { recursive: true });
-    const href = file => relative(join(target, 'tasks'), file).split('\\').join('/');
+  const writeShaded = async (soup, camera, file) => {
+    const start = performance.now();
+    const image = shadeSoup(soup, camera, { supersample: 2 });
+    await writeFile(file, encodePNG(image.width, image.height, image.pixels, 3));
+    lap('render_s', start);
+    images++;
+  };
 
-    // Evidence actually given to the contestant: the task pack's inputs.
-    const task = await readJSON(join(paths.task(taskId), 'task.json'));
-    const inputs = [];
-    for (const input of task?.inputs ?? []) {
-      const entry = { ...input };
-      try {
-        const source = contained(paths.task(taskId), input.path), copy = join(assetDir, basename(input.path));
-        if (await exists(source)) {
-          await copyFile(source, copy);
-          entry.href = href(copy);
-          if (/\.(md|txt)$/i.test(input.path)) entry.text = await readFile(source, 'utf8');
-        }
-      } catch (error) { notes.push(taskId + ': input ' + input.path + ' not copied: ' + error.message); }
-      inputs.push(entry);
-    }
+  // Evidence files, stored once by content: the t2, t4 and c1 packs of one
+  // object share their photographs.
+  const copiedInputs = new Map();
+  const copyInput = async (source, input) => {
+    const digest = HASH.test(input.sha256 ?? '') ? input.sha256 : sha256(await readFile(source));
+    const file = join(target, 'assets', 'inputs', digest.slice(0, 16) + '-' + slug(basename(input.path)));
+    if (!copiedInputs.has(file)) { await cloneFile(source, file); copiedInputs.set(file, true); }
+    return file;
+  };
 
-    const truthInfo = collected.truths.get(taskId) ?? await readJSON(join(paths.truth(taskId), 'truth.json'));
+  const attemptsByTask = new Map();
+  for (const attempt of collected.attempts) {
+    if (!attemptsByTask.has(attempt.task_id)) attemptsByTask.set(attempt.task_id, []);
+    attemptsByTask.get(attempt.task_id).push(attempt);
+  }
+  const objects = [...new Set(board.tasks.map(task => task.object))];
+  for (const object of objects) {
+    const objectTasks = board.tasks.filter(task => task.object === object);
     let truthSoup = null, truthModel = null, truthNote = null;
     try {
-      truthModel = validateModel(JSON.parse(await readFile(join(paths.object(taskInfo.object), 'model.json'), 'utf8')));
+      truthModel = validateModel(JSON.parse(await readFile(join(paths.object(object), 'model.json'), 'utf8')));
       truthSoup = soupFromModel(truthModel);
     } catch (error) { truthNote = 'ground truth not rendered: ' + error.message; }
 
-    const attempts = collected.attempts.filter(attempt => attempt.task_id === taskId)
-      .sort((a, b) => cellKey(a).localeCompare(cellKey(b)) || a.batch.localeCompare(b.batch) || a.attempt - b.attempt);
-    const candidates = [];
-    for (const attempt of attempts) {
-      const row = { attempt, soup: null, placeholder: null };
-      if (!attempt.model_path) row.placeholder = attempt.valid ? 'model file not found' : 'no model: ' + attempt.failure;
-      else if (!attempt.valid) row.placeholder = 'not scored: ' + attempt.failure;
-      else {
-        try {
-          const soup = await soupFromGLB(await readFile(attempt.model_path));
-          const alignment = attempt.report.alignment ?? {};
-          // The scorer reports p' = s * Ry(yaw) * p + t from candidate to truth.
-          row.soup = transformSoup(soup, { scale: isNumber(alignment.scale) ? alignment.scale : 1,
-            yaw: isNumber(alignment.yaw_deg) ? alignment.yaw_deg * Math.PI / 180 : 0,
-            translation: Array.isArray(alignment.translation_m) && alignment.translation_m.length === 3 ? alignment.translation_m : [0, 0, 0] });
-          if (!attempt.report.alignment) row.unaligned = true;
-        } catch (error) { row.placeholder = 'model could not be read: ' + error.message; }
+    // Which attempts each task draws; the frame comes from their recorded
+    // bounds, so no candidate has to be parsed before the frame is known.
+    const plans = objectTasks.map(taskInfo => {
+      const attempts = (attemptsByTask.get(taskInfo.task_id) ?? []).slice()
+        .sort((a, b) => cellKey(a).localeCompare(cellKey(b)) || a.batch.localeCompare(b.batch) || slotOrder(a) - slotOrder(b));
+      const order = board.entries.filter(entry => entry.set === taskInfo.set).map(entry => entry.key);
+      return { taskInfo, attempts, ...pickRepresentatives(attempts, order) };
+    });
+    const drawable = item => item.attempt.valid && item.attempt.model_path;
+    const boxes = [];
+    for (const item of plans.flatMap(plan => plan.shown.filter(drawable))) {
+      let box = alignedBounds(item.attempt.report);
+      // A report without recorded bounds: parse once for them (rare).
+      if (!box) {
+        const start = performance.now();
+        try { box = transformSoup(await parseCandidate(item.attempt), alignmentOf(item.attempt.report)).bounds; } catch { box = null; }
+        lap('parse_s', start);
       }
-      candidates.push(row);
+      boxes.push(box);
     }
-    const frame = frameFor(truthSoup?.bounds ?? null, candidates.filter(row => row.soup).map(row => row.soup.bounds));
+    const frame = objectFrame(truthSoup?.bounds ?? null, boxes);
     const cameras = frame.bounds ? standardViews(frame.bounds, size) : null;
-    const rows = [];
-    const renderRow = async (soup, name) => {
-      const files = {};
+    const frameNote = frame.fallback ? 'The candidates together extend far beyond the ground truth, so the views are framed on the ground truth grown by half.'
+      : frame.left_out ? 'Candidates that would stretch the frame beyond ' + FRAME_LIMIT + ' times the ground truth\'s diagonal are left out of it and drawn clipped.' : '';
+
+    let truthImages = null;
+    if (truthSoup && cameras) {
+      const truthDir = join(target, 'assets', 'renders', 'objects', slug(object));
+      await mkdir(truthDir, { recursive: true });
+      truthImages = {};
       for (const view of views) {
-        const file = join(renderDir, name + '-' + view + '.png');
-        await writeShaded(soup, cameras[view], file);
-        files[view] = href(file);
-        images++;
+        const file = join(truthDir, 'truth-' + view + '.png');
+        await writeShaded(truthSoup, cameras[view], file);
+        truthImages[view] = file;
       }
-      return files;
-    };
-    rows.push({ label: '<strong>Ground truth</strong><small>' + esc(truthModel?.title ?? taskInfo.object) + '</small>', alt: 'ground truth',
-      images: truthSoup && cameras ? await renderRow(truthSoup, 'truth') : null, placeholder: truthNote ?? 'not rendered' });
-    for (const row of candidates) {
-      const { attempt } = row;
-      const label = esc(cellKey(attempt)) + '<small>' + esc(attempt.batch) + ' · a' + attempt.attempt + ' · ' +
-        (attempt.excluded ? 'excluded' : attempt.valid ? 'score ' + num(attempt.score, 1) : '<span class="bad">failed (0)</span>') +
-        (row.unaligned ? ' · <span class="bad">no alignment reported, shown as submitted</span>' : '') + '</small>';
-      rows.push({ label, alt: attemptLabel(attempt), placeholder: row.placeholder,
-        images: row.soup && cameras ? await renderRow(row.soup, attemptSlug(attempt)) : null });
     }
 
-    // Scorer artifacts (e.g. error maps) referenced by the report.
-    let artifacts = '';
-    for (const attempt of attempts.filter(item => item.valid && Array.isArray(item.report.artifacts))) {
-      const scoreDir = attempt.report_path ? dirname(attempt.report_path) : join(attempt.dir, 'score');
-      for (const name of attempt.report.artifacts) {
-        if (typeof name !== 'string' || !/\.(png|jpe?g)$/i.test(name)) continue;
+    for (const plan of plans) {
+      const pageStart = performance.now();
+      const { taskInfo, attempts, shown, collapsed } = plan;
+      const taskId = taskInfo.task_id, taskSlug = slug(taskId);
+      const renderDir = join(target, 'assets', 'renders', taskSlug);
+      await mkdir(renderDir, { recursive: true });
+      const href = file => relative(join(target, 'tasks'), file).split('\\').join('/');
+
+      // Evidence actually given to the contestant: the task pack's inputs.
+      const task = await readJSON(join(paths.task(taskId), 'task.json'));
+      const inputs = [];
+      for (const input of task?.inputs ?? []) {
+        const entry = { ...input };
         try {
-          const source = contained(scoreDir, name);
-          if (!(await exists(source))) continue;
-          const copy = join(renderDir, attemptSlug(attempt) + '--' + slug(basename(name)));
-          await copyFile(source, copy);
-          artifacts += '<figure><a href="' + esc(href(copy)) + '"><img loading="lazy" src="' + esc(href(copy)) + '" alt=""></a><figcaption>' + esc(attemptLabel(attempt)) + ' · ' + esc(name) + '</figcaption></figure>';
-        } catch (error) { notes.push(taskId + ': artifact ' + name + ' not copied: ' + error.message); }
+          const source = contained(paths.task(taskId), input.path);
+          if (await exists(source)) {
+            entry.href = href(await copyInput(source, input));
+            if (/\.(md|txt)$/i.test(input.path)) entry.text = await readFile(source, 'utf8');
+          }
+        } catch (error) { notes.push(taskId + ': input ' + input.path + ' not copied: ' + error.message); }
+        inputs.push(entry);
       }
-    }
 
-    const variant = VARIANTS[taskInfo.variant];
-    const body = `<nav class="crumbs"><a href="../index.html">&larr; Leaderboard</a></nav>
-<h1>${esc(taskId)}</h1>
-<dl class="facts">
-<dt>Object</dt><dd><code>${esc(taskInfo.object)}</code>${truthModel ? ' — ' + esc(truthModel.title) : ''}</dd>
-<dt>Variant</dt><dd>${esc(taskInfo.variant)} — ${esc(variant?.title ?? '')}</dd>
-<dt>Scale</dt><dd>${taskInfo.scale_evidence === 'metric' ? 'metric (scale locked to 1 when scoring)' : 'not fixed by the evidence (scale fitted when scoring)'}</dd>
-${task ? '<dt>Target</dt><dd>' + esc(task.target_state) + '</dd>' : ''}
-</dl>
-${task ? '<details><summary>Prompt given to the contestant</summary><pre class="notes">' + esc(task.prompt) + '</pre></details>' : ''}
-<h2>Evidence given</h2>
-${evidenceSection(task, inputs)}
-<h2>Ground truth and candidates</h2>
-<p class="legend">Same cameras for every row. Candidates are drawn after the scorer's reported alignment (yaw, translation and, on scale-free tasks, scale), so what differs is shape, not placement. Click an image for full size.</p>
-${cameras ? rendersSection(views, rows, frame.clipped) : '<p class="muted">Nothing to render.</p>'}
-${artifacts ? '<h3>Scorer artifacts</h3><div class="evidence">' + artifacts + '</div>' : ''}
-<h2>Key numbers</h2>
-${attempts.length ? numbersTable(attempts) : '<p class="muted">No attempts.</p>'}
-<h2>Detail groups</h2>
-${detailTable(attempts)}
-<h2>Probes</h2>
-${probeTable(attempts)}
-${alternatesSection(truthInfo, attempts)}`;
-    await writeFile(join(target, 'tasks', taskSlug + '.html'), page({ title: taskId + ' · Evidence3D', body, root: '..' }));
+      const renderRows = [{ label: '<strong>Ground truth</strong><small>' + esc(truthModel?.title ?? taskInfo.object) + '</small>', alt: 'ground truth',
+        images: truthImages ? Object.fromEntries(Object.entries(truthImages).map(([view, file]) => [view, href(file)])) : null, placeholder: truthNote ?? 'not rendered' }];
+      const maps = [];
+      let previousCell = null;
+      for (const item of shown) {
+        const { attempt } = item;
+        const group = cellKey(attempt) !== previousCell ? '<strong>' + esc(cellKey(attempt)) + '</strong>' + (item.of > 1 ? ' · ' + item.of + ' counted attempts' : '') : null;
+        previousCell = cellKey(attempt);
+        const row = { group, alt: attemptLabel(attempt), images: null, placeholder: null };
+        let flags = {};
+        if (!attempt.model_path) row.placeholder = attempt.valid ? 'model file not found' : 'no model: ' + attempt.failure;
+        else if (!attempt.valid) row.placeholder = 'not scored: ' + attempt.failure;
+        else if (cameras) {
+          try {
+            const start = performance.now();
+            const soup = transformSoup(await parseCandidate(attempt), alignmentOf(attempt.report));
+            lap('parse_s', start);
+            flags = { unaligned: !attempt.report.alignment, clipped: !inside(soup.bounds, frame.bounds) };
+            row.images = {};
+            for (const view of views) {
+              const file = join(renderDir, attemptSlug(attempt) + '-' + view + '.png');
+              await writeShaded(soup, cameras[view], file);
+              row.images[view] = href(file);
+            }
+            drawn++;
+          } catch (error) {
+            if (error instanceof HashMismatch) { row.placeholder = 'model file does not match its recorded hash; not drawn'; notes.push(error.message); }
+            else row.placeholder = 'model could not be read: ' + error.message;
+          }
+        }
+        row.label = candidateLabel(item, { ...flags, withKey: false });
+        renderRows.push(row);
+
+        // Scorer artifacts (error maps) of the drawn attempts only.
+        if (attempt.valid && Array.isArray(attempt.report.artifacts)) {
+          const scoreDir = attempt.report_path ? dirname(attempt.report_path) : join(attempt.dir, 'score');
+          const files = [];
+          for (const name of attempt.report.artifacts) {
+            if (typeof name !== 'string' || !/\.(png|jpe?g)$/i.test(name)) continue;
+            try {
+              const source = contained(scoreDir, name);
+              if (!(await exists(source))) continue;
+              const copy = join(renderDir, attemptSlug(attempt) + '--' + slug(basename(name)));
+              await cloneFile(source, copy);
+              files.push({ name: basename(name).replace(/\.(png|jpe?g)$/i, ''), href: href(copy) });
+            } catch (error) { notes.push(taskId + ': artifact ' + name + ' not copied: ' + error.message); }
+          }
+          if (files.length) maps.push({ label: candidateLabel(item), alt: attemptLabel(attempt), files });
+        }
+      }
+
+      const html = taskPage({ taskInfo, task, inputs, truthModel, truthInfo: collected.truths.get(taskId) ?? await readJSON(join(paths.truth(taskId), 'truth.json')),
+        setInfo: board.sets.find(set => set.id === taskInfo.set)?.description ?? null,
+        views, renderRows: cameras ? renderRows : [], maps, shown, collapsed, counts: { attempts: attempts.length }, frameNote });
+      await writeFile(join(target, 'tasks', taskSlug + '.html'), html);
+      lap('pages_s', pageStart);
+    }
   }
   if (notes.length) board.problems.push(...notes);
-  await writeFile(join(target, 'index.html'), indexPage(board));
-  if (notes.length) await writeJSON(join(target, 'leaderboard.json'), board);
-  return { outDir: target, index: join(target, 'index.html'), leaderboard: board, images, tasks: board.tasks.length };
+  await writeJSON(join(target, 'leaderboard.json'), board);
+  await writeFile(join(target, 'index.html'), indexPage(board, { summaryFile: 'summary.md' }));
+  await writeFile(join(target, 'summary.md'), summaryMarkdown(board));
+  timing.total_s = (performance.now() - clock) / 1000;
+  // pages_s includes the parse and render time spent inside it.
+  for (const key of Object.keys(timing)) timing[key] = Math.round(timing[key] * 100) / 100;
+  // Compact on purpose: the CLI prints it. The full leaderboard is in leaderboard.json.
+  return {
+    outDir: target, index: join(target, 'index.html'), summary: join(target, 'summary.md'), leaderboard: join(target, 'leaderboard.json'),
+    tasks: board.tasks.length, attempts: collected.attempts.length, attempts_drawn: drawn, images, problems: board.problems.length,
+    sets: board.sets.map(set => ({
+      id: set.id, kind: set.description?.kind ?? null, development: set.description?.development ?? false, objects: set.objects, tasks: set.tasks, counted: set.counted,
+      ranking: board.entries.filter(entry => entry.set === set.id).map(entry => ({ rank: entry.rank, key: entry.key, score: round(entry.score.mean), ci95: entry.score.ci95?.map(round) ?? null })),
+      pairs: set.pairwise.pairs.map(pair => ({ a: pair.a, b: pair.b, difference: round(pair.mean_difference), ci95: pair.ci95?.map(round) ?? null,
+        t_ci95: pair.t_ci95?.map(round) ?? null, verdict: pair.verdict })),
+    })),
+    timing,
+  };
 }
+
+const round = value => isNumber(value) ? Math.round(value * 100) / 100 : null;

@@ -7,6 +7,7 @@ import {
 } from '../kit.mjs';
 
 const T = 0.3;
+const BASE_PROUD = 0.06;   // masonry base band projection (relief must reach the group's 5 cm detail size)
 
 const PALETTES = [
   { wall: ['#b9b2a6', 'concrete'], base: ['#6e4a3a', 'wall'], pier: '#a39b8e', frame: '#2b2e31', sign: '#ececea', awning: '#7b1f22', plant: '#a9adb0' },
@@ -140,11 +141,13 @@ export function build(p) {
 
   // ---- base band and piers ------------------------------------------------------
   const baseTop = riser - 0.06;
-  band(b, wfF, { id: 'base-front', group: 'base', material: 'base', u0: xL - 0.03, u1: xR + 0.03, y0: 0, y1: baseTop,
+  // The band stands BASE_PROUD in front of the walls: at 3 cm (generator 1.0) it lay
+  // inside its own scoring tolerance (0.6 x 5 cm) and could not be told from its absence.
+  band(b, wfF, { id: 'base-front', group: 'base', material: 'base', u0: xL - BASE_PROUD, u1: xR + BASE_PROUD, y0: 0, y1: baseTop, proud: BASE_PROUD,
     gaps: [[tx0 - 0.02, tx1 + 0.02], ...shopDoors.map(o => [o.u0 - 0.05, o.u1 + 0.05])] });
-  band(b, wfL, { id: 'base-left', group: 'base', material: 'base', u0: 0.02, u1: D - 0.02, y0: 0, y1: baseTop,
+  band(b, wfL, { id: 'base-left', group: 'base', material: 'base', u0: 0.02, u1: D - 0.02, y0: 0, y1: baseTop, proud: BASE_PROUD,
     gaps: sideWf === wfL ? [[serviceDoor.u0 - 0.05, serviceDoor.u1 + 0.05]] : [] });
-  band(b, wfR, { id: 'base-right', group: 'base', material: 'base', u0: 0.02, u1: D - 0.02, y0: 0, y1: baseTop,
+  band(b, wfR, { id: 'base-right', group: 'base', material: 'base', u0: 0.02, u1: D - 0.02, y0: 0, y1: baseTop, proud: BASE_PROUD,
     gaps: sideWf === wfR ? [[serviceDoor.u0 - 0.05, serviceDoor.u1 + 0.05]] : [] });
   for (let i = 0; i <= bays; i++) {
     const x = bayX(i);

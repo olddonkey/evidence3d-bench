@@ -97,6 +97,9 @@ export function validateTruth(truth) {
   if (!ID.test(truth.object ?? '')) fail('Truth', 'needs object id');
   if (!VARIANTS[truth.variant] || !['none', 'metric'].includes(truth.scale_evidence)) fail('Truth', 'needs variant and scale_evidence');
   if (!Array.isArray(truth.evidence) || !truth.evidence.length) fail('Truth', 'needs the evidence item ids used by the task');
+  // Which named task set this task belongs to. Results from different sets
+  // (public dev, private test) must never be pooled silently.
+  if (truth.set !== undefined && !ID.test(truth.set)) fail('Truth', 'set must be a short id');
   for (const alternate of truth.alternates ?? []) {
     if (!ID.test(alternate.id ?? '') || !Array.isArray(alternate.contested_probes)) fail('Truth', 'invalid alternate');
   }

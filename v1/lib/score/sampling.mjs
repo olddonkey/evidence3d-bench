@@ -95,14 +95,23 @@ export class VoxelSet {
 
   // Returns the new point's index, or -1 when its voxel is already taken.
   add(x, y, z, tri, nx, ny, nz) {
+    const index = this.place(x, y, z, tri, nx, ny, nz);
+    return this.added ? index : -1;
+  }
+
+  // Index of the point that holds this voxel: a new one (this.added true) or
+  // the one that reached it first.
+  place(x, y, z, tri, nx, ny, nz) {
     const ix = Math.floor((x - this.origin[0]) * this.inverse), iy = Math.floor((y - this.origin[1]) * this.inverse), iz = Math.floor((z - this.origin[2]) * this.inverse);
     let mask = this.capacity - 1, slot = VoxelSet.hash(ix, iy, iz) & mask;
+    this.added = false;
     for (;;) {
       const at = this.slots[slot];
       if (at < 0) break;
-      if (this.keys[3 * slot] === ix && this.keys[3 * slot + 1] === iy && this.keys[3 * slot + 2] === iz) return -1;
+      if (this.keys[3 * slot] === ix && this.keys[3 * slot + 1] === iy && this.keys[3 * slot + 2] === iz) return at;
       slot = (slot + 1) & mask;
     }
+    this.added = true;
     const index = this.count++;
     this.slots[slot] = index; this.keys[3 * slot] = ix; this.keys[3 * slot + 1] = iy; this.keys[3 * slot + 2] = iz;
     if (index >= this.tri.length) {
@@ -134,14 +143,58 @@ export class VoxelSet {
   }
 }
 
-// Renders `soup` from each direction and calls visit(x, y, z, tri, nx, ny, nz)
-// for every covered pixel, with the normal turned towards the viewer.
-export function renderSurface(soup, cameras, visit) {
+// Every triangle seen inside each voxel, not only the one whose point keeps it:
+// a post narrower than a voxel keeps a point on its front face only, and the
+// point-to-surface distance (surface.mjs) must still know its sides are there.
+// Collected as (voxel, triangle) pairs, returned as per-voxel lists (CSR:
+// voxel k's triangles are tris[start[k] .. start[k + 1]), sorted, distinct).
+class VoxelTriangles {
+  constructor() { this.voxel = new Int32Array(1 << 16); this.tri = new Int32Array(1 << 16); this.n = 0; this.last = new Int32Array(1 << 14).fill(-1); }
+
+  push(index, t) {
+    if (index >= this.last.length) {
+      const last = new Int32Array(Math.max(2 * this.last.length, index + 1)).fill(-1);
+      last.set(this.last); this.last = last;
+    }
+    // Neighbouring pixels mostly see the same triangle: skip the repeats cheaply.
+    if (this.last[index] === t) return;
+    this.last[index] = t;
+    if (this.n === this.voxel.length) {
+      const grow = array => { const next = new Int32Array(2 * array.length); next.set(array); return next; };
+      this.voxel = grow(this.voxel); this.tri = grow(this.tri);
+    }
+    this.voxel[this.n] = index; this.tri[this.n++] = t;
+  }
+
+  finish(count) {
+    const start = new Int32Array(count + 1);
+    for (let k = 0; k < this.n; k++) start[this.voxel[k] + 1]++;
+    for (let v = 0; v < count; v++) start[v + 1] += start[v];
+    const fill = start.slice(0, count), tris = new Int32Array(this.n);
+    for (let k = 0; k < this.n; k++) tris[fill[this.voxel[k]]++] = this.tri[k];
+    const compact = new Int32Array(count + 1);
+    let out = 0;
+    for (let v = 0; v < count; v++) {
+      compact[v] = out;
+      const segment = tris.subarray(start[v], start[v + 1]).sort();
+      for (let k = 0; k < segment.length; k++) if (k === 0 || segment[k] !== segment[k - 1]) tris[out++] = segment[k];
+    }
+    compact[count] = out;
+    return { start: compact, tris: tris.slice(0, out) };
+  }
+}
+
+// Renders `soup` from each direction and calls visit(x, y, z, tri, nx, ny, nz,
+// facing) for every covered pixel, with the normal turned towards the viewer
+// (facing = |cos| between normal and view direction), and onView(camera,
+// image) once per view that shows anything.
+export function renderSurface(soup, cameras, visit, onView) {
   const normals = triangleNormals(soup);
   for (const camera of cameras) {
     const source = cropToCamera(soup, camera);
     if (!source.soup.triangles) continue;
     const image = render(source.soup, camera), { width, height, origin, right, up, forward } = camera;
+    onView?.(camera, image);
     const [u0, u1, v0, v1] = camera.extent, du = (u1 - u0) / width, dv = (v1 - v0) / height;
     for (let y = 0; y < height; y++) {
       const v = v1 - (y + 0.5) * dv;
@@ -153,23 +206,37 @@ export function renderSurface(soup, cameras, visit) {
         const px = bx + u * right[0] + d * forward[0], py = by + u * right[1] + d * forward[1], pz = bz + u * right[2] + d * forward[2];
         const t = source.map ? source.map[local] : local;
         let nx = normals[3 * t], ny = normals[3 * t + 1], nz = normals[3 * t + 2];
-        if (nx * forward[0] + ny * forward[1] + nz * forward[2] > 0) { nx = -nx; ny = -ny; nz = -nz; }
-        visit(px, py, pz, t, nx, ny, nz);
+        const cos = nx * forward[0] + ny * forward[1] + nz * forward[2];
+        if (cos > 0) { nx = -nx; ny = -ny; nz = -nz; }
+        visit(px, py, pz, t, nx, ny, nz, Math.abs(cos));
       }
     }
   }
 }
 
+const EDGE_ON_COS = 1e-6;
+
 // DESIGN.md 9.2: first-visible surface points from the 25 sampling directions,
-// framed on `box`, thinned on a voxel grid of `voxel` metres.
-export function sampleSurface(soup, { voxel, pixel = voxel / 2, box = soup.bounds, directions = SAMPLING_DIRECTIONS, maxPixels = 2048, keep } = {}) {
+// framed on `box`, thinned on a voxel grid of `voxel` metres. With
+// `keepViews` the sample is also made ready to be a distance target
+// (surface.mjs): `views` holds the depth maps ({ camera, depth, pixel } per
+// view that shows anything), which say which part of a triangle is
+// first-visible, and `voxelTriangles` every triangle seen in each point's voxel.
+export function sampleSurface(soup, { voxel, pixel = voxel / 2, box = soup.bounds, directions = SAMPLING_DIRECTIONS, maxPixels = 2048, keep, keepViews = false } = {}) {
   const cameras = directions.map(direction => frameBox(direction, box, { pixel, margin: 2 * pixel, maxPixels }).camera);
-  const set = new VoxelSet(voxel, box.min);
-  renderSurface(soup, cameras, (x, y, z, t, nx, ny, nz) => {
+  const set = new VoxelSet(voxel, box.min), views = [], seen = keepViews ? new VoxelTriangles() : null;
+  renderSurface(soup, cameras, (x, y, z, t, nx, ny, nz, facing) => {
+    // A triangle seen exactly edge-on covers no pixel; the kernel rasterizer
+    // still reports hits along its line when that line falls on a pixel
+    // centre (a wall plane at z = 0 in a side view), at interpolated depths
+    // that can lie behind other surfaces. Those are not visible surface.
+    if (facing < EDGE_ON_COS) return;
     if (keep && !keep(x, y, z)) return;
-    set.add(x, y, z, t, nx, ny, nz);
-  });
-  return { ...set.finish(), voxel, pixel: cameras.length ? Math.max(pixel, ...cameras.map(c => (c.extent[1] - c.extent[0]) / c.width)) : pixel };
+    const index = set.place(x, y, z, t, nx, ny, nz);
+    if (seen) seen.push(index, t);
+  }, keepViews ? (camera, image) => views.push({ camera, depth: image.depth, pixel: (camera.extent[1] - camera.extent[0]) / camera.width }) : undefined);
+  return { ...set.finish(), voxel, pixel: cameras.length ? Math.max(pixel, ...cameras.map(c => (c.extent[1] - c.extent[0]) / c.width)) : pixel,
+    ...(keepViews ? { views, voxelTriangles: seen.finish(set.count) } : {}) };
 }
 
 // Total triangle area and the box holding all but `trim` of it at each end of

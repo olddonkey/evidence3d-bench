@@ -147,7 +147,8 @@ function belongs(group, x, y, z, nx, ny, nz) {
   const surfaces = group.surfaces, reach = 2 * group.tau;
   let j = surfaces.grid.nearestFacing(x, y, z, reach, surfaces.normals, nx, ny, nz, MIN_COS, true);
   if (j < 0) j = surfaces.grid.nearestFacing(x, y, z, reach, surfaces.normals, nx, ny, nz, MIN_COS);
-  if (j < 0) j = surfaces.grid.nearest(x, y, z);
+  // A wrong model's elements can lie metres from every truth surface: nearestFar.
+  if (j < 0) j = surfaces.grid.nearestFar(x, y, z);
   attributed.distance = j < 0 ? Infinity : surfaces.grid.distance;
   return j >= 0 && surfaces.isGroup[j] === 1;
 }
@@ -180,7 +181,7 @@ function groupScore(group, candidate, delta, zero) {
     if (!zero.member[i] && !(shifted && belongs(group, x, y, z, cn[3 * i], cn[3 * i + 1], cn[3 * i + 2]) && attributed.distance + 0.25 * tau < zero.distance[i])) continue;
     members.push(i);
     if (!inside(scoreBox, x, y, z)) continue;
-    const k = truth.grid.nearest(x, y, z);
+    const k = truth.grid.nearestFar(x, y, z);
     if (k < 0 || !truth.evidenced[k]) continue;
     counted++;
     if (own.grid.anyFacing(x, y, z, tau, own.normals, cn[3 * i], cn[3 * i + 1], cn[3 * i + 2], MIN_COS)) precise++;
@@ -256,12 +257,13 @@ function planeFit(group, set, start) {
     };
     for (let k = 0; k < truth.count; k++) {
       if (!truth.evidenced[k]) continue;
-      const i = set.grid.nearest(tp[3 * k] - delta[0], tp[3 * k + 1] - delta[1], tp[3 * k + 2] - delta[2], sigma);
+      // sigma starts at the largest local offset: tens of cells (nearestFar).
+      const i = set.grid.nearestFar(tp[3 * k] - delta[0], tp[3 * k + 1] - delta[1], tp[3 * k + 2] - delta[2], sigma);
       if (i >= 0) add(systems[0], k, tp[3 * k] - points[3 * i] - delta[0], tp[3 * k + 1] - points[3 * i + 1] - delta[1], tp[3 * k + 2] - points[3 * i + 2] - delta[2]);
     }
     for (let i = 0; i < set.count; i++) {
       const x = points[3 * i] + delta[0], y = points[3 * i + 1] + delta[1], z = points[3 * i + 2] + delta[2];
-      const k = truth.grid.nearest(x, y, z, sigma);
+      const k = truth.grid.nearestFar(x, y, z, sigma);
       if (k >= 0 && truth.evidenced[k]) add(systems[1], k, tp[3 * k] - x, tp[3 * k + 1] - y, tp[3 * k + 2] - z);
     }
     const live = systems.filter(system => system[9] > 0);

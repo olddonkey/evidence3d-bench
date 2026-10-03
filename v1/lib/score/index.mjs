@@ -5,19 +5,22 @@ import { PROTOCOL, REPORT_SCHEMA } from '../contract.mjs';
 import { PointGrid } from './grid.mjs';
 import { sampleSurface, strideIndices, gather, boxOf, boxCentre, boxDiagonal, areaBounds } from './sampling.mjs';
 import { multiStartAlign, icp, planeRefine, fScore, forward, inverse, poseQuality, betterPose, IDENTITY, SCALE_BOUNDS, TIE, FRAME_MARGIN, FINAL_SIGMA_FRACTION } from './align.mjs';
-import { surfaceMetrics, appearance, round, HEADLINE_FRACTION } from './metrics.mjs';
+import { surfaceMetrics, poseShape, appearance, round, HEADLINE_FRACTION, SHAPE_FRACTIONS } from './metrics.mjs';
+import { visibleSurface } from './surface.mjs';
 import { scoreGroups } from './detail.mjs';
 import { writeErrorMaps } from './errormap.mjs';
 import { makeContext, loadContext, SAMPLE_FRACTION, PIXELS_PER_VOXEL, SEARCH_POINTS, REFINE_POINTS } from './context.mjs';
 import { mutations } from './mutations.mjs';
 import { calibrate } from './calibrate.mjs';
+import { SCORER } from './version.mjs';
 
-export { makeContext, loadContext, mutations, calibrate };
+export { makeContext, loadContext, mutations, calibrate, SCORER };
 
 const clampScale = value => Math.min(SCALE_BOUNDS[1], Math.max(SCALE_BOUNDS[0], value));
 
+// Every report, valid or not, names the scorer that wrote it (version.mjs).
 function baseReport(context) {
-  return { schema: REPORT_SCHEMA, protocol: PROTOCOL, task_id: context?.task_id ?? null, object: context?.object ?? null, variant: context?.variant ?? null };
+  return { schema: REPORT_SCHEMA, protocol: PROTOCOL, scorer: { ...SCORER }, task_id: context?.task_id ?? null, object: context?.object ?? null, variant: context?.variant ?? null };
 }
 
 function technical(candidate, bytes) {
@@ -37,26 +40,54 @@ function invalidReport(context, error, { candidate = null, bytes = null, started
 // which keeps precision area-weighted. Views are framed on the area-trimmed
 // bounds (see areaBounds).
 export const MAX_CANDIDATE_POINTS = 400000;
-function sampleCandidate(soup, voxel) {
+function sampleCandidate(soup, voxel, { keepViews = false } = {}) {
   const { area, box } = areaBounds(soup);
   const spacing = Math.max(voxel, Math.sqrt(area / MAX_CANDIDATE_POINTS));
-  return sampleSurface(soup, { voxel: spacing, pixel: spacing / PIXELS_PER_VOXEL, box });
+  return sampleSurface(soup, { voxel: spacing, pixel: spacing / PIXELS_PER_VOXEL, box, keepViews });
 }
 
-// Candidate point set at a given voxel size, with indexes for the search.
+// The aligned candidate's sample in the truth frame, indexed and set up as a
+// distance target (its triangles and sampling views, see surface.mjs).
+function finalSurface(aligned, diagonal) {
+  const final = sampleCandidate(aligned, SAMPLE_FRACTION * diagonal, { keepViews: true });
+  final.grid = new PointGrid(final.points, 0.02 * diagonal);
+  final.target = visibleSurface(aligned, final, final.grid);
+  delete final.views; delete final.voxelTriangles;
+  return final;
+}
+
+// Candidate point set at a given voxel size, with indexes for the search and
+// set up as a distance target in its own space (for poseShape).
 function candidateSurface(soup, voxel, diagonalHint) {
-  const sample = sampleCandidate(soup, voxel);
+  const { views, voxelTriangles, ...sample } = sampleCandidate(soup, voxel, { keepViews: true });
   const full = { points: sample.points, normals: sample.normals, grid: new PointGrid(sample.points, 0.02 * diagonalHint) };
   const subset = (limit, cell) => {
     const indices = strideIndices(sample.count, limit), points = gather(sample.points, indices);
     return { points, normals: gather(sample.normals, indices), grid: new PointGrid(points, cell), full };
   };
-  return { ...sample, grid: full.grid, search: subset(SEARCH_POINTS, 0.05 * diagonalHint), refine: subset(REFINE_POINTS, 0.025 * diagonalHint),
-    centre: boxCentre(boxOf(sample.points)) };
+  return { ...sample, grid: full.grid, target: visibleSurface(soup, { tri: sample.tri, views, voxelTriangles }, full.grid),
+    search: subset(SEARCH_POINTS, 0.05 * diagonalHint), refine: subset(REFINE_POINTS, 0.025 * diagonalHint), centre: boxCentre(boxOf(sample.points)) };
 }
 
-// DESIGN.md 9.4: multi-start search on thinned sets, then refinement on denser ones.
-function fitTransform(truth, candidate, { diagonal, scaleFree, scaleInits }) {
+// The radii of the fit's last stage: the shape tolerances below the final ICP
+// radius, coarse to fine. The search ranks poses by F@2 % and settles at a 2 %
+// radius, which balances a mis-sized model's error so that every wall lies
+// within 2 % but few within the finer tolerances; for the shape score, which
+// also counts agreement at those, a pose that fits part of the model closely
+// is worth more. (Fixture on a metric task, 5 / 10 / 20 % too large: shape 8.7,
+// 49.2, 32.9 at the searched pose - 5 % spread evenly, 10 % already fitted to
+// the walls that agree - and 57.1, 50.2, 32.9 with this stage.)
+export const FINE_SIGMA_FRACTIONS = SHAPE_FRACTIONS.filter(fraction => fraction < FINAL_SIGMA_FRACTION).sort((a, b) => b - a);
+
+// DESIGN.md 9.4: multi-start search on thinned sets, then refinement on denser
+// ones (`transform`). With `fine`, a last point-to-plane stage at
+// FINE_SIGMA_FRACTIONS gives `shapeTransform`, the pose the global surface
+// measures are taken at: a fine-stage pose replaces the searched one there
+// only when it raises the shape score by more than a tie (half a point). That
+// stage only refines the pose the search chose, so it never changes which
+// basin (heading, scale, position) the fit is in; detail groups and probes
+// keep the searched pose they were calibrated with.
+function fitTransform(truth, candidate, { diagonal, scaleFree, scaleInits, fine = true }) {
   const centres = { truth: truth.centre, candidate: candidate.centre };
   const searched = multiStartAlign(truth.search, candidate.search, { diagonal, scaleFree, centres, scaleInits });
   const refined = icp(truth.refine, candidate.refine, searched.transform, { diagonal, scaleFree, centres, sigmaStart: 0.04 * diagonal, sigmaEnd: FINAL_SIGMA_FRACTION * diagonal, iterations: 25 });
@@ -67,7 +98,18 @@ function fitTransform(truth, candidate, { diagonal, scaleFree, scaleInits }) {
     const judged = { transform, ...poseQuality(truth.refine, candidate.refine, transform, diagonal) };
     if (!(best.f > judged.f + TIE)) best = judged;
   }
-  return { transform: best.transform, start: searched.start, starts: searched.starts, candidates: searched.candidates };
+  let shapeTransform = best.transform, stage = 'search';
+  if (fine && truth.target && candidate.target) {
+    const judge = transform => poseShape(truth, candidate, transform, diagonal, { queries: { truth: truth.refine, candidate: candidate.refine } });
+    let shape = judge(shapeTransform), from = shapeTransform;
+    // Nothing to gain once the searched pose is within a tie of perfect.
+    for (const fraction of shape < 100 - 100 * TIE ? FINE_SIGMA_FRACTIONS : []) {
+      from = planeRefine(truth.refine, candidate.refine, from, { diagonal, scaleFree, centres, sigma: fraction * diagonal });
+      const judged = judge(from);
+      if (judged > shape + 100 * TIE) { shapeTransform = from; shape = judged; stage = 'fine ' + fraction * 100 + ' %'; }
+    }
+  }
+  return { transform: best.transform, shapeTransform, stage, start: searched.start, starts: searched.starts, candidates: searched.candidates };
 }
 
 // Initial scale guesses for a scale-free fit: height ratio (yaw-free, and a
@@ -87,6 +129,21 @@ function frameError(context, transform, scaleLocked) {
   const offset = Math.hypot(at[0] - centre[0], at[1] - centre[1], at[2] - centre[2]);
   return { yaw_deg: round(transform.yaw * 180 / Math.PI, 3), offset_m: round(offset), offset_fraction: round(offset / context.diagonal),
     scale_log: scaleLocked ? 0 : round(Math.log(transform.scale)) };
+}
+
+// The pose the global surface measures were taken at, when the fit's fine
+// stage moved it: how it differs from `alignment` and by how much it moves the
+// truth's box corners (at most), in metres.
+function shapePose(context, fit) {
+  const { transform: a, shapeTransform: b, stage } = fit;
+  if (a === b) return { stage, moved_m: 0 };
+  let moved = 0;
+  const { min, max } = context.soup.bounds;
+  for (let corner = 0; corner < 8; corner++) {
+    const p = [0, 1, 2].map(i => (corner >> i & 1 ? max[i] : min[i])), at = inverse(a, p[0], p[1], p[2], [0, 0, 0]), q = forward(b, at[0], at[1], at[2], [0, 0, 0]);
+    moved = Math.max(moved, Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]));
+  }
+  return { stage, moved_m: round(moved), yaw_deg: round(b.yaw * 180 / Math.PI, 3), scale: round(b.scale, 5), translation_m: b.translation.map(v => round(v)) };
 }
 
 function closerTo(primary, alternate, measured) {
@@ -133,7 +190,7 @@ function scoreCandidate({ candidate, context, outDir, bytes, started }) {
     // Same search with the scale released: "right shape, wrong size" shows here.
     const centres = { truth: truth.centre, candidate: initial.centre };
     const released = icp(truth.refine, initial.refine, main.transform, { diagonal, scaleFree: true, centres, sigmaStart: 0.06 * diagonal, sigmaEnd: FINAL_SIGMA_FRACTION * diagonal, iterations: 30 });
-    const searched = fitTransform(truth, initial, { diagonal, scaleFree: true, scaleInits: scaleGuesses(context, candidate) });
+    const searched = fitTransform(truth, initial, { diagonal, scaleFree: true, scaleInits: scaleGuesses(context, candidate), fine: false });
     const a = fScore(fullTruth, fullCandidate, released, tau).f, b = fScore(fullTruth, fullCandidate, searched.transform, tau).f;
     shape = { transform: a >= b ? released : searched.transform };
   }
@@ -141,13 +198,14 @@ function scoreCandidate({ candidate, context, outDir, bytes, started }) {
   lap('strict_shape');
 
   // The aligned candidate is re-sampled in the truth frame, from the same 25
-  // directions and at the same spacing as the truth itself.
+  // directions and at the same spacing as the truth itself. The global surface
+  // measures are taken at the shape pose; detail and probes at the searched one.
   const aligned = transformSoup(candidate, main.transform);
-  const final = sampleCandidate(aligned, SAMPLE_FRACTION * diagonal);
-  final.grid = new PointGrid(final.points, 0.02 * diagonal);
+  const shapeAligned = main.shapeTransform === main.transform ? aligned : transformSoup(candidate, main.shapeTransform);
+  const final = finalSurface(shapeAligned, diagonal);
   const metrics = surfaceMetrics(truth, final, diagonal);
   lap('surface_metrics');
-  const colour = appearance({ truth, truthSoup: context.soup, truthKinds: context.kinds, candidate: final, candidateSoup: aligned, nearest: metrics.nearest, diagonal });
+  const colour = appearance({ truth, truthSoup: context.soup, truthKinds: context.kinds, candidate: final, candidateSoup: shapeAligned, nearest: metrics.nearest, diagonal });
 
   // A pose fitted to part of the truth only (`set`, built in context.mjs:
   // everything but one group, or the surface two states share): the global
@@ -212,10 +270,8 @@ function scoreCandidate({ candidate, context, outDir, bytes, started }) {
 
   const alternates = context.alternates.map(alternate => {
     const fit = fitTransform(alternate.surface, initial, { diagonal: alternate.diagonal, scaleFree, scaleInits: guesses });
-    const altAligned = transformSoup(candidate, fit.transform);
-    const altFinal = sampleCandidate(altAligned, SAMPLE_FRACTION * alternate.diagonal);
-    altFinal.grid = new PointGrid(altFinal.points, 0.02 * alternate.diagonal);
-    const f = surfaceMetrics(alternate.surface, altFinal, alternate.diagonal).headline.f;
+    const altAligned = transformSoup(candidate, fit.shapeTransform);
+    const altMetrics = surfaceMetrics(alternate.surface, finalSurface(altAligned, alternate.diagonal), alternate.diagonal), f = altMetrics.headline.f;
     // Contested probes are read in the frame fixed by what both states share,
     // so the fit cannot pull an old-state model towards the new state (or
     // back) before it is measured.
@@ -227,28 +283,29 @@ function scoreCandidate({ candidate, context, outDir, bytes, started }) {
       const primaryM = primary?.truth_m ?? null, alternateM = earlier?.truth_m ?? null;
       return { probe: id, primary_m: round(primaryM), alternate_m: round(alternateM), measured_m: round(measured), closer_to: closerTo(primaryM, alternateM, measured) };
     });
-    return { id: alternate.id, note: alternate.note, f, closer_to_primary_fraction: contested.length ? round(contested.filter(item => item.closer_to === 'primary').length / contested.length) : null,
-      contested, alignment: { yaw_deg: round(fit.transform.yaw * 180 / Math.PI, 3), scale: round(fit.transform.scale), translation_m: fit.transform.translation.map(v => round(v)) } };
+    return { id: alternate.id, note: alternate.note, f, shape_score: altMetrics.shape_score, closer_to_primary_fraction: contested.length ? round(contested.filter(item => item.closer_to === 'primary').length / contested.length) : null,
+      contested, alignment: { yaw_deg: round(fit.shapeTransform.yaw * 180 / Math.PI, 3), scale: round(fit.shapeTransform.scale), translation_m: fit.shapeTransform.translation.map(v => round(v)), stage: fit.stage } };
   });
   lap('alternates');
 
-  const artifacts = outDir ? writeErrorMaps({ context, aligned, final, outDir, headlineF: metrics.headline.f }) : [];
+  const artifacts = outDir ? writeErrorMaps({ context, aligned: shapeAligned, final, outDir, shapeScore: metrics.shape_score }) : [];
   lap('error_maps');
 
-  // Shape: the mean F over the three tolerances. A single tolerance is a cliff -
-  // at 2 % a model that is 5 % too large still scored 99.9 - whereas the mean
-  // gives graded credit for coarse, medium and fine agreement.
-  const shapeScore = round(100 * metrics.thresholds.reduce((sum, row) => sum + row.f, 0) / metrics.thresholds.length, 2);
+  // Shape: the mean F over the rows marked in_shape_score (metrics.mjs).
+  const shapeScore = metrics.shape_score;
   // Headline: half overall shape, half detail. Surface agreement alone is
   // dominated by large flat faces: a bare bounding box of a slab tower earned 82
-  // on it. Detail is what separates a model of the object from a box around it.
+  // on the 1 / 2 / 5 % shape score and still earns 63 on the current one.
+  // Detail is what separates a model of the object from a box around it.
   // When the evidence shows no group well enough to score, shape stands alone.
   const score = detail.score === null || detail.score === undefined ? shapeScore : round((shapeScore + detail.score) / 2, 2);
   return {
     ...baseReport(context), valid: true, error: null, score, shape_score: shapeScore,
-    global: { diagonal_m: round(diagonal), normal_consistency: metrics.normal_consistency, thresholds: metrics.thresholds, points: metrics.points },
+    global: { diagonal_m: round(diagonal), normal_consistency: metrics.normal_consistency, thresholds: metrics.thresholds, shape_fractions: [...SHAPE_FRACTIONS],
+      distance: 'point-to-visible-surface', points: metrics.points },
     alignment: { yaw_deg: round(main.transform.yaw * 180 / Math.PI, 3), scale: round(main.transform.scale, 5), scale_locked: !scaleFree,
       translation_m: main.transform.translation.map(v => round(v)), frame_error: frameError(context, main.transform, !scaleFree), start: main.start,
+      shape_pose: shapePose(context, main),
       candidates: (main.candidates ?? []).map(entry => ({ start: entry.start, yaw_deg: round(entry.yaw_deg, 1), scale: round(entry.scale, 4), f: round(entry.f), f1: round(entry.f1) })) },
     strict: { f: round(strict.f), precision: round(strict.precision), recall: round(strict.recall) },
     shape: { f: round(shapeF.f), scale: round(shape.transform.scale, 5) },

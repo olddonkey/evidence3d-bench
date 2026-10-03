@@ -105,7 +105,7 @@ function taskPrompt(model, variant, inputs) {
 }
 
 // Object + variant -> public task pack and private truth record.
-export async function buildTask({ dataRoot, objectId, variant }) {
+export async function buildTask({ dataRoot, objectId, variant, set }) {
   const spec = VARIANTS[variant];
   if (!spec) throw new Error('Unknown variant ' + variant);
   const paths = layout(dataRoot), objectDir = paths.object(objectId), evidenceDir = join(objectDir, 'evidence');
@@ -150,7 +150,7 @@ export async function buildTask({ dataRoot, objectId, variant }) {
     alternates = [{ id: ALTERNATE, contested_probes: change.contested_probes, note: change.note }];
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const truth = validateTruth({ schema: TRUTH_SCHEMA, task_id: taskId, task_sha256: objectHash(task), object: objectId, variant,
-    scale_evidence: spec.scale, evidence: used.map(item => item.id), alternates });
+    scale_evidence: spec.scale, evidence: used.map(item => item.id), alternates, ...(set ? { set } : {}) });
   await writeJSON(join(paths.truth(taskId), 'truth.json'), truth);
   return { task: taskId, directory: taskDir, inputs: inputs.length, bytes: inputs.reduce((sum, input) => sum + input.bytes, 0) };
 }
@@ -164,11 +164,19 @@ export async function verifyTasks(dataRoot) {
     const task = validateTask(await readJSON(join(paths.task(id), 'task.json')));
     const truth = validateTruth(await readJSON(join(paths.truth(id), 'truth.json')));
     if (truth.task_sha256 !== objectHash(task)) throw new Error('Task ' + id + ' changed after its truth record was written');
+    // What must never reach a contestant: the generator's own id for the object
+    // (it names archetype and seed) and the seed itself. The pack is searched as
+    // text; images cannot carry them, since sheets print only the public title.
+    const model = await readJSON(join(paths.object(truth.object), 'model.json'));
+    const secrets = [model.id !== truth.object ? model.id : null, String(model.seed ?? '').length >= 5 ? String(model.seed) : null].filter(Boolean);
+    const leaked = (text, where) => { for (const secret of secrets) if (text.includes(secret)) throw new Error('Private identifier "' + secret + '" appears in ' + where); };
+    leaked(JSON.stringify(task), id + '/task.json');
     for (const input of task.inputs) {
       const bytes = await readFile(join(paths.task(id), input.path));
       if (sha256(bytes) !== input.sha256 || bytes.length !== input.bytes) throw new Error('Input lock mismatch: ' + id + '/' + input.path);
+      if (/\.(md|txt|json)$/.test(input.path)) leaked(bytes.toString('utf8'), id + '/' + input.path);
     }
-    results.push({ task: id, inputs: task.inputs.length });
+    results.push({ task: id, inputs: task.inputs.length, set: truth.set ?? null });
   }
   return results;
 }

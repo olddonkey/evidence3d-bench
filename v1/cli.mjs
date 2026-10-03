@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFile, writeFile, mkdir, readdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readdir, access } from 'node:fs/promises';
+import { randomBytes, randomInt } from 'node:crypto';
 import { readJSON, writeJSON } from '../lib/io.mjs';
 import { layout, VARIANTS } from './lib/contract.mjs';
 import { buildObject, buildTask, verifyTasks, truthGLB } from './lib/pack.mjs';
@@ -31,20 +32,53 @@ try {
       blender: options.blender, quality: options.quality, log: message => console.error('· ' + message) }));
   } else if (command === 'build-task') {
     print(await buildTask({ dataRoot, objectId: need('object'), variant: need('variant') }));
+  } else if (command === 'new-set') {
+    // A test set is private because its seeds are. They are drawn from the OS
+    // random source, objects get opaque ids, and the file lives under the data
+    // root, which git ignores. Never copy it into the repository.
+    const { ARCHETYPES } = await import('./lib/generator/index.mjs');
+    const name = need('name'), per = Number(options['per-archetype'] ?? 3), file = join(dataRoot, 'sets', name + '.json');
+    const archetypes = options.archetypes ? list(options.archetypes) : ARCHETYPES;
+    for (const archetype of archetypes) if (!ARCHETYPES.includes(archetype)) throw new Error('Unknown archetype ' + archetype);
+    if (!Number.isInteger(per) || per < 1) throw new Error('--per-archetype must be a positive integer');
+    const objects = [], ids = new Set();
+    for (const archetype of archetypes) for (let i = 0; i < per; i++) {
+      let id;
+      do id = 'obj-' + randomBytes(4).toString('hex'); while (ids.has(id));
+      ids.add(id);
+      objects.push({ id, archetype, seed: randomInt(100000, 2 ** 31 - 1) });
+    }
+    // Shuffle so that ids and order say nothing about the archetype.
+    for (let i = objects.length - 1; i > 0; i--) { const j = randomInt(0, i + 1); [objects[i], objects[j]] = [objects[j], objects[i]]; }
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(file, JSON.stringify({ name, private: true, created_at: new Date().toISOString(), variants: Object.keys(VARIANTS), objects }, null, 2) + '\n', { flag: 'wx' });
+    print({ set: name, file, objects: objects.length, archetypes: archetypes.length, note: 'private: keep this file out of version control' });
   } else if (command === 'build-set') {
     // A set file lists objects by archetype and seed. Keep test-set files out of
     // version control: the seeds are what keeps a test set private.
     const set = await readJSON(resolve(need('set'))), variants = options.variants ? list(options.variants) : set.variants ?? Object.keys(VARIANTS);
     const built = [];
+    // Resumable: a long build interrupted half way continues where it stopped.
+    // buildObject removes a half-built object, so a directory with evidence.json is complete.
+    const exists = async path => access(path).then(() => true, () => false), paths = layout(dataRoot);
     for (const entry of set.objects) {
-      const object = await buildObject({ dataRoot, archetype: entry.archetype, seed: entry.seed, id: entry.id,
-        blender: options.blender, quality: options.quality, log: message => console.error('· ' + (entry.id ?? entry.archetype + '/' + entry.seed) + ': ' + message) });
+      const label = entry.id ?? entry.archetype + '/' + entry.seed;
+      let objectId = entry.id, triangles = null;
+      if (objectId && await exists(join(paths.object(objectId), 'evidence', 'evidence.json'))) console.error('· ' + label + ': already built');
+      else {
+        const object = await buildObject({ dataRoot, archetype: entry.archetype, seed: entry.seed, id: entry.id,
+          blender: options.blender, quality: options.quality, log: message => console.error('· ' + label + ': ' + message) });
+        objectId = object.object; triangles = object.triangles;
+      }
       const tasks = [];
-      for (const variant of variants) tasks.push((await buildTask({ dataRoot, objectId: object.object, variant })).task);
-      built.push({ object: object.object, triangles: object.triangles, tasks });
-      console.error('✓ ' + object.object + ' (' + tasks.length + ' tasks)');
+      for (const variant of variants) {
+        if (!(await exists(join(paths.task(objectId + '-' + variant), 'task.json')))) await buildTask({ dataRoot, objectId, variant, set: set.name });
+        tasks.push(objectId + '-' + variant);
+      }
+      built.push({ object: objectId, triangles, tasks });
+      console.error('✓ ' + objectId + ' (' + tasks.length + ' tasks)');
     }
-    await writeJSON(join(dataRoot, 'sets', (set.name ?? 'set') + '.built.json'), { name: set.name, built });
+    await writeJSON(join(dataRoot, 'sets', (set.name ?? 'set') + '.built.json'), { name: set.name, built_at: new Date().toISOString(), built });
     print(built);
   } else if (command === 'verify') {
     const tasks = await verifyTasks(dataRoot);
@@ -82,6 +116,21 @@ try {
           try { previous = await readJSON(join(scoreDir, 'report.json')); await writeJSON(join(scoreDir, 'report.previous.json'), previous); } catch { /* first report */ }
           const report = await scoreSubmission({ glb, taskDir: paths.task(task), truthDir: paths.truth(task), dataRoot, outDir: scoreDir, context: contexts.get(task) });
           await writeJSON(join(scoreDir, 'report.json'), report);
+          // Keep result.json in step: its score, and its status when the only
+          // thing wrong with the attempt was that the scorer had failed on it.
+          // Statuses that describe the generation (timeout, infra_error, ...) stay.
+          const resultPath = join(batchDir, task, attempt, 'result.json');
+          try {
+            const result = await readJSON(resultPath);
+            if (result.status !== 'infra_error') {
+              const status = result.status === 'score_error' ? (report.valid ? 'completed' : 'invalid_artifact') : result.status;
+              if (status !== result.status || result.score !== report.score) {
+                await writeJSON(join(batchDir, task, attempt, 'result.previous.json'), result);
+                await writeJSON(resultPath, { ...result, status, score: report.score, report_valid: report.valid,
+                  rescored: { at: new Date().toISOString(), scorer: report.scorer ?? null, from_status: result.status, from_score: result.score } });
+              }
+            }
+          } catch (error) { if (error.code !== 'ENOENT') throw error; }
           rows.push({ batch, task, attempt, before: previous?.score ?? null, score: report.score, shape: report.shape_score, detail: report.detail?.score ?? null });
           console.error('· ' + batch + '/' + task + '/' + attempt + ': ' + (previous?.score ?? '-') + ' -> ' + report.score);
         }
@@ -96,6 +145,7 @@ try {
       'Evidence3D v1 — hidden-truth reconstruction benchmark', '',
       '  node v1/cli.mjs build-object --archetype NAME --seed N [--quality draft|final]',
       '  node v1/cli.mjs build-task   --object ID --variant ' + Object.keys(VARIANTS).join('|'),
+      '  node v1/cli.mjs new-set      --name NAME [--per-archetype 3]      (private seeds, opaque ids, under the data root)',
       '  node v1/cli.mjs build-set    --set FILE [--variants t1,t2,...]',
       '  node v1/cli.mjs verify',
       '  node v1/cli.mjs score        --task ID --glb FILE|truth [--out DIR] [--full true]',

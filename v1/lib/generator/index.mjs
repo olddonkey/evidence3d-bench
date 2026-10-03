@@ -12,9 +12,12 @@ import retail from './archetypes/retail.mjs';
 import tower from './archetypes/tower.mjs';
 import hall from './archetypes/hall.mjs';
 import structure from './archetypes/structure.mjs';
+import warehouse from './archetypes/warehouse.mjs';
+import terrace from './archetypes/terrace.mjs';
+import civic from './archetypes/civic.mjs';
 
-export const GENERATOR_VERSION = 'e3d-generator-1.0';
-const FAMILIES = { house, retail, tower, hall, structure };
+export const GENERATOR_VERSION = 'e3d-generator-1.1';
+const FAMILIES = { house, retail, tower, hall, structure, warehouse, terrace, civic };
 export const ARCHETYPES = Object.freeze(Object.keys(FAMILIES));
 
 const MAX_PROBES = 12, MIN_PROBES = 6;
@@ -94,7 +97,8 @@ export function applicableEdits(model) {
 export function earlierState(model, editIds, { id = model.id + '.earlier' } = {}) {
   const family = FAMILIES[model?.archetype];
   if (!family || !model?.generator?.params) throw new Error('Generator: needs a model made by generateModel');
-  const edits = editIds.map(editId => family.edits.find(edit => edit.id === editId) ?? fail('unknown edit ' + editId));
+  const pool = [...family.edits, ...(family.fallbackEdits ?? [])];
+  const edits = editIds.map(editId => pool.find(edit => edit.id === editId) ?? fail('unknown edit ' + editId));
   let params = structuredClone(model.generator.params);
   for (const edit of edits) params = edit.apply(params);
   const { model: earlier, soup } = assemble(family, params, { archetype: model.archetype, seed: model.seed, id, probes: model.probes, base: model });
@@ -117,8 +121,11 @@ export function decoyModel(model, { seed = 0 } = {}) {
   const order = [...applicable];
   for (let i = order.length - 1; i > 0; i--) { const j = r.int(0, i); [order[i], order[j]] = [order[j], order[i]]; }
   const wanted = r.int(1, Math.min(3, order.length));
-  // The seeded choice first; if it moves no probe measurably, single edits in turn.
-  const attempts = [order.slice(0, wanted), ...order.map(edit => [edit])];
+  // The seeded choice first; if it moves no probe measurably, single edits in turn;
+  // then (generator 1.1) the archetype's fallback edits, which are reached only by
+  // models whose decoy generator 1.0 could not build, so no 1.0 decoy changes.
+  const fallbacks = (FAMILIES[model.archetype].fallbackEdits ?? []).filter(edit => edit.applies(model.generator.params, model.generator.structure)).map(edit => [edit.id]);
+  const attempts = [order.slice(0, wanted), ...order.map(edit => [edit]), ...fallbacks];
   for (const editIds of attempts) {
     const { model: earlier, soup, phrases } = earlierState(model, editIds, { id: model.id + '.earlier-' + seed });
     const limit = CONTESTED_FRACTION * Math.max(diagonal(primarySoup.bounds), diagonal(soup.bounds));

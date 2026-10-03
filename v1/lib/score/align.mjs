@@ -63,12 +63,15 @@ export function fScores(truth, candidate, transform, taus) {
 
 export const fScore = (truth, candidate, transform, tau) => fScores(truth, candidate, transform, [tau])[0];
 
-// Pose quality for choosing between fits: F@2 % first (the headline), and
-// when two poses are within half a point of each other, F@1 %. F@2 % alone is
-// flat for small offsets, so it cannot tell a fit from the same fit slid 20 cm
-// along a wall.
+// Pose quality for choosing between fits: F@2 % first, and when two poses are
+// within half a point of each other, F@1 %. F@2 % alone is flat for small
+// offsets, so it cannot tell a fit from the same fit slid 20 cm along a wall.
+// The shape score's tolerances are finer: index.mjs refines the chosen pose
+// for them in a last stage that never leaves its basin. The ranking itself
+// stays at 2 % / 1 %: no test or calibration row showed a problem with it, and
+// FRAME_MARGIN below is calibrated in F@2 % points.
 export const TIE = 0.005;
-// The pairing radius the fit settles at: the headline threshold. A narrower
+// The pairing radius the fit settles at: the ranking threshold. A narrower
 // final kernel (1 %) was tried: it locks a mis-sized model onto whichever wall
 // happens to agree instead of balancing the error, and lost 14 points
 // of F@2 % on a 10 % oversized fixture against the pose F@2 % itself prefers.

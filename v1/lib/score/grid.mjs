@@ -2,6 +2,7 @@
 // xyz triples). The scorer never rebuilds an index while it fits a transform:
 // queries are mapped into the space the index was built in instead, so one
 // index per point set serves every iteration of every alignment start.
+const FAR_CELLS = 2;
 export class PointGrid {
   constructor(points, cellSize, { maxCells = 1 << 21 } = {}) {
     const count = points.length / 3;
@@ -99,6 +100,37 @@ export class PointGrid {
     return this.order[bestAt];
   }
 
+  // nearest(), for queries that may lie far from every point: within
+  // FAR_CELLS cells the grid answers (exactly as nearest() does); beyond, a
+  // k-d tree over the same points, built on first use, instead of a walk over
+  // every empty ring of cells in between. Same answer up to ties at exactly
+  // equal distance.
+  nearestFar(x, y, z, maxRadius = Infinity) {
+    if (this.empty) { this.distance = Infinity; return -1; }
+    const near = Math.min(maxRadius, FAR_CELLS * this.cell), i = this.nearest(x, y, z, near);
+    if (i >= 0 || near >= maxRadius) return i;
+    this.tree ??= new KdTree(this.xyz);
+    const p = this.tree.nearest(x, y, z, maxRadius);
+    this.distance = this.tree.distance;
+    return p < 0 ? -1 : this.order[p];
+  }
+
+  // Calls visit(index) for every point within `radius`, in no particular order.
+  forEachWithin(x, y, z, radius, visit) {
+    if (this.empty) return;
+    const { inverse, nx, ny, nz, start, xyz, min, order } = this, r2 = radius * radius;
+    const i0 = Math.max(0, Math.floor((x - radius - min[0]) * inverse)), i1 = Math.min(nx - 1, Math.floor((x + radius - min[0]) * inverse));
+    const j0 = Math.max(0, Math.floor((y - radius - min[1]) * inverse)), j1 = Math.min(ny - 1, Math.floor((y + radius - min[1]) * inverse));
+    const l0 = Math.max(0, Math.floor((z - radius - min[2]) * inverse)), l1 = Math.min(nz - 1, Math.floor((z + radius - min[2]) * inverse));
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
+      const row = (i * ny + j) * nz;
+      for (let p = start[row + l0], end = start[row + l1 + 1]; p < end; p++) {
+        const dx = xyz[3 * p] - x, dy = xyz[3 * p + 1] - y, dz = xyz[3 * p + 2] - z;
+        if (dx * dx + dy * dy + dz * dz <= r2) visit(order[p]);
+      }
+    }
+  }
+
   // True when some point within `radius` passes accept(index); cells are not
   // visited in distance order, so this answers existence, not "nearest".
   anyWithin(x, y, z, radius, accept) {
@@ -164,6 +196,131 @@ export class PointGrid {
   }
 }
 
+// Exact nearest-point queries at any distance (static k-d tree, median splits
+// on the widest axis, every node pruned by the distance to its bounding box).
+// A PointGrid answers a query near its points from a few cells, but one far
+// from every point walks every empty ring of cells in between, at a cost that
+// grows with the cube of the distance in cells: a detail group's local fit and
+// attribution ask exactly that for every truth point a wrong model lacks.
+// Pruning by box distance, not by the splitting plane alone, matters: the
+// points are surfaces, and a query a metre off a wall lies within a metre of
+// every split plane across a disc of the wall a metre wide, but within that
+// distance of only the boxes under its foot (plane-only pruning made detail
+// 2-3x slower than the grid it was meant to replace: 93 s against 41 s on one
+// tower group). Same answers as PointGrid.nearest (ties at exactly equal
+// distance aside).
+const KD_LEAF = 8;
+export class KdTree {
+  constructor(points) {
+    const count = points.length / 3;
+    this.count = count;
+    this.distance = Infinity;
+    if (!count) { this.empty = true; return; }
+    const order = new Int32Array(count);
+    for (let i = 0; i < count; i++) order[i] = i;
+    const axisAt = new Int8Array(count), coordinate = (i, axis) => points[3 * order[i] + axis];
+    const build = (lo, hi) => {
+      if (hi - lo <= KD_LEAF) return;
+      const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+      for (let i = lo; i < hi; i++) for (let axis = 0; axis < 3; axis++) {
+        const value = coordinate(i, axis);
+        if (value < min[axis]) min[axis] = value;
+        if (value > max[axis]) max[axis] = value;
+      }
+      const spans = [0, 1, 2].map(axis => max[axis] - min[axis]), axis = spans.indexOf(Math.max(...spans)), mid = (lo + hi) >> 1;
+      // Quickselect: order[mid] gets the median along `axis`, smaller to its left.
+      for (let left = lo, right = hi - 1; left < right;) {
+        const pivot = coordinate((left + right) >> 1, axis);
+        let i = left, j = right;
+        while (i <= j) {
+          while (coordinate(i, axis) < pivot) i++;
+          while (coordinate(j, axis) > pivot) j--;
+          if (i <= j) { const swap = order[i]; order[i] = order[j]; order[j] = swap; i++; j--; }
+        }
+        if (mid <= j) right = j;
+        else if (mid >= i) left = i;
+        else break;
+      }
+      axisAt[mid] = axis;
+      build(lo, mid);
+      build(mid + 1, hi);
+    };
+    build(0, count);
+    const xyz = new Float64Array(3 * count);
+    for (let i = 0; i < count; i++) { xyz[3 * i] = points[3 * order[i]]; xyz[3 * i + 1] = points[3 * order[i] + 1]; xyz[3 * i + 2] = points[3 * order[i] + 2]; }
+    // Bounding box of every node's range [lo, hi), stored at its key (lo + hi) >> 1
+    // (unique: an inner node's key is its splitting point, a leaf's lies inside it).
+    const boxes = new Float64Array(6 * count);
+    const bound = (lo, hi) => {
+      const key = 6 * ((lo + hi) >> 1);
+      let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+      const take = (a, b) => {
+        for (let p = a; p < b; p++) {
+          const x = xyz[3 * p], y = xyz[3 * p + 1], z = xyz[3 * p + 2];
+          if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; if (z < z0) z0 = z; if (z > z1) z1 = z;
+        }
+      };
+      const merge = at => {
+        if (boxes[at] < x0) x0 = boxes[at]; if (boxes[at + 1] < y0) y0 = boxes[at + 1]; if (boxes[at + 2] < z0) z0 = boxes[at + 2];
+        if (boxes[at + 3] > x1) x1 = boxes[at + 3]; if (boxes[at + 4] > y1) y1 = boxes[at + 4]; if (boxes[at + 5] > z1) z1 = boxes[at + 5];
+      };
+      if (hi - lo <= KD_LEAF) take(lo, hi);
+      else {
+        const mid = (lo + hi) >> 1;
+        take(mid, mid + 1);
+        if (mid > lo) merge(bound(lo, mid));
+        if (hi > mid + 1) merge(bound(mid + 1, hi));
+      }
+      boxes[key] = x0; boxes[key + 1] = y0; boxes[key + 2] = z0; boxes[key + 3] = x1; boxes[key + 4] = y1; boxes[key + 5] = z1;
+      return key;
+    };
+    bound(0, count);
+    // Depth-first traversal stack: at most two entries per level.
+    const depth = 2 * (Math.ceil(Math.log2(count + 1)) + 2);
+    Object.assign(this, { order, axisAt, xyz, boxes, stackLo: new Int32Array(depth), stackHi: new Int32Array(depth) });
+  }
+
+  // As PointGrid.nearest: index (original order) of the nearest point no
+  // further than maxRadius, or -1; its distance is left in this.distance.
+  nearest(x, y, z, maxRadius = Infinity) {
+    this.distance = Infinity;
+    if (this.empty) return -1;
+    const { axisAt, xyz, boxes, stackLo, stackHi } = this;
+    let best = maxRadius === Infinity ? Infinity : maxRadius * maxRadius, bestAt = -1, top = 0;
+    stackLo[0] = 0; stackHi[0] = this.count; top = 1;
+    while (top > 0) {
+      top--;
+      const lo = stackLo[top], hi = stackHi[top], mid = (lo + hi) >> 1, at = 6 * mid;
+      // Squared distance from the query to the node's box: nothing inside is nearer.
+      const bx = x < boxes[at] ? boxes[at] - x : x > boxes[at + 3] ? x - boxes[at + 3] : 0;
+      const by = y < boxes[at + 1] ? boxes[at + 1] - y : y > boxes[at + 4] ? y - boxes[at + 4] : 0;
+      const bz = z < boxes[at + 2] ? boxes[at + 2] - z : z > boxes[at + 5] ? z - boxes[at + 5] : 0;
+      if (bx * bx + by * by + bz * bz >= best) continue;
+      if (hi - lo <= KD_LEAF) {
+        for (let p = lo; p < hi; p++) {
+          const dx = xyz[3 * p] - x, dy = xyz[3 * p + 1] - y, dz = xyz[3 * p + 2] - z, d2 = dx * dx + dy * dy + dz * dz;
+          if (d2 < best) { best = d2; bestAt = p; }
+        }
+        continue;
+      }
+      const dx = xyz[3 * mid] - x, dy = xyz[3 * mid + 1] - y, dz = xyz[3 * mid + 2] - z, d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 < best) { best = d2; bestAt = mid; }
+      const axis = axisAt[mid], diff = (axis === 0 ? x : axis === 1 ? y : z) - xyz[3 * mid + axis];
+      // The near side is pushed last, so it is searched first.
+      if (diff < 0) {
+        if (hi > mid + 1) { stackLo[top] = mid + 1; stackHi[top++] = hi; }
+        if (mid > lo) { stackLo[top] = lo; stackHi[top++] = mid; }
+      } else {
+        if (mid > lo) { stackLo[top] = lo; stackHi[top++] = mid; }
+        if (hi > mid + 1) { stackLo[top] = mid + 1; stackHi[top++] = hi; }
+      }
+    }
+    if (bestAt < 0) return -1;
+    this.distance = Math.sqrt(best);
+    return this.order[bestAt];
+  }
+}
+
 // Exact point-to-surface distance against a soup's triangles, for queries that
 // only care about distances up to `reach` (anything further reports Infinity).
 export class TriangleGrid {
@@ -201,33 +358,37 @@ export class TriangleGrid {
   }
 }
 
-// Squared distance from a point to triangle t (closest-point regions, after
-// Ericson, Real-Time Collision Detection 5.1.5).
-function pointTriangleDistance2(p, t, x, y, z) {
+// Closest point of triangle t to (x, y, z), written to `out`; returns the
+// squared distance (closest-point regions, after Ericson, Real-Time Collision
+// Detection 5.1.5).
+export function closestPointOnTriangle(p, t, x, y, z, out) {
   const i = 9 * t, ax = p[i], ay = p[i + 1], az = p[i + 2];
   const abx = p[i + 3] - ax, aby = p[i + 4] - ay, abz = p[i + 5] - az, acx = p[i + 6] - ax, acy = p[i + 7] - ay, acz = p[i + 8] - az;
   const apx = x - ax, apy = y - ay, apz = z - az;
   const d1 = abx * apx + aby * apy + abz * apz, d2 = acx * apx + acy * apy + acz * apz;
-  const sq = (qx, qy, qz) => (x - qx) ** 2 + (y - qy) ** 2 + (z - qz) ** 2;
-  if (d1 <= 0 && d2 <= 0) return sq(ax, ay, az);
+  const at = (qx, qy, qz) => { out[0] = qx; out[1] = qy; out[2] = qz; return (x - qx) ** 2 + (y - qy) ** 2 + (z - qz) ** 2; };
+  if (d1 <= 0 && d2 <= 0) return at(ax, ay, az);
   const bpx = x - p[i + 3], bpy = y - p[i + 4], bpz = z - p[i + 5];
   const d3 = abx * bpx + aby * bpy + abz * bpz, d4 = acx * bpx + acy * bpy + acz * bpz;
-  if (d3 >= 0 && d4 <= d3) return sq(p[i + 3], p[i + 4], p[i + 5]);
+  if (d3 >= 0 && d4 <= d3) return at(p[i + 3], p[i + 4], p[i + 5]);
   const vc = d1 * d4 - d3 * d2;
-  if (vc <= 0 && d1 >= 0 && d3 <= 0) { const v = d1 / (d1 - d3); return sq(ax + v * abx, ay + v * aby, az + v * abz); }
+  if (vc <= 0 && d1 >= 0 && d3 <= 0) { const v = d1 / (d1 - d3); return at(ax + v * abx, ay + v * aby, az + v * abz); }
   const cpx = x - p[i + 6], cpy = y - p[i + 7], cpz = z - p[i + 8];
   const d5 = abx * cpx + aby * cpy + abz * cpz, d6 = acx * cpx + acy * cpy + acz * cpz;
-  if (d6 >= 0 && d5 <= d6) return sq(p[i + 6], p[i + 7], p[i + 8]);
+  if (d6 >= 0 && d5 <= d6) return at(p[i + 6], p[i + 7], p[i + 8]);
   const vb = d5 * d2 - d1 * d6;
-  if (vb <= 0 && d2 >= 0 && d6 <= 0) { const w = d2 / (d2 - d6); return sq(ax + w * acx, ay + w * acy, az + w * acz); }
+  if (vb <= 0 && d2 >= 0 && d6 <= 0) { const w = d2 / (d2 - d6); return at(ax + w * acx, ay + w * acy, az + w * acz); }
   const va = d3 * d6 - d5 * d4;
   if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) {
     const w = (d4 - d3) / (d4 - d3 + d5 - d6);
-    return sq(p[i + 3] + w * (p[i + 6] - p[i + 3]), p[i + 4] + w * (p[i + 7] - p[i + 4]), p[i + 5] + w * (p[i + 8] - p[i + 5]));
+    return at(p[i + 3] + w * (p[i + 6] - p[i + 3]), p[i + 4] + w * (p[i + 7] - p[i + 4]), p[i + 5] + w * (p[i + 8] - p[i + 5]));
   }
   const denominator = 1 / (va + vb + vc), v = vb * denominator, w = vc * denominator;
-  return sq(ax + abx * v + acx * w, ay + aby * v + acy * w, az + abz * v + acz * w);
+  return at(ax + abx * v + acx * w, ay + aby * v + acy * w, az + abz * v + acz * w);
 }
+
+const scratchPoint = [0, 0, 0];
+function pointTriangleDistance2(p, t, x, y, z) { return closestPointOnTriangle(p, t, x, y, z, scratchPoint); }
 
 // Nearest-point index for a densely sampled surface that must also answer
 // queries from far away (junk geometry metres from the object). A fine grid

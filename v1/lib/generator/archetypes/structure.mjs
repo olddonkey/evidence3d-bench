@@ -408,4 +408,14 @@ export const edits = [
   { id: 'no-hut', scope: ['hut'], applies: p => p.kind === 'dish' && p.hut.built !== false, apply: p => ({ ...p, hut: { ...p.hut, built: false } }), phrase: 'the equipment hut had not been built' },
 ];
 
-export default { id: 'structure', sample, build, edits };
+// Tried by decoyModel only when none of the edits above gives an earlier state that
+// a probe can tell apart (generator 1.1): a two-tier guide frame whose governor
+// house stands in front of the stair tower has nothing else (about 1 % of seeds
+// threw in 1.0). applicableEdits does not offer it, so no model or decoy that
+// generator 1.0 could build changes.
+export const fallbackEdits = [
+  { id: 'one-tier-fewer-short', scope: ['columns', 'girders', 'bracing', 'bell', 'stair'], applies: p => p.kind === 'guide-frame' && p.tiers === 2,
+    apply: p => ({ ...p, tiers: 1 }), phrase: 'the guide frame was one tier lower' },
+];
+
+export default { id: 'structure', sample, build, edits, fallbackEdits };

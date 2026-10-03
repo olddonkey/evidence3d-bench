@@ -139,7 +139,10 @@ export function build(p) {
   b.group('windows.right', 'Nave windows, right side', 'openings', 0.1, 'right');
   b.group('west.front', 'West door, surround and west window', 'entrance', 0.1, 'front');
   b.group('tower', 'Main tower', 'massing', 0.3, T.place === 'side-left' ? 'left' : T.place === 'side-right' ? 'right' : 'front');
-  b.group('tower.top', 'Main tower top (' + T.top + ')', 'roof', 0.2, 'roof');
+  // Most of a parapet top (with or without corner pinnacles) is its coping, which
+  // stands 14 cm above the wall and 7 cm proud of it: that is its detail size, not
+  // the 20 cm that tells a spire or a helm roof from its absence.
+  b.group('tower.top', 'Main tower top (' + T.top + ')', 'roof', T.top === 'parapet' ? 0.12 : 0.2, 'roof');
   b.group('tower.belfry', 'Belfry openings and louvres', 'openings', 0.12, 'all');
 
   // ---- tower footprint (decided first: it decides which bays keep their windows) ----
@@ -420,4 +423,16 @@ export const edits = [
   { id: 'no-second-tower', scope: ['tower2'], applies: (p, s) => s.tower2, apply: p => ({ ...p, tower2: { ...p.tower2, built: false } }), phrase: 'the second tower had not been built' },
 ];
 
-export default { id: 'hall', sample, build, edits };
+// Tried by decoyModel only when none of the edits above gives an earlier state that
+// a probe can tell apart (generator 1.1): a four-bay hall with a spire and no porch
+// has no other later addition whose probe lands robustly in both states (about 1 %
+// of seeds threw in 1.0). applicableEdits does not offer them, so no model or decoy
+// that generator 1.0 could build changes.
+export const fallbackEdits = [
+  { id: 'no-transept', scope: ['transept', 'nave', 'windows.left', 'windows.right', 'buttresses', 'porch'], applies: (p, s) => !!s.transept,
+    apply: p => ({ ...p, transept: null }), phrase: 'the transept had not been built' },
+  { id: 'fewer-bays-short', scope: ['nave', 'nave.roof', 'buttresses', 'windows.left', 'windows.right', 'apse', 'tower2', 'porch'],
+    applies: p => p.massing.bays === 4 && !p.transept, apply: p => ({ ...p, massing: { ...p.massing, bays: 3 } }), phrase: 'the nave was one bay shorter' },
+];
+
+export default { id: 'hall', sample, build, edits, fallbackEdits };

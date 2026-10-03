@@ -14,10 +14,12 @@ import { layout, VARIANTS } from '../lib/contract.mjs';
 import { sampleModel } from '../fixtures/sample-model.mjs';
 import { scoreSubmission, scoreSoup, loadContext, makeContext, mutations, calibrate } from '../lib/score/index.mjs';
 import { syntheticEvidence } from '../lib/score/synthetic.mjs';
-import { PointGrid, SurfaceIndex } from '../lib/score/grid.mjs';
-import { linearToLab, deltaE76 } from '../lib/score/metrics.mjs';
+import { PointGrid, SurfaceIndex, KdTree } from '../lib/score/grid.mjs';
+import { linearToLab, deltaE76, SHAPE_FRACTIONS, THRESHOLDS } from '../lib/score/metrics.mjs';
 import { coverageMaps, coverageMask } from '../lib/score/coverage.mjs';
 import { sampleSurface } from '../lib/score/sampling.mjs';
+import { visibleSurface, surfaceDistance, SEARCH_SLACK_FRACTION } from '../lib/score/surface.mjs';
+import { SCORER, SCORER_FILES } from '../lib/score/version.mjs';
 
 // Contexts are expensive (truth sampling, coverage, detail views), so each
 // evidence level is built once and every candidate is scored once.
@@ -75,7 +77,7 @@ function lowerRoofModel() {
 
 test('grid nearest-neighbour search agrees with brute force, near and far', () => {
   const random = rng('grid'), points = Float64Array.from({ length: 3000 }, () => random.range(-5, 5));
-  const grid = new PointGrid(points, 0.7), index = new SurfaceIndex(points, 10);
+  const grid = new PointGrid(points, 0.7), index = new SurfaceIndex(points, 10), tree = new KdTree(points);
   for (let q = 0; q < 300; q++) {
     const spread = q % 3 === 0 ? 60 : 8, x = random.range(-spread, spread), y = random.range(-spread, spread), z = random.range(-spread, spread);
     let best = Infinity, at = -1;
@@ -91,7 +93,88 @@ test('grid nearest-neighbour search agrees with brute force, near and far', () =
     if (best <= 0.1 * 10) assert.equal(k, at);
     const r = 1.2;
     assert.equal(grid.nearest(x, y, z, r) >= 0, best <= r);
+    // The k-d tree and the grid's far path are exact at any distance.
+    assert.equal(tree.nearest(x, y, z), at);
+    near(tree.distance, best, 1e-9);
+    assert.equal(tree.nearest(x, y, z, r) >= 0, best <= r);
+    for (const radius of [Infinity, 0.5, 3, 40]) {
+      const k = grid.nearestFar(x, y, z, radius);
+      assert.equal(k, best <= radius ? at : -1, 'nearestFar within ' + radius);
+      if (k >= 0) near(grid.distance, best, 1e-9);
+    }
   }
+});
+
+// Triangles of an axis-aligned box.
+function boxTriangles(min, max) {
+  const [x0, y0, z0] = min, [x1, y1, z1] = max;
+  const v = [[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0], [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]];
+  return [[0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7], [0, 1, 5], [0, 5, 4], [3, 7, 6], [3, 6, 2], [0, 4, 7], [0, 7, 3], [1, 2, 6], [1, 6, 5]].flatMap(face => face.flatMap(i => v[i]));
+}
+
+test('point-to-surface distance: two samplings of one surface agree far below the finest tolerance', () => {
+  const soup = soupFromModel(model), D = Math.hypot(...soup.bounds.max.map((v, i) => v - soup.bounds.min[i])), voxel = 0.004 * D;
+  const tau = Math.min(...SHAPE_FRACTIONS) * D, slack = SEARCH_SLACK_FRACTION * D;
+  const truth = sampleSurface(soup, { voxel, keepViews: true }), grid = new PointGrid(truth.points, 0.02 * D), target = visibleSurface(soup, truth, grid);
+  // The same surface sampled with an independent pixel and voxel phase, as a
+  // submission framed on its own bounds is: point to point, two samplings sit
+  // up to a voxel apart; to the surface they coincide.
+  const grow = [0.37, 0.61, 0.13, 0.29, 0.83, 0.55];
+  const other = sampleSurface(soup, { voxel, box: { min: soup.bounds.min.map((v, i) => v - grow[i] * voxel), max: soup.bounds.max.map((v, i) => v + grow[3 + i] * voxel) } });
+  let pointWithin = 0, surfaceWithin = 0;
+  for (let i = 0; i < other.count; i++) {
+    const x = other.points[3 * i], y = other.points[3 * i + 1], z = other.points[3 * i + 2];
+    grid.nearest(x, y, z);
+    const nearest = grid.distance;
+    if (nearest <= 0.1 * tau) pointWithin++;
+    if (surfaceDistance(target, x, y, z, nearest, Math.min(nearest, 0.05 * D) + slack) <= 0.1 * tau) surfaceWithin++;
+  }
+  assert.ok(surfaceWithin / other.count >= 0.995, 'to the surface ' + surfaceWithin / other.count);
+  assert.ok(pointWithin / other.count < 0.5, 'point to point ' + pointWithin / other.count);
+});
+
+test('point-to-surface distance ignores hidden parts of triangles and finds the sides of a post thinner than a voxel', () => {
+  // A wall 2 m thick (its front face two triangles), a box standing against
+  // it, a 4 cm post in front.
+  const positions = [...boxTriangles([-6, 0, -2], [6, 6, 0]), ...boxTriangles([-2, 0, 0.02], [2, 3, 2]), ...boxTriangles([3.98, 0, 1], [4.02, 3, 1.04])];
+  const soup = solidSoup(positions), D = Math.hypot(...soup.bounds.max.map((v, i) => v - soup.bounds.min[i])), voxel = 0.004 * D;
+  const truth = sampleSurface(soup, { voxel, keepViews: true }), grid = new PointGrid(truth.points, 0.02 * D), target = visibleSurface(soup, truth, grid);
+  const distance = (x, y, z) => { grid.nearest(x, y, z); const nearest = grid.distance; return { nearest, surface: surfaceDistance(target, x, y, z, nearest, Math.min(nearest, 0.05 * D) + SEARCH_SLACK_FRACTION * D) }; };
+  // The wall's front triangles run on behind the box, but nothing of them shows
+  // there: the nearest visible surface is the box top or the wall above it,
+  // 1.5 m away (not the wall plane the point lies on).
+  near(distance(0, 1.5, 0).surface, 1.5, 0.05, 'wall behind the box');
+  // The post's side faces keep no sample point of their own (the front face
+  // reaches their voxels first), yet they are surface.
+  let away = 0;
+  for (let y = 0.2; y < 2.9; y += 0.1) {
+    const { nearest, surface } = distance(4.02, y, 1.02);
+    assert.ok(surface < 0.002, 'post side at y ' + y.toFixed(1) + ': ' + surface);
+    if (nearest > 0.01) away++;
+  }
+  assert.ok(away > 0, 'the side faces have no sample of their own nearby');
+});
+
+test('the scorer stamp covers every scorer file and the kernel it imports, hashed as documented', async () => {
+  const { readdir } = await import('node:fs/promises');
+  const { createHash } = await import('node:crypto');
+  const { fileURLToPath } = await import('node:url');
+  const repo = fileURLToPath(new URL('../../', import.meta.url));
+  const own = (await readdir(join(repo, 'v1/lib/score'))).filter(name => name.endsWith('.mjs')).map(name => 'v1/lib/score/' + name);
+  for (const file of [...own, 'v1/lib/soup.mjs', 'v1/lib/raster.mjs', 'v1/lib/contract.mjs', 'v1/lib/model.mjs', 'v1/lib/png.mjs', 'v1/lib/rng.mjs', 'lib/glb.mjs', 'lib/io.mjs']) {
+    assert.ok(SCORER_FILES.includes(file), file + ' is not hashed');
+  }
+  assert.deepEqual([...SCORER_FILES], [...SCORER_FILES].sort());
+  // Per file in path order: path, NUL, byte length, NUL, bytes.
+  const hash = createHash('sha256');
+  for (const file of SCORER_FILES) {
+    const bytes = await readFile(join(repo, file));
+    hash.update(file + '\0' + bytes.length + '\0');
+    hash.update(bytes);
+  }
+  assert.equal(SCORER.sha256, hash.digest('hex'));
+  assert.match(SCORER.version, /^\d+\.\d+\.\d+$/);
+  assert.ok(Object.isFrozen(SCORER));
 });
 
 test('linear-sRGB to CIE Lab matches reference values; CIE76 is Euclidean in Lab', () => {
@@ -174,6 +257,11 @@ test('a rigid shift or yaw of a correct model leaves the score unchanged and sho
 test('uniform scaling by 5/10/20 % lowers the metric score monotonically and leaves the scale-free score unchanged', () => {
   const metric = [score(METRIC, mutations.identity()), ...[1.05, 1.1, 1.2].map(k => score(METRIC, mutations.scale(k)))];
   for (let k = 1; k < metric.length; k++) assert.ok(metric[k].score < metric[k - 1].score, 'metric scores ' + metric.map(r => r.score));
+  // The shape score too: fitted at 2 % alone, 5 % too large (every wall
+  // within 2 %, few within the finer tolerances) scored below 10 % too large.
+  for (let k = 1; k < metric.length; k++) assert.ok(metric[k].shape_score < metric[k - 1].shape_score, 'metric shape ' + metric.map(r => r.shape_score));
+  assert.match(metric[1].alignment.shape_pose.stage, /^fine/, 'the 5 % model is measured at a pose fitted at the finer tolerances');
+  assert.equal(metric[0].alignment.shape_pose.stage, 'search');
   for (const [k, factor] of [1.05, 1.1, 1.2].entries()) {
     assert.equal(metric[k + 1].alignment.scale, 1, 'scale is locked on a metric task');
     // The scale error is named in "shape" even though it is not forgiven.
@@ -223,14 +311,19 @@ test('removing the roof on a scale-free task: roof F ~0 and the other groups wit
   for (const row of truth.detail.groups) if (row.id !== 'roof') near(group(dropped, row.id).f, row.f, 0.05, row.id);
 });
 
-test('flattening small details leaves the shape score almost unchanged and lowers detail.score', () => {
+// The shape tolerances (0.25 / 0.5 / 1 % of D: 4, 8 and 16 cm here) are
+// finer than the fixture's window recesses (14 cm) and door (73 cm), so
+// painting them on the wall does cost shape - about 2 points with all-round
+// evidence, 4.5 with the front photograph alone, where they are a tenth of
+// what is shown. The property kept is the one that matters: the loss lands in
+// detail, an order of magnitude more than in shape.
+test('flattening small details costs detail.score far more than the shape score', () => {
   for (const key of [METRIC, FREE, FRONT]) {
     const truth = score(key, mutations.identity());
     const flat = score(key, mutations.flattenGroup('front.windows.ground'), mutations.flattenGroup('front.windows.upper'), mutations.flattenGroup('front.door'));
-    near(flat.shape_score, truth.shape_score, 1, key + ' shape');
-    // The headline is half detail, so it does move - by about half the detail loss.
-    near(truth.score - flat.score, (truth.detail.score - flat.detail.score) / 2, 1, key + ' headline');
+    const shapeLoss = truth.shape_score - flat.shape_score, detailLoss = truth.detail.score - flat.detail.score;
     assert.ok(flat.detail.score <= truth.detail.score - 10, key + ' detail ' + truth.detail.score + ' -> ' + flat.detail.score);
+    assert.ok(shapeLoss <= 5 && shapeLoss <= detailLoss / 10, key + ' shape loss ' + shapeLoss + ' against detail loss ' + detailLoss);
     for (const id of ['front.windows.ground', 'front.windows.upper', 'front.door']) assert.ok(group(flat, id).f <= group(truth, id).f - 0.1, key + ' ' + id);
   }
 });
@@ -265,7 +358,7 @@ test('on t1 a front-only shell is not punished for the unseen rear; on t2 it is'
 
 test('junk is punished through precision; hidden interior geometry is neither rewarded nor punished', () => {
   for (const key of [METRIC, FRONT]) {
-    const truth = score(key, mutations.identity()), at2 = report => report.global.thresholds[1];
+    const truth = score(key, mutations.identity()), at2 = report => report.global.thresholds.find(row => row.fraction === 0.02);
     const ground = score(key, mutations.addGroundPlane());
     assert.ok(ground.shape_score <= truth.shape_score - 40 && at2(ground).precision < 0.3, key + ' ground plane ' + ground.shape_score);
     assert.ok(ground.score <= truth.score - 20, key + ' ground plane headline ' + ground.score);
@@ -403,6 +496,20 @@ test('scoreSubmission works end to end from a data root and never throws for a b
     assert.equal(report.valid, true, report.error);
     assert.ok(report.score >= 98 && report.alternates[0].contested[0].closer_to === 'primary');
     for (const key of ['global', 'alignment', 'strict', 'shape', 'detail', 'probes', 'probe_summary', 'alternates', 'appearance', 'technical', 'artifacts', 'timing_ms']) assert.ok(key in report, key);
+    // Every threshold row says whether it enters shape_score, the list of
+    // those fractions is named, and shape_score is 100 x their mean F.
+    assert.deepEqual(report.global.thresholds.map(row => row.fraction), THRESHOLDS);
+    assert.deepEqual(report.global.shape_fractions, SHAPE_FRACTIONS);
+    assert.deepEqual(report.global.thresholds.filter(row => row.in_shape_score).map(row => row.fraction), SHAPE_FRACTIONS);
+    for (const row of report.global.thresholds) for (const key of ['fraction', 'tau_m', 'precision', 'recall', 'f', 'in_shape_score']) assert.ok(key in row, key);
+    const rows = report.global.thresholds.filter(row => row.in_shape_score);
+    near(report.shape_score, 100 * rows.reduce((sum, row) => sum + row.f, 0) / rows.length, 0.01, 'shape_score');
+    near(report.score, (report.shape_score + report.detail.score) / 2, 0.01, 'score');
+    assert.ok(report.global.thresholds.some(row => row.fraction === 0.05 && !row.in_shape_score), 'the 5 % row stays as a diagnostic');
+    assert.equal(typeof report.alternates[0].shape_score, 'number');
+    // Every report names the scorer that wrote it, so a report re-scored later
+    // can be told from one written at run time.
+    assert.deepEqual(report.scorer, { version: SCORER.version, sha256: SCORER.sha256 });
     assert.equal(report.technical.mesh_count, model.parts.length);
     // The error maps exist, are the advertised size and actually show surface.
     assert.ok(report.artifacts.includes('error-front.png'));
@@ -415,6 +522,7 @@ test('scoreSubmission works end to end from a data root and never throws for a b
       assert.equal(rejected.valid, false);
       assert.equal(rejected.score, 0);
       assert.ok(typeof rejected.error === 'string' && rejected.error.length > 0);
+      assert.deepEqual(rejected.scorer, report.scorer, 'an invalid report names its scorer too');
     }
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -424,10 +532,15 @@ test('scoreSubmission works end to end from a data root and never throws for a b
 test('a 150k-triangle candidate scores in well under a minute', () => {
   const ctx = context(METRIC), dense = mutations.retessellate(4).apply(ctx.soup, ctx);
   assert.ok(dense.triangles >= 150000, String(dense.triangles));
-  const started = performance.now(), report = scoreSoup({ candidate: mutations.yaw(23).apply(dense, ctx), context: ctx });
-  const seconds = (performance.now() - started) / 1000;
+  // CPU time of this process (all its threads), not wall time: the scorer is
+  // single-threaded, so on an idle machine the two agree (8.3 s wall here),
+  // but other jobs sharing the machine stretch wall time alone (31.4 s wall
+  // at a load average near 100).
+  const started = performance.now(), cpu = process.cpuUsage();
+  const report = scoreSoup({ candidate: mutations.yaw(23).apply(dense, ctx), context: ctx });
+  const used = process.cpuUsage(cpu), seconds = (used.user + used.system) / 1e6, wall = (performance.now() - started) / 1000;
   assert.ok(report.score >= 98, String(report.score));
-  assert.ok(seconds < 30, seconds + ' s');
+  assert.ok(seconds < 30, seconds + ' s CPU (' + wall + ' s wall)');
 });
 
 test('calibrate runs every mutation on the front-photograph task and every expectation holds', () => {

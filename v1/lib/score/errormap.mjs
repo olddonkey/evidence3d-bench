@@ -4,6 +4,8 @@ import { encodePNG } from '../png.mjs';
 import { orthoViewOfBounds, render } from '../raster.mjs';
 import { cropToCamera, triangleNormals } from './sampling.mjs';
 import { coverageMask } from './coverage.mjs';
+import { SHAPE_FRACTIONS } from './metrics.mjs';
+import { surfaceDistance, SEARCH_SLACK_FRACTION } from './surface.mjs';
 
 // Error maps: per view, the ground truth coloured by its distance to the
 // aligned candidate (what the model misses: recall) next to the aligned
@@ -47,9 +49,13 @@ function put(image, x, y, color) {
   image.pixels[at] = color[0]; image.pixels[at + 1] = color[1]; image.pixels[at + 2] = color[2];
 }
 
-// Distance (as a fraction of the diagonal) -> colour. Green is inside the 1 %
-// threshold, yellow at the 2 % headline threshold, red at 5 % and beyond.
-const STOPS = [[0, [26, 120, 60]], [0.01, [140, 205, 120]], [0.02, [250, 220, 110]], [0.05, [214, 50, 40]], [0.08, [120, 0, 30]]];
+// Distance (as a fraction of the diagonal) -> colour, with stops at the shape
+// score's tolerances: one green inside the finest (distances that small are
+// not refined to the surface, so shading within it would only show the
+// sampling), green to yellow up to the middle one, red at the coarsest, dark
+// red at twice that and beyond.
+const LADDER = [...SHAPE_FRACTIONS].sort((a, b) => a - b), LEGEND_MAX = 2 * LADDER[LADDER.length - 1];
+const STOPS = [[0, [46, 140, 70]], [LADDER[0], [46, 140, 70]], [LADDER[1], [250, 220, 110]], [LADDER[LADDER.length - 1], [214, 50, 40]], [LEGEND_MAX, [120, 0, 30]]];
 export function errorColour(fraction) {
   if (!(fraction < STOPS[STOPS.length - 1][0])) return STOPS[STOPS.length - 1][1];
   for (let k = 1; k < STOPS.length; k++) {
@@ -95,10 +101,17 @@ function blit(image, source, left, top) {
 }
 
 // context: scoring context; aligned: candidate soup in the truth frame;
-// final: candidate visible-surface sample + grid in the truth frame.
-export function writeErrorMaps({ context, aligned, final, outDir, headlineF, views = ERROR_VIEWS }) {
+// final: candidate visible-surface sample + grid (+ target) in the truth frame.
+// Distances are those of the headline: to the other model's visible surface.
+export function writeErrorMaps({ context, aligned, final, outDir, shapeScore, views = ERROR_VIEWS }) {
   mkdirSync(outDir, { recursive: true });
   const { soup, diagonal, surface, maps } = context;
+  const slack = SEARCH_SLACK_FRACTION * diagonal, cap = LEGEND_MAX * diagonal;
+  const distanceTo = (target, grid, p) => {
+    const i = grid.nearest(p[0], p[1], p[2], 0.1 * diagonal), nearest = i < 0 ? Infinity : grid.distance;
+    // Beyond the legend the colour no longer changes: no need to refine.
+    return target && nearest > LADDER[0] * diagonal && nearest <= cap + slack ? surfaceDistance(target, p[0], p[1], p[2], nearest, Math.min(nearest, cap) + slack) : nearest;
+  };
   // Frame on the truth plus whatever of the candidate lies near it; far-away
   // junk is reported by the numbers, not allowed to shrink the picture.
   const limit = 0.5 * diagonal, frame = { min: [0, 1, 2].map(i => Math.max(soup.bounds.min[i] - limit, Math.min(soup.bounds.min[i], aligned.bounds.min[i]))),
@@ -111,34 +124,33 @@ export function writeErrorMaps({ context, aligned, final, outDir, headlineF, vie
       const evidenced = coverageMask(maps, points, normals, diagonal);
       return hits.map((hit, k) => {
         if (!evidenced[k]) return null;
-        final.grid.nearest(hit.p[0], hit.p[1], hit.p[2], 0.1 * diagonal);
-        return errorColour(final.grid.distance / diagonal);
+        return errorColour(distanceTo(final.target, final.grid, hit.p) / diagonal);
       });
     });
     const candidatePanel = panel(aligned, camera, hits => hits.map(hit => {
       const j = surface.grid.nearest(hit.p[0], hit.p[1], hit.p[2]);
       if (j < 0 || (!surface.evidenced[j] && !surface.empty?.(hit.p[0], hit.p[1], hit.p[2]))) return null;
-      return errorColour(surface.grid.distance / diagonal);
+      return errorColour(distanceTo(surface.target, surface.grid, hit.p) / diagonal);
     }));
     const width = 2 * camera.width + 3 * GAP, height = HEADER + camera.height + FOOTER;
     const image = { width, height, pixels: new Uint8Array(width * height * 3) };
     for (let i = 0; i < width * height; i++) image.pixels.set(BACKGROUND, 3 * i);
-    text(image, GAP, 10, view + ' view' + (headlineF !== undefined ? '   F@2% ' + (100 * headlineF).toFixed(1) : ''));
+    text(image, GAP, 10, view + ' view' + (shapeScore !== undefined && shapeScore !== null ? '   shape ' + shapeScore.toFixed(1) : ''));
     blit(image, truthPanel, GAP, HEADER);
     blit(image, candidatePanel, 2 * GAP + camera.width, HEADER);
     const labelY = HEADER + camera.height + 6;
     text(image, GAP, labelY, 'truth: distance to model', { size: 1 });
     text(image, 2 * GAP + camera.width, labelY, 'model: distance to truth', { size: 1 });
-    // Legend: 0 .. 8 % of the diagonal, ticks at 1, 2 and 5 %.
+    // Legend: 0 .. LEGEND_MAX of the diagonal, ticks at the shape tolerances.
     const barLeft = GAP, barTop = labelY + 14, barWidth = Math.min(360, width - 220), barHeight = 12;
     for (let x = 0; x < barWidth; x++) {
-      const colour = errorColour(0.08 * x / barWidth);
+      const colour = errorColour(LEGEND_MAX * x / barWidth);
       for (let y = 0; y < barHeight; y++) put(image, barLeft + x, barTop + y, colour);
     }
-    for (const tick of [0.01, 0.02, 0.05]) {
-      const x = barLeft + Math.round(tick / 0.08 * barWidth);
+    for (const tick of LADDER) {
+      const x = barLeft + Math.round(tick / LEGEND_MAX * barWidth);
       for (let y = -3; y < barHeight + 3; y++) put(image, x, barTop + y, INK);
-      text(image, x - 6, barTop + barHeight + 5, Math.round(tick * 100) + '%', { size: 1 });
+      text(image, x - 6, barTop + barHeight + 5, String(Number((tick * 100).toFixed(2))) + '%', { size: 1 });
     }
     text(image, barLeft + barWidth + 8, barTop + 2, 'of diag', { size: 1 });
     const swatch = barLeft + barWidth + 70;

@@ -213,15 +213,42 @@ export async function loadContext({ taskDir, truthDir, dataRoot });   // truth s
 
 Generation under isolation for two harnesses, `codex` and `claude-code`, with
 preflight probes, timing, token accounting, and scoring of what was produced.
+Details and the evidence for each boundary: `v1/lib/runner/README.md`.
+
+- `result.json` status: `completed`, `timeout`, `generation_failed`,
+  `missing_artifact`, `invalid_artifact`, `score_error`, `infra_error`.
+- **`infra_error` is not a sample.** The harness could not run the model (usage
+  or rate limit, lost login, network, service outage, CLI crash before any
+  model turn, runner interrupted). It has `score: null` and an `infra` block
+  with the reason and evidence. `run` archives the attempt as
+  `<task>/a<n>.infra-<k>/` and runs it again from a pristine workspace; every
+  try is listed in the new `result.json`. An integrity problem is never
+  excused as an infrastructure error.
+- **Waiting.** A usage or rate limit holds the batch until the stated reset
+  time (or a backoff), then continues inside the same `run`. Login, billing
+  and model problems stop the batch for a human. A CLI stuck retrying the
+  service, or silent, for 10 minutes is stopped and recorded as `infra_error`.
+- **Frozen.** `manifest.json` freezes the runner, scorer and generator source,
+  the harness binary, the prompt, each task and its object files, and each
+  task's `set`. Any of them changing stops the batch.
 
 ### G. Rendering, contestant preview tool, report — `v1/lib/render/**`, `v1/tools/**`, `v1/lib/report/**`
 
 ```js
 export function shadeSoup(soup, camera, options);       // → { width, height, pixels RGB }
 export async function installTools(destination);        // copies the contestant tool kit
-export async function aggregate({ dataRoot, batches }); // → leaderboard object
-export async function writeReport({ dataRoot, batches, outDir });   // static HTML + JSON
+export async function aggregate({ dataRoot, batches }); // → leaderboard (e3d-leaderboard-v2)
+export async function writeReport({ dataRoot, batches, outDir });
+// writes index.html, summary.md, leaderboard.json, tasks/, assets/; returns a compact summary
 ```
+
+Results are grouped by task set and never pooled across sets. Per set: the
+leaderboard with object-level bootstrap intervals, every pair of
+configurations compared on per-object differences (paired bootstrap and a
+Student-t cross-check; a pair counts as separated only when both exclude
+zero), variance between attempts and between objects with the smallest
+detectable difference, and breakdowns by variant, archetype and evidence
+delta. Details: `v1/lib/report/README.md`.
 
 ### Orchestrator — `v1/lib/pack.mjs`, `v1/cli.mjs`, this file
 
@@ -239,7 +266,10 @@ Let `D` be the ground-truth bounding-box diagonal.
    framed on their own bounds; hit pixels are unprojected and thinned on a voxel
    grid so spacing ≈ 0.4 % of that soup's diagonal. Only first-visible surfaces
    count: interiors and hidden faces are neither rewarded nor punished. Each
-   truth point keeps its part id and normal.
+   truth point keeps its part id and normal. Hits on triangles seen within
+   1e-6 of edge-on are dropped (the kernel rasterizer reports hits along an
+   exactly edge-on triangle whose line falls on pixel centres, at depths that
+   can lie behind other surfaces).
 3. **Evidence coverage.** A truth point is *evidenced* if at least one supplied,
    non-stale item with a camera shows it: it projects inside the image, it is the
    nearest surface there once occluders are rendered, and the surface is not seen
@@ -252,19 +282,38 @@ Let `D` be the ground-truth bounding-box diagonal.
    F@2 % wins. The fit is reported as `frame_error` (yaw, offset in metres and as
    a fraction of `D`, log-scale) so a right shape in the wrong place is visible
    as exactly that.
-5. **Headline.** At τ ∈ {1 %, 2 %, 5 %} of `D`: precision = share of candidate
-   points within τ of a truth point; recall = share of evidenced truth points
-   within τ of a candidate point; candidate points whose nearest truth point is
-   not evidenced are left out of precision. `F = 2PR/(P+R)`. **`shape_score =
-   100 × the mean of F@1 %, F@2 % and F@5 %`** — a single tolerance is a cliff
-   (at 2 % a model 5 % too large still scores 99.9); the mean gives graded
-   credit for coarse, medium and fine agreement. **`score = (shape_score +
+5. **Headline.** Distances are measured from each sample point to the other
+   model's first-visible surface, not to its nearest sample point: the
+   triangles seen in the voxels of the sample points nearby, a triangle's
+   closest point counting only where one of the 25 sampling views sees it
+   (otherwise the nearest sample's distance stands). Two samplings of one
+   surface lie up to a sample spacing (0.4 % of `D`) apart, which point to
+   point would be noise at the tolerances below. At τ ∈ {0.25 %, 0.5 %, 1 %,
+   2 %, 5 %} of `D`: precision = share of candidate points within τ of the
+   truth's visible surface; recall = share of evidenced truth points within τ
+   of the candidate's visible surface; candidate points whose nearest truth
+   point is not evidenced are left out of precision unless a supplied camera
+   shows their place to be empty. `F = 2PR/(P+R)`. **`shape_score = 100 × the
+   mean of F@0.25 %, F@0.5 % and F@1 %`** — the rows marked `in_shape_score`,
+   listed in `global.shape_fractions`; the 2 % and 5 % rows are reported as
+   diagnostics only. A single tolerance is a cliff; the mean over a geometric
+   ladder gives graded credit for coarse, medium and fine agreement. These
+   global surface measures (and appearance and the error maps) are taken at
+   the fit's *shape pose*: the searched pose of 9.4, or a point-to-plane
+   refinement of it with pairing radii of 1 %, 0.5 % and 0.25 % of `D` when
+   that raises `shape_score` by more than half a point (it never leaves the
+   searched basin; reported as `alignment.shape_pose`). Detail groups, probes
+   and contested probes use the searched pose. **`score = (shape_score +
    detail.score) / 2`** (shape alone when no detail group could be scored):
    surface agreement is dominated by large flat faces, so a bare bounding box
-   of a slab tower earns 82 on shape; detail is what separates a model of the
-   object from a box around it. Also reported: `strict` (no fitting at all) and `shape` (scale
-   fitted even on metric tasks), so "shape right, scale wrong" is distinguishable
-   from "shape wrong".
+   of a slab tower still earns about 60 on shape; detail is what separates a
+   model of the object from a box around it. Also reported: `strict` (F@2 %
+   with no fitting at all, point to point) and `shape` (F@2 % with the scale
+   fitted even on metric tasks), so "shape right, scale wrong" is
+   distinguishable from "shape wrong". Every report carries `scorer: {
+   version, sha256 }`, the hash covering the scorer's source and the kernel
+   files it imports, so a re-scored report can be told from one written at
+   run time.
 6. **Detail groups.** For every model group: local orthographic views looking at
    the group's facade (straight on, two obliques, one from above), framed on the
    group's bounding box, pixel ≤ `detail_size_m`/3. Truth pixels that belong to
@@ -288,12 +337,15 @@ Let `D` be the ground-truth bounding-box diagonal.
 
 ```jsonc
 { "schema": "e3d-report-v1", "protocol": "evidence3d-v1.0.0",
+  "scorer": { "version": "1.1.0", "sha256": "…" },
   "task_id": "…", "object": "…", "variant": "t2",
-  "valid": true, "error": null, "score": 71.3,
-  "global": { "diagonal_m": 14.2, "normal_consistency": 0.93,
-    "thresholds": [ { "fraction": 0.01, "tau_m": 0.142, "precision": 0.6, "recall": 0.5, "f": 0.55 }, … ],
+  "valid": true, "error": null, "score": 71.3, "shape_score": 80.2,
+  "global": { "diagonal_m": 14.2, "normal_consistency": 0.93, "distance": "point-to-visible-surface",
+    "shape_fractions": [0.0025, 0.005, 0.01],
+    "thresholds": [ { "fraction": 0.0025, "tau_m": 0.0355, "precision": 0.6, "recall": 0.5, "f": 0.55, "in_shape_score": true }, … ],
     "points": { "truth": 0, "truth_evidenced": 0, "candidate": 0, "candidate_counted": 0 } },
   "alignment": { "yaw_deg": 1.2, "scale": 1, "scale_locked": true, "translation_m": [0, 0, 0],
+    "shape_pose": { "stage": "search", "moved_m": 0 },
     "frame_error": { "yaw_deg": 1.2, "offset_m": 0.3, "offset_fraction": 0.02, "scale_log": 0 } },
   "strict": { "f": 0.4 }, "shape": { "f": 0.74, "scale": 1.08 },
   "detail": { "score": 38.0, "categories": [ { "id": "openings", "f": 0.2 } ],
@@ -319,8 +371,10 @@ The scorer is not trusted until, on the fixture and on generated objects:
 - uniform scaling by 5 / 10 / 20 % lowers `score` monotonically on a metric
   task and leaves it unchanged on a scale-free task;
 - removing a group drives that group's F towards 0 while other groups stay put;
-- flattening small details leaves the headline almost unchanged and lowers
-  `detail.score` — the headline is about massing, the detail score about detail;
+- flattening small details (relief within the coarsest shape tolerance, 1 %
+  of D) costs the shape score at most a few points and the detail score an
+  order of magnitude more — the shape score is about massing, the detail
+  score about detail;
 - a bounding-box "massing only" model scores clearly below the truth and near 0
   on detail; a mirrored model of an asymmetric object scores clearly lower;
 - on `t1` a front-only shell is not punished for the unseen rear, on `t2` it is.

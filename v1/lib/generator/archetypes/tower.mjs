@@ -149,9 +149,14 @@ export function build(p) {
     const yTop = y0 + floors * fh;
     if (M.facade !== 'punched') {
       b.box(id + '-glass', 'shaft', 'glass', [x0, y0 - 0.3, z0], [x1, yTop + 0.02, z1]);
-      const proud = 0.07;
+      // Spandrels stand 14 cm proud of the glass: at 7 cm (generator 1.0) they lay
+      // inside the grid's scoring tolerance (0.6 x 12 cm), so a plain glass box
+      // "recalled" them. Ribbon fins (16 cm) still stand 2 cm in front of them. The
+      // top spandrel now reaches past the roof slab's 10 cm overhang, so it rises
+      // 6 cm into the slab, clear of the fin tops 2 cm in.
+      const proud = 0.14;
       for (let f = 0; f <= floors; f++) {
-        const ya = f === 0 ? y0 - 0.3 : y0 + f * fh - spandrel / 2, yb = Math.min(yTop + 0.02, y0 + f * fh + spandrel / 2);
+        const ya = f === 0 ? y0 - 0.3 : y0 + f * fh - spandrel / 2, yb = Math.min(yTop + 0.06, y0 + f * fh + spandrel / 2);
         b.box(id + '-spandrel-' + f + '-front', 'facade.grid', 'panel', [x0 - proud, ya, z1 - 0.02], [x1 + proud, yb, z1 + proud]);
         b.box(id + '-spandrel-' + f + '-rear', 'facade.grid', 'panel', [x0 - proud, ya, z0 - proud], [x1 + proud, yb, z0 + 0.02]);
         b.box(id + '-spandrel-' + f + '-left', 'facade.grid', 'panel', [x0 - proud, ya, z0 + 0.02], [x0 + 0.02, yb, z1 - 0.02]);

@@ -96,6 +96,11 @@ function meanColour(soup) {
 
 const solid = (positions, colour, part) => makeSoup(positions, new Int32Array(positions.length / 9), Float32Array.from({ length: positions.length / 3 }, (_, i) => colour[i % 3]), [part]);
 
+// Pixel sizes (fractions of the diagonal) at which addInterior looks for
+// copy faces that still show: eight raster phases around the scorer's own
+// sampling pixel (0.2 %).
+const INTERIOR_PIXELS = [0.001, 0.0012, 0.0014, 0.0016, 0.0018, 0.002, 0.0022, 0.0024];
+
 export const mutations = {
   identity: () => ({ id: 'identity', apply: soup => soup }),
 
@@ -189,12 +194,19 @@ export const mutations = {
     const copy = refineEdges(transformSoup(soup, { scale: factor, translation: centre.map(value => value * (1 - factor)) }), 0.02 * d);
     // Removing the copy's visible faces can expose faces of the copy behind
     // them (through a window, say), so repeat until nothing of it shows.
+    // Each direction is rendered at every INTERIOR_PIXELS size, i.e. at eight
+    // raster phases: through an open frame (a water tower's legs and bracing)
+    // the copy shows in gaps narrower than a pixel, which one raster grid
+    // misses and another hits. With one size (0.15 %) the scorer's own
+    // sampling still found 850-970 copy points (1.7-1.9 % of its sample) on
+    // structure-0015-t1, and the "hidden" copy cost 2 shape points at the
+    // 0.25 / 0.5 / 1 % tolerances; with the eight, 0-94.
     let merged = concat(soup, { ...copy, parts: soup.parts.map(id => 'interior-' + id) });
     for (let round = 0; round < 12; round++) {
       const seen = new Uint8Array(merged.triangles);
       let exposed = 0;
-      for (const direction of SAMPLING_DIRECTIONS) {
-        const { camera } = frameBox(direction, soup.bounds, { pixel: 0.0015 * d, margin: 0.01 * d });
+      for (const pixel of INTERIOR_PIXELS) for (const direction of SAMPLING_DIRECTIONS) {
+        const { camera } = frameBox(direction, soup.bounds, { pixel: pixel * d, margin: 0.01 * d });
         for (const t of render(merged, camera).tri) if (t >= soup.triangles && !seen[t]) { seen[t] = 1; exposed++; }
       }
       if (!exposed) break;

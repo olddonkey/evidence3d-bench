@@ -3,6 +3,7 @@
 // confirm that a model is what its JSON claims (dimensions on real edges, no
 // z-fighting, not mirror-symmetric).
 import { orthoCamera, render, raycast, triangleNormal, cross, dot, normalize } from '../raster.mjs';
+import { filterSoup } from '../soup.mjs';
 
 const angleBetween = (a, b) => Math.acos(Math.min(1, Math.abs(dot(a, b)))) * 180 / Math.PI;
 
@@ -230,3 +231,144 @@ export function halfTurnSoup(soup) {
 }
 
 export const diagonal = bounds => Math.hypot(...bounds.max.map((v, i) => v - bounds.min[i]));
+
+// ---------------------------------------------------------------------------
+// Group relief: can a group be told from its absence at its own detail size?
+//
+// The scorer judges a group at tau_g = 0.6 x detail_size_m, matching surface
+// points that lie within tau_g and face the same way (45 degrees). A group whose
+// surface lies that close to what is behind or beside it (a plinth 3 cm proud of
+// its wall, a spandrel 7 cm proud of the glass) is "recalled" by a model that
+// leaves it out. This mirrors that test without depending on the scorer: the
+// group's visible surface is sampled from the views the scorer uses for its
+// facade, the model without the group is sampled from the same views, and each
+// group point gets the distance to the nearest remaining point facing the same
+// way. `relief_m` is the median of those distances: the depth by which at least
+// half of the group's visible surface stands out from its absence.
+
+const towardsViewer = (headingDeg, elevationDeg) => {
+  const a = headingDeg * Math.PI / 180, e = elevationDeg * Math.PI / 180;
+  return [Math.sin(a) * Math.cos(e), Math.sin(e), Math.cos(a) * Math.cos(e)];
+};
+const FACADE_HEADINGS = { front: 0, right: 90, rear: 180, left: 270 };
+
+// Viewer directions per facade, as the scorer looks at a group (DESIGN.md 9.6):
+// straight on, two obliques and one from above; a roof from above and the four
+// sides; a group on every side from eight headings and above.
+export function facadeDirections(facade) {
+  if (facade in FACADE_HEADINGS) {
+    const h = FACADE_HEADINGS[facade];
+    return [towardsViewer(h, 0), towardsViewer(h - 35, 10), towardsViewer(h + 35, 10), towardsViewer(h, 50)];
+  }
+  if (facade === 'roof') return [[0, 1, 0], ...[0, 90, 180, 270].map(h => towardsViewer(h, 45))];
+  return [...[0, 90, 180, 270].map(h => towardsViewer(h, 0)), ...[45, 135, 225, 315].map(h => towardsViewer(h, 30)), [0, 1, 0]];
+}
+
+// Orthographic camera looking against `toViewer`, framed on a box at about `pixel` metres per pixel.
+function boxCamera(toViewer, box, pixel, maxPixels) {
+  const forward = toViewer.map(v => -v);
+  const right = Math.abs(forward[1]) > 0.999 ? [1, 0, 0] : normalize(cross(forward, [0, 1, 0]));
+  const up = cross(right, forward), origin = box.min.map((v, i) => (v + box.max[i]) / 2);
+  let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+  for (let corner = 0; corner < 8; corner++) {
+    const p = [0, 1, 2].map(i => (corner >> i & 1 ? box.max[i] : box.min[i]) - origin[i]);
+    const u = dot(p, right), v = dot(p, up);
+    u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v);
+  }
+  const step = Math.max(pixel, (u1 - u0) / maxPixels, (v1 - v0) / maxPixels);
+  const width = Math.max(1, Math.ceil((u1 - u0) / step)), height = Math.max(1, Math.ceil((v1 - v0) / step));
+  return orthoCamera({ origin, right, up, extent: [u0, u0 + width * step, v0, v0 + height * step], width, height });
+}
+
+// Visible surface points of a render inside `box` with their unit normals turned
+// towards the viewer, appended to `out` as flat [x, y, z, nx, ny, nz] runs.
+function visiblePoints(soup, normals, camera, keep, box, out) {
+  const image = render(soup, camera), [u0, u1, v0, v1] = camera.extent, { width, height, origin, right, up, forward } = camera;
+  const du = (u1 - u0) / width, dv = (v1 - v0) / height, [bx0, by0, bz0] = box.min, [bx1, by1, bz1] = box.max;
+  for (let y = 0; y < height; y++) {
+    const v = v1 - (y + 0.5) * dv;
+    for (let x = 0; x < width; x++) {
+      const at = y * width + x, t = image.tri[at];
+      if (t < 0 || !keep[soup.triPart[t]]) continue;
+      const u = u0 + (x + 0.5) * du, d = image.depth[at];
+      const px = origin[0] + u * right[0] + v * up[0] + d * forward[0];
+      const py = origin[1] + u * right[1] + v * up[1] + d * forward[1];
+      const pz = origin[2] + u * right[2] + v * up[2] + d * forward[2];
+      if (px < bx0 || px > bx1 || py < by0 || py > by1 || pz < bz0 || pz > bz1) continue;
+      let nx = normals[3 * t], ny = normals[3 * t + 1], nz = normals[3 * t + 2];
+      if (nx * forward[0] + ny * forward[1] + nz * forward[2] > 0) { nx = -nx; ny = -ny; nz = -nz; }
+      out.push(px, py, pz, nx, ny, nz);
+    }
+  }
+}
+
+function soupNormals(soup) {
+  const normals = new Float64Array(soup.triangles * 3);
+  for (let t = 0; t < soup.triangles; t++) normals.set(triangleNormal(soup, t), 3 * t);
+  return normals;
+}
+
+export function groupRelief(model, soup, { pixelsPerDetail = 3, maxPixels = 240, maxQueries = 6000, normalDeg = 45 } = {}) {
+  const minCos = Math.cos(normalDeg * Math.PI / 180), partIndex = new Map(soup.parts.map((id, i) => [id, i]));
+  const normals = soupNormals(soup);
+  return model.groups.map(group => {
+    const own = new Uint8Array(soup.parts.length);
+    for (const part of model.parts) if (part.group === group.id) own[partIndex.get(part.id)] = 1;
+    const box = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
+    for (let t = 0; t < soup.triangles; t++) {
+      if (!own[soup.triPart[t]]) continue;
+      for (let k = 0; k < 9; k++) { const axis = k % 3, value = soup.positions[9 * t + k]; box.min[axis] = Math.min(box.min[axis], value); box.max[axis] = Math.max(box.max[axis], value); }
+    }
+    const reach = 2 * group.detail_size_m, grown = { min: box.min.map(v => v - reach - 0.05), max: box.max.map(v => v + reach + 0.05) };
+    const rest = own.map(flag => 1 - flag), without = filterSoup(soup, (id, index) => !own[index]), withoutNormals = soupNormals(without);
+    const groupPoints = [], restPoints = [];
+    for (const direction of facadeDirections(group.facade)) {
+      const camera = boxCamera(direction, grown, group.detail_size_m / pixelsPerDetail, maxPixels);
+      visiblePoints(soup, normals, camera, own, grown, groupPoints);
+      visiblePoints(without, withoutNormals, camera, rest, grown, restPoints);
+    }
+    // Uniform grid over the remaining surface (cell = detail size, searched 2 cells
+    // out); distances beyond `reach` count as far. Keys pack three indices below
+    // 2^15 in magnitude (coordinates within 500 m at the finest 1.7 cm voxel).
+    const cell = group.detail_size_m, cells = new Map(), O = 1 << 15, key = (i, j, k) => ((i + O) * 2 * O + (j + O)) * 2 * O + (k + O);
+    // The views overlap: keep one remaining point per small voxel and facing direction.
+    const fine = cell / pixelsPerDetail, seen = new Set();
+    for (let r = 0; r < restPoints.length; r += 6) {
+      const ax = Math.abs(restPoints[r + 3]), ay = Math.abs(restPoints[r + 4]), az = Math.abs(restPoints[r + 5]);
+      const facing = ax >= ay && ax >= az ? (restPoints[r + 3] > 0 ? 0 : 1) : ay >= az ? (restPoints[r + 4] > 0 ? 2 : 3) : (restPoints[r + 5] > 0 ? 4 : 5);
+      const voxel = key(Math.floor(restPoints[r] / fine), Math.floor(restPoints[r + 1] / fine), Math.floor(restPoints[r + 2] / fine)) * 8 + facing;
+      if (seen.has(voxel)) continue;
+      seen.add(voxel);
+      const id = key(Math.floor(restPoints[r] / cell), Math.floor(restPoints[r + 1] / cell), Math.floor(restPoints[r + 2] / cell));
+      let list = cells.get(id);
+      if (!list) cells.set(id, list = []);
+      list.push(r);
+    }
+    const count = groupPoints.length / 6, stride = Math.max(1, Math.ceil(count / maxQueries)), distances = [];
+    for (let g = 0; g < count; g += stride) {
+      const at = 6 * g, px = groupPoints[at], py = groupPoints[at + 1], pz = groupPoints[at + 2], nx = groupPoints[at + 3], ny = groupPoints[at + 4], nz = groupPoints[at + 5];
+      const ci = Math.floor(px / cell), cj = Math.floor(py / cell), ck = Math.floor(pz / cell);
+      let best = Infinity;
+      for (let i = ci - 2; i <= ci + 2; i++) for (let j = cj - 2; j <= cj + 2; j++) for (let k = ck - 2; k <= ck + 2; k++) {
+        const list = cells.get(key(i, j, k));
+        if (!list) continue;
+        for (const r of list) {
+          if (nx * restPoints[r + 3] + ny * restPoints[r + 4] + nz * restPoints[r + 5] < minCos) continue;
+          const dx = px - restPoints[r], dy = py - restPoints[r + 1], dz = pz - restPoints[r + 2], d2 = dx * dx + dy * dy + dz * dz;
+          if (d2 < best) best = d2;
+        }
+      }
+      best = Math.sqrt(best);
+      distances.push(best <= reach ? best : Infinity);
+    }
+    distances.sort((a, b) => a - b);
+    const share = limit => distances.length ? distances.filter(d => d <= limit).length / distances.length : 0;
+    const median = distances.length ? distances[Math.floor((distances.length - 1) / 2)] : 0;
+    return {
+      id: group.id, detail_size_m: group.detail_size_m, samples: distances.length,
+      relief_m: median,
+      // Share of the group's visible surface a model without it would still "recall".
+      absent_recall_tau: share(0.6 * group.detail_size_m), absent_recall_detail: share(group.detail_size_m),
+    };
+  });
+}

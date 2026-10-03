@@ -8,6 +8,7 @@ import { SurfaceIndex, TriangleGrid } from './grid.mjs';
 import { sampleSurface, strideIndices, gather, boxOf, boxCentre, boxDiagonal, triangleNormals } from './sampling.mjs';
 import { coverageMaps, coverageMask, emptySpaceTest } from './coverage.mjs';
 import { prepareGroups } from './detail.mjs';
+import { visibleSurface } from './surface.mjs';
 
 // Sample spacing as a fraction of the diagonal (DESIGN.md 9.2) and the pixel
 // size used to reach it: half a voxel, so every voxel on a visible surface is hit.
@@ -21,7 +22,7 @@ export const SEARCH_POINTS = 5000, REFINE_POINTS = 20000;
 // thinned subsets for the alignment search.
 export function truthSurface(soup, maps, diagonal) {
   const voxel = SAMPLE_FRACTION * diagonal;
-  const sample = sampleSurface(soup, { voxel, pixel: voxel / PIXELS_PER_VOXEL });
+  const { views, voxelTriangles, ...sample } = sampleSurface(soup, { voxel, pixel: voxel / PIXELS_PER_VOXEL, keepViews: true });
   const evidenced = coverageMask(maps, sample.points, sample.normals, diagonal);
   // Candidate surface counts in precision when its nearest truth point is
   // evidenced (DESIGN.md 9.5) or when the evidence shows its place to be empty.
@@ -37,6 +38,8 @@ export function truthSurface(soup, maps, diagonal) {
     ...sample, evidenced, evidencedCount: evidenced.reduce((sum, value) => sum + value, 0), empty,
     grid: full.grid, search: subset(SEARCH_POINTS, 0.05), refine: subset(REFINE_POINTS, 0.025),
     centre: boxCentre(box),
+    // What the headline distances are measured to (surface.mjs).
+    target: visibleSurface(soup, { tri: sample.tri, views, voxelTriangles }, full.grid.near),
   };
 }
 
