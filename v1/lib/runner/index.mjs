@@ -664,9 +664,9 @@ async function runAttempt({ batchDir, manifest, task, attempt, adapter, deps, lo
     const hashes = await workspaceHashes(workspace);
     if (hashes.input !== task.input_sha256 || hashes.tools !== manifest.tools.sha256 || hashes.runtime !== manifest.runtime.sha256) throw new Error(attempt.dir + ': workspace changed after freeze');
     if ((await readdir(join(workspace, 'output'))).length) throw new Error(attempt.dir + ': output/ must start empty');
-    // A harness that reads part of its configuration from the workspace
-    // (Grok's sandbox profile) gets its frozen copy put there now, so nothing
-    // a contestant could have left in the workspace is ever read in its place.
+    // A harness that needs something set up from its frozen files right
+    // before launch gets it now (grok: an empty HOME, its shell wrapper made
+    // executable; harness files are copied for a re-run without their modes).
     if (adapter.stage) await adapter.stage({ attemptDir: dir, workspace, invocation });
     // The checks above take a moment (a workspace is hashed); a hold that
     // began meanwhile (another attempt met a limit) means this one must not

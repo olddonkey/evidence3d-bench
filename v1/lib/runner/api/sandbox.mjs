@@ -42,8 +42,12 @@ export function ancestors(path) {
 
 // The profile for one workspace. Paths are resolved first: Seatbelt matches
 // real paths (/private/var/..., not /var/...).
-// A workspace that does not exist yet is taken as given.
-export function sandboxProfile({ workspace, readRoots = [] }) {
+// A workspace that does not exist yet is taken as given. `readOnly` names the
+// parts of the workspace that stay unwritable (grok adds the names of project
+// configuration files a CLI might load); `noSymlinks` forbids creating
+// symbolic links (grok: its file tools check a path and then open it in the
+// unsandboxed CLI, so a link swapped in between could lead them outside).
+export function sandboxProfile({ workspace, readRoots = [], readOnly = READ_ONLY_PARTS, noSymlinks = false }) {
   const ws = real(workspace) ?? resolve(workspace);
   const roots = [...new Set(readRoots.map(real).filter(Boolean))];
   const metadata = [...new Set([ws, ...roots, ...SYSTEM_SUBPATHS].flatMap(ancestors))].sort();
@@ -60,8 +64,9 @@ export function sandboxProfile({ workspace, readRoots = [] }) {
     '(allow file-read* ' + [...SYSTEM_SUBPATHS.map(path => '(subpath ' + str(path) + ')'), ...SYSTEM_LITERALS.map(path => '(literal ' + str(path) + ')'),
       '(subpath "/dev/fd")', ...roots.map(path => '(subpath ' + str(path) + ')'), '(subpath ' + str(ws) + ')'].join(' ') + ')',
     '(allow file-write-data ' + DEVICE_WRITES.map(path => '(literal ' + str(path) + ')').join(' ') + ')',
-    '(allow file-write* (require-all (subpath ' + str(ws) + ') ' + READ_ONLY_PARTS.map(part => '(require-not (subpath ' + str(join(ws, part)) + '))').join(' ') + '))',
+    '(allow file-write* (require-all (subpath ' + str(ws) + ') ' + readOnly.map(part => '(require-not (subpath ' + str(join(ws, part)) + '))').join(' ') + '))',
   ];
+  if (noSymlinks) lines.push('(deny file-write-create (vnode-type SYMLINK))');
   return lines.join('\n') + '\n';
 }
 

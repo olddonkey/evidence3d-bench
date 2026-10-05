@@ -7,9 +7,7 @@ codex-cli 0.159.2, Claude Code 2.1.285 and grok 1.0.46; and two API systems,
 `api-anthropic` (Claude Messages API) and `api-openai` (OpenAI Responses API), which run
 one agent loop of our own with identical tools, prompts and budget, so that a result
 compares models rather than "model + client" (see *The API systems*). All boundaries are
-Seatbelt-based and macOS-only (Darwin 27). **`grok` does not pass preflight on macOS**:
-its shell reaches the network, the read-only parts of the workspace are writable and
-`~/.grok` is readable (see *grok*), so `run` refuses every grok batch.
+Seatbelt-based and macOS-only (Darwin 27).
 
 ```sh
 node v1/scripts/run.mjs prepare   --id <batch> --system codex|claude-code|grok|api-anthropic|api-openai --model <id> [--effort <level>] --tasks a,b,c [--attempts 1] [--data <root>]
@@ -99,8 +97,8 @@ hashes are not equal; each pins the code by its own definition.
   preflight/<time>/                 probe workspaces, canaries, probe sessions, report.json
   <task>/a<n>/
     workspace/ input/ (task.json + inputs/)  tools/  node_modules/three  output/  tmp/  package.json
-               .grok/ (grok only: the frozen sandbox profile and prompt, copied there just before launch)
-    prompt.txt  invocation.json  harness/ (claude settings, debug log; grok-sandbox.toml; api-config.json for the API systems)
+    prompt.txt  invocation.json  harness/ (claude settings, debug log; grok: grok-shell.sb, bin/bash, grok-agent.md, home/;
+                                           api-config.json for the API systems)
     rerun.json                      on a re-run: which try this is, and every earlier try
     started.json (with the sleep counter at launch)  child.json  process.json  events.jsonl  stderr.log  result.json
     score/ submission.glb  report.json  error-*.png  worker logs  worker.json
@@ -550,75 +548,71 @@ auth, so it cannot use the existing login and is not used.
 ### grok
 
 Grok Build 1.0.46 (`~/.grok/bin/grok` → `~/.grok/downloads/grok-1.0.46-macos-aarch64`),
-headless, logged in with grok.com. **Preflight fails on three requirements Grok's own
-mechanisms cannot meet on macOS (R1–R3 below); everything else is configured and
-proven.**
+headless, logged in with grok.com. Like the other CLIs and the API loop, **the CLI
+process runs unsandboxed and only what the contestant runs is confined**: every shell
+command under our Seatbelt profile (the API systems' generator), the in-process file
+tools under Grok's own permission rules. (The first design, Grok's `--sandbox` profile
+around the whole CLI, failed preflight on network, the read-only workspace parts and
+`~/.grok`, because every child inherits the CLI's own profile and the CLI needs the
+network and `~/.grok`; it is gone.)
 
 ```
-grok --prompt-file <ws>/.grok/prompt.txt --output-format streaming-messages-json -m <model> [--effort <e>]
-  --cwd <ws> --sandbox e3d --permission-mode bypassPermissions
+grok --prompt-file <attempt>/prompt.txt --output-format streaming-messages-json -m <model> [--effort <e>]
+  --cwd <ws> --agent <attempt>/harness/grok-agent.md --permission-mode bypassPermissions
   --tools run_terminal_command,read_file,search_replace,list_dir,grep,write
   --disallowed-tools todo_write,monitor,search_tool,use_tool,workflow,enter_plan_mode,exit_plan_mode,ask_user_question,
                      send_feedback,image_gen,image_edit,image_to_video,reference_to_video,spawn_subagent,
                      kill_command_or_subagent,get_command_or_subagent_output,scheduler_create,scheduler_delete,scheduler_list,Agent
   --no-subagents --no-plan --disable-web-search
-env: HOME USER LOGNAME LANG PATH=<node bin>:/usr/bin:/bin:/usr/sbin:/sbin TMPDIR=<ws>/tmp
+  --deny 'Read(<p>)' ... --deny 'Edit(<p>)' ... --deny WebFetch --deny WebSearch --deny 'MCPTool(*)'      (about 1200 rules)
+env: USER LOGNAME LANG PATH=<node bin>:/usr/bin:/bin:/usr/sbin:/sbin TMPDIR=<ws>/tmp
+     HOME=<attempt>/harness/home (empty)  GROK_HOME=~/.grok  GROK_SHELL=<attempt>/harness/bin/bash
      GROK_{CLAUDE,CURSOR,CODEX}_{SKILLS,RULES,AGENTS,MCPS,HOOKS,SESSIONS}_ENABLED=0 GROK_MANAGED_MCPS_ENABLED=0
      GROK_MEMORY=0 GROK_SUBAGENTS=0 GROK_WEB_FETCH=0 GROK_BACKEND_SEARCH=0 GROK_SESSION_SEARCH=0 GROK_LSP_TOOLS=0
      GROK_TELEMETRY_ENABLED=0 GROK_TELEMETRY_TRACE_UPLOAD=0 GROK_DISABLE_AUTOUPDATER=1
      GROK_CONFIG={"toolset":{"bash":{"login_shell_capture":false}}}
 ```
 
-`<attempt>/harness/grok-sandbox.toml`, frozen with the attempt (a text harness file,
-hashed like the JSON ones):
+`<ws>` is the workspace's real path (Grok's rules match it literally). Three harness
+files are frozen with the attempt (text, hashed like the JSON ones):
 
-```toml
-[profiles.e3d]
-extends = "strict"
-restrict_network = true
-read_only = ["<ws>/input", "<ws>/tools", "<ws>/node_modules", <node install + Homebrew Cellar/opt/openssl/ca-certificates>]
-deny = ["~/.grok/{memory,memory-v2,memtrace,logs,bundled,marketplace-cache,installed-plugins,hooks,docs}" (those that exist),
-        "/private/tmp", "/private/var/tmp"]
-```
+- `harness/bin/bash`, the shell wrapper (made executable by the adapter's `stage` step
+  just before launch, which also empties `harness/home`):
+  ```sh
+  #!/bin/sh
+  exec /usr/bin/env HOME='<ws>/tmp' /usr/bin/sandbox-exec -f '<attempt>/harness/grok-shell.sb' /bin/bash "$@"
+  ```
+- `harness/grok-shell.sb`, the API systems' profile (`api/sandbox.mjs`, see *api-anthropic,
+  api-openai*) for this workspace, with two additions: besides `input/`, `tools/`,
+  `node_modules/`, also `.grok`, `.claude`, `.cursor`, `.agents`, `.codex` and `.mcp.json`
+  stay unwritable (project configuration a CLI might load), and
+  `(deny file-write-create (vnode-type SYMLINK))`: the shell cannot create symbolic links.
+- `harness/grok-agent.md`, the agent definition: Grok Build's default prompt (`promptMode:
+  extend` with an empty body), `discoverSkills: false`, `inheritSkills: false`, `skills: []`,
+  `mcpInheritance: none`.
 
-Grok reads a custom profile only from `<cwd>/.grok/sandbox.toml` or `~/.grok/sandbox.toml`
-(the user's file is never written), and refuses to start when the named profile is
-missing or cannot be applied ("Refusing to start with its protections missing"; live).
-So the adapter's `stage` step copies the frozen profile, and the prompt (`--prompt-file`
-must be readable under the sandbox, which the attempt directory is not), into
-`<ws>/.grok/` just before launch, replacing whatever is there (a planted symlink included;
-unit-tested). The prompt also goes to stdin, which headless Grok ignores. No
-`--debug-file`: under the sandbox Grok can write it only into the workspace or a temp
-directory, where the contestant could read it, and Grok's debug log can carry
-configuration values such as provider keys.
-
-**What the sandbox is.** Grok applies a Seatbelt profile (its `nono` crate) to its own
-process at start-up; every tool and every shell command inherit it. So the file tools
-are confined by the kernel exactly like the shell (unlike Claude Code's in-process
-checks): `read_file` on the canary answers "Permission denied", a write through a planted
-symlink "IO Error: Operation not permitted (os error 1)" (live). No leader process is
-involved: with a sandbox active Grok runs the session in-process (documented; `grok
-leader list` showed none). `GROK_SANDBOX_MODE=enforce` changes nothing headless.
-
-| Requirement | How | Evidence (live preflight of `probe-grok-1`, grok-4.6 low) |
+| Requirement | How | Evidence (live preflight of `probe-grok-2`, grok-4.6 low: **passed**) |
 | --- | --- | --- |
-| File tools confined to the workspace | the profile (`strict`: reads in the cwd and system areas, writes in the cwd); symlinks are resolved by the kernel | pass: `agent:read-*`, `agent:grep-*`, `agent:list-*`, `agent:write-{outside,symlink,dangling,dir-symlink}`, controls `agent:read-input`, `agent:write-output`, `agent:edit-output` |
-| Shell confined (files) | the same profile | pass: `shell:canary-*` (file, symlink, directory symlink, hard link), `shell:outside-*`, `shell:repo-*`, `shell:truth*`, `shell:objects-root`, `shell:tasks-root`, `shell:other-attempt`, `shell:batch-manifest`, `shell:home`, `shell:codex-*`, `shell:claude-*`, `shell:ssh`, `shell:slash-tmp`, `shell:unix-socket` (`/private/tmp` denied) |
-| Image viewing | `read_file` returns a PNG or JPEG as an image (`ImageContent` with `mime_type` `image/png` / `image/jpeg`; both live, a 48×48 JPEG named correctly); the prompt says "Use read_file to look at the evidence and at your own previews" | pass: `agent:view-canary`, `agent:view-symlink` (refused), `agent:view-control` (the control image's bytes came back and the model named its colour) |
-| Tool surface | `--tools` alone does not narrow the set; `--disallowed-tools` does. Six tools | pass: `agent:tool-surface` from `system/init`: exactly the six tools, `mcp_servers: []`, `skills: []`, `apiKeySource: oauth` |
-| No skills | no flag, environment variable or `GROK_CONFIG` key turns off Grok's bundled skills (19, among them `threejs-frame-conventions`; the overlay accepts only `models`, `features`, a narrowed `toolset` and `shell_environment_policy`); denying `~/.grok/bundled` in the profile hides them, and Grok runs without them | pass: `init.skills` went from 19 to 0 and the first request from 5818 to 3043 input tokens; the session record no longer lists them |
-| No instruction files, personas, memory, MCP servers, hooks, plugins, sub-agents, web | the compatibility, memory, MCP, sub-agent, web and telemetry switches above; `--no-subagents --no-plan --disable-web-search`; `~/.grok/{memory*,memtrace,hooks,installed-plugins,marketplace-cache}` denied | pass: `agent:instruction-files` (marked files beside the workspace never surface), `agent:grok-context` (Grok's record of the session, `prompt_context.json`: no AGENTS.md files, no personas, memory off), `agent:tool-surface` |
-| No credential-like environment | child environment built from scratch; `login_shell_capture=false` stops the shell from importing the user's login shell (which also drops the node bin from PATH) | pass: `shell:env-names` |
-| Existing login | `HOME` and `~/.grok` kept (a separate home would lose the grok.com login); `grok models` says "You are logged in with grok.com." and an API-key login is refused at `prepare` | `prepare`; `apiKeySource: oauth` in init |
-| **R1: no network** | `restrict_network = true`; `--disable-web-search`, `GROK_WEB_FETCH=0` | **fail**: `shell:tcp-loopback` (the runner's listener accepted the connection), `shell:tcp-internet` (1.1.1.1:443 connected), `shell:http-internet` (HTTP 200). Grok's documentation states that blocking a child's network is a no-op on macOS, and the CLI process itself must reach the xAI API, so an outer profile cannot cut its children off either |
-| **R2: `input/`, `tools/`, `node_modules/` read-only** | `read_only` only adds read grants; it does not take away the write grant the cwd has, and `deny` would also deny reading | **fail**: `shell:input-write`, `shell:input-create`, `shell:tools-write`, `shell:runtime-write`, `agent:write-input`. Not pursued: moving these three outside the cwd behind symlinks would change the workspace layout for one system only |
-| **R3: `~/.grok` unreadable** | the `strict` profile grants `~/.grok`, which Grok needs; denying `sessions/` ("Couldn't create session: Permission denied"), `config.toml` ("Failed to load config") or `auth.json` ("Managed policy could not be verified") stops Grok from starting (live) | **fail**: `shell:grok-home`, `shell:grok-sessions` (the user's other Grok transcripts, and other attempts' sessions), `shell:grok-auth` (the grok.com login file opens; the probe never reads it). `strict` also lets the session write `~/.grok/sessions` (documented; not probed, since nothing may be written under `~/.grok`) |
+| Shell confined (R1, R2, R3 for commands) | Grok starts every shell, its environment capture (`-lc …`) and each command (`-c …`), through `GROK_SHELL` (undocumented; the binary's shell-resolution code names `GROK_SHELL`, `SHELL` and `/bin/bash`; live: both calls arrived at the wrapper, and a command's `ls /Users` was refused). The wrapper `exec`s `sandbox-exec`, so the command starts inside the profile and no child can leave it | `shell:*` all pass: `tcp-loopback` `denied:EPERM` and no connection at the runner's listener, `unix-socket`, `tcp-internet`, `http-internet` (DNS fails); `input-write`/`-create`, `tools-write`, `runtime-write` `denied:EPERM` (chmod too); `grok-home`, `grok-sessions`, `grok-auth` `denied:EPERM`; canaries via file, symlink, directory symlink, hard link; repo, truth, objects, other attempt, home, `~/.codex`, `~/.claude`, `/tmp`. The same wrapper and profile under a fake CLI in the unit tests (`runner-grok.test.mjs`) |
+| No links from the shell | the profile's `vnode-type SYMLINK` rule. Grok's file tools check a path and then open it in the CLI process, so a link swapped in between could lead them outside; without links nothing inside the workspace can point out of it (a hard link to an outside file was already refused) | `agent:shell-symlink`: `ln -s input .e3d-probe/shell-link` → "Operation not permitted", nothing on disk |
+| File tools confined (R2, R3 for tools) | the deny rules: Grok applies `Read(...)` rules to read_file, list_dir, grep and the paths a shell command names, `Edit(...)` rules to write, search_replace and shell redirects, and checks deny rules against the resolved target of file and directory symlinks (dangling ones included) after collapsing `..`. The rules are a complement cover: for every directory on the way to an allowed root, patterns for every other name (`[!...]` classes on a character trie of the allowed names, every letter written `[aA]` because Grok matches path globs without regard to case: live, `/us[!r]*/**` matched `/Users/...`). Read roots: the workspace, `/usr`, `/bin`, `/sbin`, `/System`, `/etc`, `/private/etc`, `/dev/{null,zero,random,urandom,fd}` and the Node install (what the shell may read too); Edit roots: the workspace and `/dev/{null,zero,dtracehelper}`; plus `Edit` on the read-only names in any case. Checked against the paths outside a root both ways (unit test) | `agent:read-*` (absolute path, file symlink, directory symlink, dangling symlink, `..`), `agent:grep-*` (outside directory, workspace, linked directory), `agent:list-*` (outside, linked directory, `..`), `agent:write-*` (input, outside, symlink, dangling, linked directory), `agent:view-canary`, `agent:view-symlink` all refused ("Tool `…` was not executed: Denied by permission policy: deny rule on read matching …"); controls `agent:read-input`, `agent:write-output`, `agent:edit-output` |
+| Permission mode | `bypassPermissions` plus the deny rules. `dontAsk` (the mode the Claude Code track uses) is not usable headless: a call no rule allows, and every shell command Grok cannot split into simple commands (`$(...)`, a subshell, a loop), becomes a permission prompt, and in `-p` mode a prompt cancels the whole session (live: "User cancelled the execution for tool …", result `error_during_execution`). With deny rules covering everything outside, nothing a deny rule does not refuse is outside the workspace | as above; compound commands ran (live) |
+| Image viewing | `read_file` returns a PNG or JPEG as an image (`ImageContent`, `image/png` / `image/jpeg`; both live); the prompt says "Use read_file to look at the evidence and at your own previews" | `agent:view-control` (the control image's bytes came back and the model named its colour) |
+| Tool surface, no skills | six tools (`--tools` alone does not narrow the set; `--disallowed-tools` does); the agent definition turns off skill discovery (no flag, environment variable or `GROK_CONFIG` key does; with the default agent the session lists Grok's bundled skills, among them `threejs-frame-conventions`) | `agent:tool-surface` from `system/init`: exactly the six tools, `mcp_servers: []`, `skills: []`, `apiKeySource: oauth` |
+| No user plugins, hooks, MCP servers, instruction files, memory | `HOME` is an empty directory: with the real `HOME` Grok loads the user's Claude Code plugins (their hooks, their MCP servers, their skills) and `~/.agents/skills` (live); `GROK_HOME` stays `~/.grok`, where the login is. The compatibility, memory, MCP and other switches above | `agent:grok-config` (`grok inspect --json` with the session's own environment: no plugins, hooks or MCP servers; also checked at `prepare`, which refuses otherwise); `agent:grok-context` (Grok's record of the session: no AGENTS.md files, no personas, memory off); `agent:instruction-files` |
+| No sub-agents, web, leader | `--no-subagents`, `--disable-web-search`, `GROK_WEB_FETCH=0`, `GROK_BACKEND_SEARCH=0`, deny `WebFetch`/`WebSearch`/`MCPTool(*)`. Leader mode is off by default and not configured (`grok leader list`: none); a leader would run the tools outside our wrapper, which the shell checks would catch | `agent:tool-surface`; `shell:*` |
+| No credential-like environment | the CLI's environment is built from scratch; the shell's is what Grok passes on, minus the login shell | `shell:env-names` |
+| Existing login | `GROK_HOME` is the user's `~/.grok`; `grok models` says "You are logged in with grok.com." and an API-key login is refused at `prepare` | `prepare`; `apiKeySource: oauth` in init |
 
-The model's context besides the prompt (from Grok's record of the probe session): Grok's
-system prompt, a `<user_info>` block (OS, shell, workspace path, date), two "user rules"
-that are compiled into the binary (affirmative wording; verify web UI work in a browser),
-and a system reminder that names Grok's one compiled-in workflow, `deep-research` (the
-`workflow` tool is disallowed, so it cannot be run).
+The model's context besides the prompt (Grok's record of the probe session): Grok
+Build's system prompt without its browser-verification section (that section comes with
+the built-in agent; the system prompt is otherwise identical, live), a `<user_info>` block
+(OS, shell, workspace path, date), one rule compiled into the binary that Grok presents as
+a user rule (affirmative wording), and a system reminder naming Grok's one compiled-in
+workflow, `deep-research` (the `workflow` tool is disallowed, so it cannot be run). No
+`--debug-file`: it would land where the contestant can read it, and it can carry
+configuration values such as provider keys. The prompt also goes to stdin, which headless
+Grok ignores.
 
 Effort levels (from Grok's model catalogue, `~/.grok/models_cache.json`): `grok-4.7` and
 `grok-4.6` take `low`, `medium`, `high` (the default) and `xhigh`; a model the catalogue
@@ -822,12 +816,16 @@ symlinks, a hard-link attempt):
   one real session that uses the batch model at its lowest effort.
 - `agent:*`: in that session, the model aims its file tools at the canaries. It uses
   Read/Grep/Glob/Write/Edit for Claude Code, view_image/apply_patch/code mode for
-  Codex, and read_file (text and images)/grep/list_dir/write/search_replace for Grok.
+  Codex, and read_file (text and images)/grep/list_dir/write/search_replace for Grok,
+  for which `..` and a search through a linked directory are added (its file tools run
+  in the unsandboxed CLI under its own path rules), and a shell `ln -s` judged on disk.
   For Grok the shell probe's report is taken from the raw bytes of the tool result
   (`output`): the copy shown to the model (`output_for_prompt`) has its long lines
   wrapped at about 2000 characters and does not parse. `agent:grok-context` reads Grok's
   own record of the probe session (`~/.grok/sessions/<cwd>/<session id>/prompt_context.json`,
   after the session, by the runner): no instruction files, personas or memory.
+  `agent:grok-config` runs `grok inspect --json` with the session's environment: no
+  plugins, hooks or MCP servers.
 
 Probe targets include input readable; input, tools and runtime not writable even
 after `chmod`; output and tmp writable; the canary (directly, through
@@ -877,9 +875,9 @@ report then has `passed: false`, `failed: []` and `infra: { reason, retry_after,
 stop|no-wait|tries|aborted, hold: { until_at, ... }, session, tries }`, and `run` refuses
 with "could not finish (infrastructure: ...); run preflight again", not "did not pass". Measured cost per preflight: Claude Haiku 4.5 about
 25–30 s and US$0.04–0.07 (CLI estimate); gpt-5.6-luna low about 35–45 s and
-about 95k input tokens (mostly cached), no cost reported; grok-4.6 low about 39–47 s,
-21 turns, 164k–211k input tokens (79–94% cached), about 0.8–1k output tokens and
-US$0.035–0.047 as Grok reports it (four live runs).
+about 95k input tokens (mostly cached), no cost reported; grok-4.6 low about 50–55 s,
+21–25 turns, 194k–246k input tokens (84–92% cached), about 1k output tokens and
+US$0.05 as Grok reports it.
 
 ## What is not enforced
 
@@ -949,35 +947,33 @@ US$0.035–0.047 as Grok reports it (four live runs).
   lengthen an API session's wall time; its wall clock is a 2× safety cap, not a budget.
 - **No cost for the API systems**: no price list is frozen with a batch; `usage` is
   exact and `cost_usd` is null.
-- **grok: the three failed requirements** (see *grok*). The contestant's shell reaches
-  loopback and the internet (R1); it and the write tool can change `input/`, `tools/`
-  and the runtime under `node_modules/`, which is hard-linked from the batch's shared
-  copy (R2; the integrity check after the session voids an attempt that changed them, and
-  a changed runtime stops the batch before the next launch); and it can read `~/.grok`, the user's other Grok session transcripts and
-  other attempts' (R3), and open the grok.com login file. Preflight fails on all three,
-  so `run` refuses grok batches; nothing in the runner overrides that.
+- **grok's file tools are policed by Grok, not the kernel**, like Claude Code's: they
+  run in the unsandboxed CLI and are confined by its deny rules. Preflight exercises the
+  known routes (absolute paths, `..`, file and directory symlinks, dangling symlinks,
+  grep and listings through links); the shell cannot create links, so none can be swapped
+  in between Grok's check and its open. A detached process the contestant starts outlives
+  its command and even the session (live; it stays inside the profile), as for the other
+  shells. The rules are frozen per workspace path and depend on Grok matching globs as it
+  did in 1.0.46; a CLI update changes the frozen binary hash and stops the batch.
+- **grok's shell-level path checks also deny commands** that name a path outside the
+  allowed roots (`ls ~`, `cat ../prompt.txt`), with "Denied by permission policy"; the
+  profile would refuse them anyway. Grok refuses `&` (background execution is off).
 - **grok leaves its sessions behind.** Every Grok session writes
   `~/.grok/sessions/<URI-encoded cwd>/` (`prompt_history.jsonl` and a directory per
   session with `chat_history.jsonl`, `events.jsonl`, `updates.jsonl`, `system_prompt.txt`,
   `tool_definitions.json`, `prompt_context.json`, `usage.json`, `summary.json`,
-  `terminal/` with every shell command's output, about 250 KB for a probe session),
-  appends to `~/.grok/sessions/sandbox-events.jsonl` and updates
-  `~/.grok/sessions/session_search.sqlite` and `active_sessions.json`. Grok has no
-  ephemeral mode; the runner deletes nothing under `~/.grok`.
-- **grok's own context.** Besides the prompt the model gets Grok's system prompt, two
-  rules built into the binary that Grok presents as user rules, and a reminder naming a
-  compiled-in workflow whose tool is disallowed (see *grok*). They are the product's,
-  the same for every grok attempt, and not the user's.
-- **grok's workspace holds `.grok/`** (the staged profile and prompt). Grok reads them
-  only at start; the contestant can change them afterwards to no effect on its own
-  session. Grok also watches `<cwd>/.grok/` for project MCP configuration
-  (`features.mcp_recursive_config_watch`); whether a project MCP server added mid-session
-  would start in an untrusted folder was not tested (it would run under the same
-  profile).
-- **grok preflight reads `~/.grok/sessions`**: the runner lists that directory and reads
-  the probe session's `prompt_context.json` (no credentials). The `~/.grok` targets are
-  probed for every system, so codex and claude-code preflights also show that their
-  contestants cannot read it.
+  `terminal/` with every shell command's output, about 250 KB for a probe session) and
+  updates `~/.grok/sessions/session_search.sqlite` and `active_sessions.json`. Grok has no
+  ephemeral mode; the runner deletes nothing under `~/.grok`. The contestant cannot read
+  any of it.
+- **grok's own context.** Besides the prompt the model gets Grok's system prompt, a rule
+  built into the binary that Grok presents as a user rule, and a reminder naming a
+  compiled-in workflow whose tool is disallowed (see *grok*). They are the product's, the
+  same for every grok attempt, and not the user's.
+- **grok reads `~/.grok`**: its login and configuration, as any CLI reads its own; what
+  it would load from there (hooks, plugins, MCP servers) is checked at `prepare` and in
+  preflight. Preflight also reads the probe session's `prompt_context.json` there (no
+  credentials). The `~/.grok` targets are probed for every system.
 - **The API systems were not run against the real services** (no keys were available
   while they were built): the request shapes follow the documentation and the mocks
   enforce it, but undocumented behaviour of the real APIs has not been seen.
