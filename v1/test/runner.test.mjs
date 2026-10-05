@@ -279,7 +279,9 @@ async function treeFake(dir) {
 const fs = require('fs'), { spawn } = require('child_process');
 const script = 'require("fs").writeFileSync(process.argv[1] + ".pid", String(process.pid)); setInterval(() => {}, 1000)';
 spawn(process.execPath, ['-e', script, ${JSON.stringify(marker)}], { detached: true, stdio: 'ignore' }).unref();
-const wait = () => fs.existsSync(${JSON.stringify(marker + '.pid')}) ? (process.stdout.write('{"type":"ready"}\\n'), setInterval(() => {}, 1000)) : setTimeout(wait, 5);
+// The file exists as soon as writeFileSync has created it: wait for its content.
+const written = () => { try { return /^\\d+$/.test(fs.readFileSync(${JSON.stringify(marker + '.pid')}, 'utf8')); } catch { return false; } };
+const wait = () => written() ? (process.stdout.write('{"type":"ready"}\\n'), setInterval(() => {}, 1000)) : setTimeout(wait, 5);
 wait();
 `);
   await chmod(path, 0o755);

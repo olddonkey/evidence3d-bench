@@ -1,12 +1,20 @@
 # Generation runner (module E)
 
 Runs a model-under-test on task packs inside an isolated workspace, records what
-happened, and scores what it left behind. Two harnesses: `codex` (Codex CLI) and
-`claude-code` (Claude Code CLI). Checked against codex-cli 0.159.2 and Claude Code
-2.1.285 on macOS (Darwin 27); both boundaries are Seatbelt-based and macOS-only.
+happened, and scores what it left behind. Five systems: three vendor CLIs, `codex` (Codex
+CLI), `claude-code` (Claude Code CLI) and `grok` (Grok Build CLI), checked against
+codex-cli 0.159.2, Claude Code 2.1.285 and grok 1.0.46; and two API systems,
+`api-anthropic` (Claude Messages API) and `api-openai` (OpenAI Responses API), which run
+one agent loop of our own with identical tools, prompts and budget, so that a result
+compares models rather than "model + client" (see *The API systems*). All boundaries are
+Seatbelt-based and macOS-only (Darwin 27). **`grok` does not pass preflight on macOS**:
+its shell reaches the network, the read-only parts of the workspace are writable and
+`~/.grok` is readable (see *grok*), so `run` refuses every grok batch.
 
 ```sh
-node v1/scripts/run.mjs prepare   --id <batch> --system codex|claude-code --model <id> [--effort <level>] --tasks a,b,c [--attempts 1] [--data <root>] [--binary <cli>]
+node v1/scripts/run.mjs prepare   --id <batch> --system codex|claude-code|grok|api-anthropic|api-openai --model <id> [--effort <level>] --tasks a,b,c [--attempts 1] [--data <root>]
+                                  [--binary <cli>]                                                       (CLI systems)
+                                  [--token-budget 2000000] [--tool-budget 200] [--max-output-tokens 32000]   (API systems)
 node v1/scripts/run.mjs preflight --batch <dir> [--probe-model <id>] [--probe-effort <level>] [--no-wait]
 node v1/scripts/run.mjs run       --batch <dir> [--concurrency 1] [--no-wait] [--resume-now] [--max-reruns 5] [--retry-stall-minutes 10]
 node v1/scripts/run.mjs status    --batch <dir>[,<dir>...] [--json]   # what each batch is doing, and if waiting, why and until when
@@ -14,7 +22,7 @@ node v1/scripts/run.mjs summary   --batch <dir> [--json]              # --json: 
 ```
 
 Exit codes of `run` and `preflight`: 0 done (nothing left that may run), 1 error, 3 stopped
-for a human (login, billing, model id, a changed scorer/runner/CLI), 75 would have had to
+for a human (login or API key, billing, model id, a changed scorer/runner/CLI), 75 would have had to
 wait (`--no-wait`; run again after the time printed; also a preflight that gave up after
 6 probe sessions ended by infrastructure errors), 130 stopped by a signal. `run` and
 `preflight` are stopped with Ctrl-C (or SIGTERM/SIGHUP) and continued with the same command.
@@ -22,8 +30,13 @@ wait (`--no-wait`; run again after the time printed; also a preflight that gave 
 The same from code: `prepare`, `preflight`, `execute`, `summarize` in
 `v1/lib/runner/index.mjs` (also exported as `preparePilot`, `preflightPilot`,
 `executePilot`). Default data root `.local/v1`; default CLIs
-`~/.local/bin/codex.opencodex-real` (not the `codex` shim) and `~/.local/bin/claude`,
-overridable with `--binary` or `E3D_CODEX_BIN` / `E3D_CLAUDE_BIN`.
+`~/.local/bin/codex.opencodex-real` (not the `codex` shim), `~/.local/bin/claude` and
+`~/.grok/bin/grok`, overridable with `--binary` or `E3D_CODEX_BIN` / `E3D_CLAUDE_BIN` /
+`E3D_GROK_BIN`. The API systems read
+their key from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in the environment of `preflight`
+and `run` (never from a file; `prepare` records only whether it was set), and their base
+URL from `E3D_ANTHROPIC_BASE_URL` / `E3D_OPENAI_BASE_URL` at `prepare` (default
+`https://api.anthropic.com` / `https://api.openai.com`; frozen in the manifest).
 
 ## Life of a batch
 
@@ -36,9 +49,10 @@ overridable with `--binary` or `E3D_CODEX_BIN` / `E3D_CLAUDE_BIN`.
    manifest hash. A failed or stale preflight blocks `run`; so does one that could not
    finish because of an infrastructure error (it says so, and is not a failed boundary).
 3. **run** re-checks every frozen hash, then runs each attempt: hard wall clock
-   from `task.budget.wall_seconds` (SIGTERM to the whole process tree, SIGKILL 5 s
+   from `task.budget.wall_seconds` (twice that for the API systems, where it is only a
+   safety cap; SIGTERM to the whole process tree, SIGKILL 5 s
    later), events and stderr logged byte for byte, then integrity checks, then
-   the infrastructure-error check (below), then scoring in a separate process
+   the host-sleep rule and the infrastructure-error check (below), then scoring in a separate process
    (module D's `scoreSubmission`) after the contestant's process tree is gone.
    A sample is run once and never overwritten. An attempt that ended in an
    infrastructure error is not a sample: it is archived and run again from a
@@ -85,9 +99,10 @@ hashes are not equal; each pins the code by its own definition.
   preflight/<time>/                 probe workspaces, canaries, probe sessions, report.json
   <task>/a<n>/
     workspace/ input/ (task.json + inputs/)  tools/  node_modules/three  output/  tmp/  package.json
-    prompt.txt  invocation.json  harness/ (claude settings, debug log)
+               .grok/ (grok only: the frozen sandbox profile and prompt, copied there just before launch)
+    prompt.txt  invocation.json  harness/ (claude settings, debug log; grok-sandbox.toml; api-config.json for the API systems)
     rerun.json                      on a re-run: which try this is, and every earlier try
-    started.json  child.json  process.json  events.jsonl  stderr.log  result.json
+    started.json (with the sleep counter at launch)  child.json  process.json  events.jsonl  stderr.log  result.json
     score/ submission.glb  report.json  error-*.png  worker logs  worker.json
     score.interrupted-<k>/          a scoring cut short by a stopped runner, kept aside
   <task>/a<n>.infra-<k>/            the k-th earlier try of a<n>, which ended in infra_error:
@@ -107,21 +122,34 @@ turns, commands, score, report }` plus diagnostics (`exit_code`, `signal`, `time
 archived ones; `tries[]`: one record per earlier try with its directory, status, reason,
 retry_after, times and message) and timing:
 `attempt_started_at` (the runner took the attempt), `started_at` / `finished_at` (the
-CLI process), `result_at` (the record was written), `wall_limit_seconds`, and
+CLI process), `result_at` (the record was written), `wall_limit_seconds`,
+`host_sleep_check` (see *The host-sleep rule*), and
 `load_1m: { start, end, mean, max, samples, cpus }`, the machine's 1-minute load
 average sampled every 30 s while the CLI ran. `process.json` keeps `event_ms`, the
 arrival time of every event, which the timeout rule below uses.
 `service_retry_seconds` is the time the CLI spent in retry streaks it recovered from (a
 diagnostic: such a session is still a sample).
 
-- `input_tokens` counts all prompt tokens including cached ones for both harnesses
-  (Claude's cache reads and cache writes are added in; the raw split is in
+- `input_tokens` counts all prompt tokens including cached ones for every harness
+  (Claude's and Grok's cache reads and cache writes are added in; the raw split is in
   `usage_detail`). `output_tokens` includes reasoning tokens.
 - `cost_usd`: Codex reports none (null). Claude reports `total_cost_usd`, which on a
-  claude.ai subscription login is the CLI's list-price estimate, not a charge.
-- `turns`: Codex's completed turns (1 for one `exec` prompt); Claude's `num_turns`
-  (model round trips). Not comparable across harnesses. `commands`: shell
-  commands run (Codex `command_execution` items, Claude `Bash` calls).
+  claude.ai subscription login is the CLI's list-price estimate, not a charge. Grok
+  reports `total_cost_usd` too (also per model in `modelUsage`; on the grok.com login
+  presumably an estimate as well); Grok's documentation says 0 means "not known", so 0
+  is recorded as null.
+- `turns`: Codex's completed turns (1 for one `exec` prompt); Claude's and Grok's
+  `num_turns` (model round trips); the API systems' successful requests (model round
+  trips). Not comparable across harnesses. `commands`: shell commands run (Codex
+  `command_execution` items, Claude `Bash` calls, Grok `run_terminal_command` calls, the
+  API systems' `shell` calls).
+- `model_reported`: Grok's is the model it billed (the single key of `modelUsage`,
+  `grok-4.6-build` for `-m grok-4.6`), else the model named in the stream.
+- The API systems: `input_tokens` is all prompt tokens, cached ones included
+  (Anthropic's cache reads and writes added in, as for Claude Code), `output_tokens`
+  includes reasoning, `usage_detail` has the split and the request counts, `cost_usd`
+  is null (no price list is frozen with a batch), `tools` counts the calls each tool
+  ran, `model_reported` is the model the API named in its first response.
 - The artifact is read by the runner outside the sandbox, so it must be a regular
   file with one link inside `output/`. A symlink or hard link to the hidden truth
   would otherwise be scored as the submission.
@@ -135,6 +163,7 @@ valid `output/model.glb` exists, so a timed-out run can carry a score.
 | --- | --- | --- | --- |
 | `infra_error` | the harness could not run the model (next section); never given when the workspace boundary was broken | `null`, not scored | no: left out of every mean; archived and re-run automatically until a sample exists or the re-run cap is reached |
 | `timeout` | the wall clock expired; the tree was killed | from the artifact left behind | yes |
+| `budget_exhausted` | (API systems) the session used up its token or tool-call budget and was ended by the loop | from the artifact left behind | yes |
 | `generation_failed` | launch error, non-zero exit, no completed turn, an error result after model turns that is not an infrastructure error, or broken workspace integrity | from the artifact; 0 on an integrity problem | yes |
 | `missing_artifact` | the session finished, no `output/model.glb` | 0 | yes |
 | `invalid_artifact` | symlink, hard link, over the byte budget, or the scorer says invalid | 0 | yes |
@@ -158,7 +187,7 @@ the raw CLI text; `retry_after` is an ISO time when the CLI stated when a limit 
 
 | reason | action | What it is |
 | --- | --- | --- |
-| `usage_limit` | wait | the subscription's usage limit (Codex "You've hit your usage limit…", Claude "You've hit your session/weekly limit…") |
+| `usage_limit` | wait | the subscription's usage limit (Codex "You've hit your usage limit…", Claude "You've hit your session/weekly limit…", Grok "You hit your weekly limit" / "…free Grok Build usage limit for now…") |
 | `rate_limit` | wait | a 429 that is not the subscription limit |
 | `overloaded` | retry | 529 / "high demand" / "at capacity" |
 | `server_error` | retry | 5xx |
@@ -169,6 +198,8 @@ the raw CLI text; `retry_after` is an ISO time when the CLI stated when a limit 
 | `cli_crash` | retry | the CLI could not start, or exited before any model turn with no recognised error |
 | `cli_stalled` | retry | the whole wall clock passed without a model turn |
 | `runner_interrupted` | retry | the runner was stopped or died while the CLI was generating |
+| `host_suspended` | retry | the machine slept during the attempt, or the attempt ran more than 60 s past its wall limit (*The host-sleep rule*) |
+| `request_rejected` | stop | (API systems) the API refused the frozen request before any model turn: a 400 or a 404 that is not about the model (an effort or a parameter the model does not take, a wrong base URL) |
 
 `action` is what `run` does about it (next section): `wait` holds the batch until the
 reset, `retry` holds it for a short backoff, `stop` stops the batch for a human. In every
@@ -212,9 +243,21 @@ category in `error`: `rate_limit`, `server_error`, `authentication_failed`,
 `billing_error`, `model_not_found`, …), refined by the message text; a
 `rate_limit_event` with `status: "rejected"` supplies `resetsAt`. Codex has no
 structured error: the `turn.failed` message, else a final `error` event, is matched
-against the patterns in `infra.mjs`. Model turns are Codex `item.*` (not `error`)
-and `turn.completed`; Claude non-synthetic `assistant`, `user`, `tool_progress` and
+against the patterns in `infra.mjs`. Grok: the `result` event with `is_error: true`
+(`subtype: error_during_execution`) carries the CLI's message in `errors[]`, matched
+against Grok's own texts in `infra.mjs`; with no result event, the stderr line
+(`Error: …`). Model turns are Codex `item.*` (not `error`) and `turn.completed`; Claude's
+and Grok's non-synthetic `assistant`, `user`, `tool_progress` and
 `system/thinking_tokens`.
+
+**Grok retries silently.** Grok's stream format has no retry or wait event (whatever
+the CLI does while the service fails is not printed), and
+the debug log is not written (see *grok*). So for `grok` the watchdog can only stop a
+CLI that prints nothing at all (`cli_stalled`, `kind: 'silent'`; observed live: a
+refused or unresolvable endpoint makes Grok wait without a word), and a service outage
+that begins after model turns and lasts to the wall clock is scored as the model's
+timeout. None of Grok's messages found states when a limit resets, so `retry_after` is
+always null and holds use the backoff schedule.
 
 **Observed or inferred** (codex-cli 0.159.2, Claude Code 2.1.285, 2026-10-01):
 
@@ -237,12 +280,57 @@ and `turn.completed`; Claude non-synthetic `assistant`, `user`, `tool_progress` 
 | Claude unknown model → synthetic `model_not_found`, `api_error_status: 404` | live (real service) |
 | Claude subscription usage limit → synthetic `rate_limit` "You've hit your session limit · resets 7:50pm (America/Los_Angeles)" (also weekly/Opus/Sonnet limit), `rate_limit_event` `status: "rejected"` with `resetsAt` | inferred: the message builder, the rate-limit headers it reads and the event schema are in the binary; only `status: "allowed"` events were seen live (pilot). A 429 with those headers on an API-key session is rendered as a plain rate limit (live) |
 | Claude "Server is temporarily limiting requests (not your usage limit)", "OAuth session expired and could not be refreshed" | inferred (binary strings) |
+| Grok unknown model → `system/init` then `result` `error_during_execution`, `num_turns: 0`, `errors: ["Couldn't set model 'X': Invalid params: \"unknown model id\". Run 'grok models' to see available models."]`, the same line on stderr, exit 1 (`model_unavailable`) | live (grok 1.0.46, 2026-10-05) |
+| Grok cannot read its own files: "Failed to load config: Operation not permitted (os error 1)" (config.toml denied), "Couldn't start session: Managed policy could not be verified: the policy lock file under ~/.grok is not accessible…" (auth.json denied), "Couldn't create session: Permission denied" (sessions/ denied), "Custom sandbox profile 'X' not found … Refusing to start with its protections missing" (profile not in `<cwd>/.grok/sandbox.toml`); no result event, exit 1 (`cli_crash`) | live |
+| Grok endpoint refused or unresolvable → no output at all until killed (`cli_stalled` by the silent watchdog) | live |
+| Grok "You hit your weekly limit.", "You hit your free usage limit.", "…reached your free Grok Build usage limit for now…", `subscription:free-usage-exhausted` (`usage_limit`); "out of credits or over your spending limit", "Purchase credits…" (`billing`); "You've hit the rate limit for your plan…" (`rate_limit`); "Your team sign-in was rejected… Run `grok login`…", "Not logged in" (`auth`); "Grok is temporarily overloaded/unavailable…", "The service is busy…", "Authentication temporarily unavailable" (`overloaded`); "Something went wrong on the server/on our side", "The server returned an unexpected error (HTTP …)" (`server_error`); "Secure connection to Grok failed", "Connection to Grok timed out or was interrupted", "Check your network…", "The model stopped responding after …" (`network`); "The model hit its output limit", context-size errors, "Request too large" (the model's) | inferred (binary strings of 1.0.46) |
 
 A real usage limit was not provoked. Patterns marked inferred are the CLI's own text,
 not guesses, but their exact wording on the real service has not been seen. Claude Code
 waits out 429/529 by itself only with `CLAUDE_CODE_RETRY_WATCHDOG`, which the runner
 never sets (inferred from the retry code); without it a 429 whose `retry-after`
 exceeds 60 s failed at once and one with `retry-after: 30` was retried (live).
+
+## The host-sleep rule
+
+The first test run was damaged twice by the laptop's lid being closed: no timer fires
+while the machine sleeps, so attempts that were running were killed the moment it woke,
+after a wall time they never had and with their network gone for an unknown part of it.
+The rule was then applied after the fact (`v1/scripts/host-sleeps.py` and
+`relabel-host-suspended.mjs`, which stay for the frozen batches); the runner now applies
+it itself (`hostsleep.mjs`), the moment an attempt's CLI process has ended (any status,
+also when a restarted runner rebuilds an attempt from its logs), before anything is
+scored. It looks at time only, never at the score or the artifact:
+
+- **overrun**: `wall_seconds > wall_limit_seconds + 60` (the runner kills the process at
+  the limit, so only a suspended host lets it run longer);
+- **asleep**: the power log (`pmset -g log`) shows the system asleep for 30 s or more
+  between `started_at` and `finished_at`: every sleep of 30 s or more that overlaps the
+  attempt counts with its overlap, and the overlaps are summed.
+
+If either holds the attempt is `infra_error` with reason `host_suspended` (action
+`retry`): archived, run again, not counted towards `--max-reruns`. It replaces a
+retry-class finding of the classifier (the reconnects a wake produces are its symptom)
+and no finding at all; a limit or a stop the classifier found is kept as the reason,
+because it asks for a hold or a human, and the sleep is recorded beside it
+(`infra.host_suspended`). A broken workspace boundary is never excused, here as
+anywhere.
+
+Parsing (ported from `host-sleeps.py`): the state changes are the lines whose domain is
+`Sleep`, `Wake` or `DarkWake`; `Wake Requests` (logged two or three seconds after every
+Sleep: the trap, which would end every sleep at once), `WakeDetails` and `WakeTime` are
+not. A Sleep opens an interval, the next Wake or DarkWake closes it; a Sleep whose wake
+is not logged yet lasts until the check. `pmset -g log` takes 15-30 s and 12-26 s of
+CPU on this machine (27 MB of text; parsing it takes 0.1 s), so the runner records the system's sleep counter
+(`pmset -g stats`, "Sleep Count", milliseconds) in `started.json` at launch and reads
+the log only when the counter has moved by the end (streamed, low priority, keeping only
+state lines). `result.json` records
+`host_sleep_check: { checked: true, method: sleep-count | log, sleeps: [{ from, to, seconds }], asleep_seconds, sleep_count: { start, end } }`,
+or `{ checked: false, reason }` when `pmset` is unavailable, prints nothing parsable, or
+its log begins after the attempt started (it keeps a few days): then only the overrun
+half of the rule applies. Tests inject the source (`deps.hostSleep`) with real lines
+copied from `pmset -g log` (`runner-host-sleep.test.mjs`). Preflight probe sessions are
+not checked.
 
 ## Re-runs, waiting and stopping
 
@@ -265,7 +353,8 @@ gets at most 1 + 5 such tries; after that it stays `infra_error`, is listed in `
 higher `--max-reruns` lets it run again). Not counted, because they say nothing about
 whether this attempt can run: `usage_limit` and `rate_limit` (the account; handled by
 waiting), `auth`, `billing`, `model_unavailable` (the batch stops for a human) and
-`runner_interrupted` (an operator stopping the runner must not use up the cap). Every try
+`runner_interrupted` (an operator stopping the runner must not use up the cap) and
+`host_suspended` (a closed lid says nothing about the attempt either). Every try
 is archived and listed whatever its reason.
 
 **Waiting.** An attempt that meets a limit or a failing service puts the batch on hold:
@@ -277,7 +366,7 @@ launching resumes when the hold ends:
 | kind | reasons | hold |
 | --- | --- | --- |
 | limit | `usage_limit`, `rate_limit` | until the stated `retry_after`, plus 30-150 s; at least 1 min; a reset that did not hold the last time is not trusted alone. With no stated time: 2, 4, 8, 16, 30, 30, ... min, plus 30-150 s |
-| retry | `overloaded`, `server_error`, `network`, `cli_crash`, `cli_stalled` | 1, 2, 4, 8, 16, 30, 30, ... min, plus up to 25 % |
+| retry | `overloaded`, `server_error`, `network`, `cli_crash`, `cli_stalled`, `host_suspended` | 1, 2, 4, 8, 16, 30, 30, ... min, plus up to 25 % |
 
 The step grows while holds of a kind follow each other without a sample in between (only
 an attempt launched after the last resume can lengthen it or reset it). After a hold,
@@ -362,8 +451,8 @@ state line (`runner`) in its JSON.
 The contestant may read its workspace plus a read-only runtime, write only
 `output/`, `tmp/` and the workspace root, and reach no network. It may not read
 the task's truth, `objects/`, other tasks or attempts, the repository, `~/.codex`,
-`~/.claude`, the keychain, or anything else outside. Nested Seatbelt profiles are
-refused by the kernel (`sandbox_apply: Operation not permitted`), so neither CLI can
+`~/.claude`, `~/.grok`, the keychain, or anything else outside. Nested Seatbelt profiles
+are refused by the kernel (`sandbox_apply: Operation not permitted`), so no CLI can
 be wrapped in an outer sandbox without disabling its own. Each harness's own
 mechanism is therefore configured and then proven.
 
@@ -458,6 +547,267 @@ filesystem `denyRead` (home, `/Users`, `/Volumes`, `/private/tmp`,
 `--bare` would skip CLAUDE.md, hooks and keychain reads but accepts only API-key
 auth, so it cannot use the existing login and is not used.
 
+### grok
+
+Grok Build 1.0.46 (`~/.grok/bin/grok` → `~/.grok/downloads/grok-1.0.46-macos-aarch64`),
+headless, logged in with grok.com. **Preflight fails on three requirements Grok's own
+mechanisms cannot meet on macOS (R1–R3 below); everything else is configured and
+proven.**
+
+```
+grok --prompt-file <ws>/.grok/prompt.txt --output-format streaming-messages-json -m <model> [--effort <e>]
+  --cwd <ws> --sandbox e3d --permission-mode bypassPermissions
+  --tools run_terminal_command,read_file,search_replace,list_dir,grep,write
+  --disallowed-tools todo_write,monitor,search_tool,use_tool,workflow,enter_plan_mode,exit_plan_mode,ask_user_question,
+                     send_feedback,image_gen,image_edit,image_to_video,reference_to_video,spawn_subagent,
+                     kill_command_or_subagent,get_command_or_subagent_output,scheduler_create,scheduler_delete,scheduler_list,Agent
+  --no-subagents --no-plan --disable-web-search
+env: HOME USER LOGNAME LANG PATH=<node bin>:/usr/bin:/bin:/usr/sbin:/sbin TMPDIR=<ws>/tmp
+     GROK_{CLAUDE,CURSOR,CODEX}_{SKILLS,RULES,AGENTS,MCPS,HOOKS,SESSIONS}_ENABLED=0 GROK_MANAGED_MCPS_ENABLED=0
+     GROK_MEMORY=0 GROK_SUBAGENTS=0 GROK_WEB_FETCH=0 GROK_BACKEND_SEARCH=0 GROK_SESSION_SEARCH=0 GROK_LSP_TOOLS=0
+     GROK_TELEMETRY_ENABLED=0 GROK_TELEMETRY_TRACE_UPLOAD=0 GROK_DISABLE_AUTOUPDATER=1
+     GROK_CONFIG={"toolset":{"bash":{"login_shell_capture":false}}}
+```
+
+`<attempt>/harness/grok-sandbox.toml`, frozen with the attempt (a text harness file,
+hashed like the JSON ones):
+
+```toml
+[profiles.e3d]
+extends = "strict"
+restrict_network = true
+read_only = ["<ws>/input", "<ws>/tools", "<ws>/node_modules", <node install + Homebrew Cellar/opt/openssl/ca-certificates>]
+deny = ["~/.grok/{memory,memory-v2,memtrace,logs,bundled,marketplace-cache,installed-plugins,hooks,docs}" (those that exist),
+        "/private/tmp", "/private/var/tmp"]
+```
+
+Grok reads a custom profile only from `<cwd>/.grok/sandbox.toml` or `~/.grok/sandbox.toml`
+(the user's file is never written), and refuses to start when the named profile is
+missing or cannot be applied ("Refusing to start with its protections missing"; live).
+So the adapter's `stage` step copies the frozen profile, and the prompt (`--prompt-file`
+must be readable under the sandbox, which the attempt directory is not), into
+`<ws>/.grok/` just before launch, replacing whatever is there (a planted symlink included;
+unit-tested). The prompt also goes to stdin, which headless Grok ignores. No
+`--debug-file`: under the sandbox Grok can write it only into the workspace or a temp
+directory, where the contestant could read it, and Grok's debug log can carry
+configuration values such as provider keys.
+
+**What the sandbox is.** Grok applies a Seatbelt profile (its `nono` crate) to its own
+process at start-up; every tool and every shell command inherit it. So the file tools
+are confined by the kernel exactly like the shell (unlike Claude Code's in-process
+checks): `read_file` on the canary answers "Permission denied", a write through a planted
+symlink "IO Error: Operation not permitted (os error 1)" (live). No leader process is
+involved: with a sandbox active Grok runs the session in-process (documented; `grok
+leader list` showed none). `GROK_SANDBOX_MODE=enforce` changes nothing headless.
+
+| Requirement | How | Evidence (live preflight of `probe-grok-1`, grok-4.6 low) |
+| --- | --- | --- |
+| File tools confined to the workspace | the profile (`strict`: reads in the cwd and system areas, writes in the cwd); symlinks are resolved by the kernel | pass: `agent:read-*`, `agent:grep-*`, `agent:list-*`, `agent:write-{outside,symlink,dangling,dir-symlink}`, controls `agent:read-input`, `agent:write-output`, `agent:edit-output` |
+| Shell confined (files) | the same profile | pass: `shell:canary-*` (file, symlink, directory symlink, hard link), `shell:outside-*`, `shell:repo-*`, `shell:truth*`, `shell:objects-root`, `shell:tasks-root`, `shell:other-attempt`, `shell:batch-manifest`, `shell:home`, `shell:codex-*`, `shell:claude-*`, `shell:ssh`, `shell:slash-tmp`, `shell:unix-socket` (`/private/tmp` denied) |
+| Image viewing | `read_file` returns a PNG or JPEG as an image (`ImageContent` with `mime_type` `image/png` / `image/jpeg`; both live, a 48×48 JPEG named correctly); the prompt says "Use read_file to look at the evidence and at your own previews" | pass: `agent:view-canary`, `agent:view-symlink` (refused), `agent:view-control` (the control image's bytes came back and the model named its colour) |
+| Tool surface | `--tools` alone does not narrow the set; `--disallowed-tools` does. Six tools | pass: `agent:tool-surface` from `system/init`: exactly the six tools, `mcp_servers: []`, `skills: []`, `apiKeySource: oauth` |
+| No skills | no flag, environment variable or `GROK_CONFIG` key turns off Grok's bundled skills (19, among them `threejs-frame-conventions`; the overlay accepts only `models`, `features`, a narrowed `toolset` and `shell_environment_policy`); denying `~/.grok/bundled` in the profile hides them, and Grok runs without them | pass: `init.skills` went from 19 to 0 and the first request from 5818 to 3043 input tokens; the session record no longer lists them |
+| No instruction files, personas, memory, MCP servers, hooks, plugins, sub-agents, web | the compatibility, memory, MCP, sub-agent, web and telemetry switches above; `--no-subagents --no-plan --disable-web-search`; `~/.grok/{memory*,memtrace,hooks,installed-plugins,marketplace-cache}` denied | pass: `agent:instruction-files` (marked files beside the workspace never surface), `agent:grok-context` (Grok's record of the session, `prompt_context.json`: no AGENTS.md files, no personas, memory off), `agent:tool-surface` |
+| No credential-like environment | child environment built from scratch; `login_shell_capture=false` stops the shell from importing the user's login shell (which also drops the node bin from PATH) | pass: `shell:env-names` |
+| Existing login | `HOME` and `~/.grok` kept (a separate home would lose the grok.com login); `grok models` says "You are logged in with grok.com." and an API-key login is refused at `prepare` | `prepare`; `apiKeySource: oauth` in init |
+| **R1: no network** | `restrict_network = true`; `--disable-web-search`, `GROK_WEB_FETCH=0` | **fail**: `shell:tcp-loopback` (the runner's listener accepted the connection), `shell:tcp-internet` (1.1.1.1:443 connected), `shell:http-internet` (HTTP 200). Grok's documentation states that blocking a child's network is a no-op on macOS, and the CLI process itself must reach the xAI API, so an outer profile cannot cut its children off either |
+| **R2: `input/`, `tools/`, `node_modules/` read-only** | `read_only` only adds read grants; it does not take away the write grant the cwd has, and `deny` would also deny reading | **fail**: `shell:input-write`, `shell:input-create`, `shell:tools-write`, `shell:runtime-write`, `agent:write-input`. Not pursued: moving these three outside the cwd behind symlinks would change the workspace layout for one system only |
+| **R3: `~/.grok` unreadable** | the `strict` profile grants `~/.grok`, which Grok needs; denying `sessions/` ("Couldn't create session: Permission denied"), `config.toml` ("Failed to load config") or `auth.json` ("Managed policy could not be verified") stops Grok from starting (live) | **fail**: `shell:grok-home`, `shell:grok-sessions` (the user's other Grok transcripts, and other attempts' sessions), `shell:grok-auth` (the grok.com login file opens; the probe never reads it). `strict` also lets the session write `~/.grok/sessions` (documented; not probed, since nothing may be written under `~/.grok`) |
+
+The model's context besides the prompt (from Grok's record of the probe session): Grok's
+system prompt, a `<user_info>` block (OS, shell, workspace path, date), two "user rules"
+that are compiled into the binary (affirmative wording; verify web UI work in a browser),
+and a system reminder that names Grok's one compiled-in workflow, `deep-research` (the
+`workflow` tool is disallowed, so it cannot be run).
+
+Effort levels (from Grok's model catalogue, `~/.grok/models_cache.json`): `grok-4.7` and
+`grok-4.6` take `low`, `medium`, `high` (the default) and `xhigh`; a model the catalogue
+does not describe gets the canonical list (`none` … `max`), and preflight's session
+checks it. Context window 256k for both, auto-compaction at 80%.
+
+### api-anthropic, api-openai
+
+The loop that talks to the API is ours and runs unconfined, like a CLI process (nested
+Seatbelt profiles are refused); the model reaches the machine only through the five
+tools.
+
+```
+shell:  /usr/bin/sandbox-exec -p <profile> /bin/bash -c <command>     cwd <ws>
+        env PATH=<node bin>:/usr/bin:/bin:/usr/sbin:/sbin HOME=TMPDIR=<ws>/tmp LANG=en_US.UTF-8
+profile (api/sandbox.mjs, frozen in api-config.json; paths resolved to real paths):
+  (deny default)  (allow process-fork process-exec)  (allow signal / process-info* (target same-sandbox))  (allow sysctl-read)
+  (allow file-read-data (literal "/"))  (allow file-read-metadata <every ancestor of the roots below, literally>)
+  (allow file-read* /usr /bin /sbin /System /private/etc /private/var/db/timezone /private/var/select
+                    /dev/{null,zero,random,urandom,fd} <node install, Homebrew Cellar/opt/openssl/ca-certificates> <ws>)
+  (allow file-write-data /dev/null /dev/zero)
+  (allow file-write* (require-all (subpath <ws>) (require-not <ws>/input) (require-not <ws>/tools) (require-not <ws>/node_modules)))
+```
+
+| Requirement | How | Evidence |
+| --- | --- | --- |
+| Shell confined | the profile above: everything not allowed is denied, so no network (TCP, UDP, DNS, Unix sockets), no Mach services (keychain, directory services), no other process; writes only in the writable parts of the workspace; the probe could not even create a hard link to an outside file | preflight `sandbox:*` (the probe script under the profile, no model) and `shell:*` (the same script through the `shell` tool) |
+| File tools confined | in code (`api/tools.mjs`): a path must stay inside the workspace lexically (absolute paths elsewhere and `..` refused) and after resolving it one component at a time, following a symlink only when it resolves inside; a link that leads out or nowhere is refused with the same words either way (no oracle for what exists outside); files with several hard links are refused (except the runtime under `node_modules/`, hard-linked by the runner and read-only to the shell); writes never into `input/`, `tools/`, `node_modules/`, never through a symlink, never into a hard-linked file (`O_NOFOLLOW`) | preflight `agent:*`: `read_file`, `list_dir`, `view_image`, `write_file` on the outside file, a file symlink, a directory symlink, a dangling symlink, a runner-planted hard link and `..`, plus controls; judged by canary content and names in the results and by the files on disk |
+| No credentials | the key reaches the loop on stdin only; the shell's environment is built from scratch; nothing of the runner's environment is passed | `shell:env-names`; key-search tests over whole batches |
+| Fixed tool surface | the loop runs its five tools and nothing else; an unknown tool name gets an error result | `agent:tool-surface` (the frozen definitions are exactly the five); every run's events checked |
+| No instructions from the machine | the loop reads only its frozen config and the prompt | (nothing to load; reported `not_applicable`) |
+
+## The API systems
+
+`api-anthropic` and `api-openai` run the same minimal agent loop of our own
+(`api/loop.mjs`) against the Claude Messages API and the OpenAI Responses API: the same
+five tools, the same prompts, the same budget, the same boundary. Only the wire format
+differs (`api/anthropic.mjs`, `api/openai.mjs`).
+
+**Live behaviour against the real APIs has not been exercised.** There were no API keys
+on the development machine; the loop, the runner integration and preflight were built
+and tested against local mock servers (`api/mock/`) that follow the documented
+protocols (below). The first live batch is the first contact with the real services.
+
+```sh
+export ANTHROPIC_API_KEY=...          # in the shell that runs preflight and run; never written anywhere
+node v1/scripts/run.mjs prepare   --id api1-opus --system api-anthropic --model claude-opus-5-5 --effort high --tasks a,b,c
+node v1/scripts/run.mjs preflight --batch .local/v1/runs/api1-opus
+node v1/scripts/run.mjs run       --batch .local/v1/runs/api1-opus
+
+export OPENAI_API_KEY=...
+node v1/scripts/run.mjs prepare   --id api1-sol --system api-openai --model <model id> --effort high --tasks a,b,c
+node v1/scripts/run.mjs preflight --batch .local/v1/runs/api1-sol
+node v1/scripts/run.mjs run       --batch .local/v1/runs/api1-sol
+```
+
+`--token-budget` (default 2 000 000), `--tool-budget` (default 200) and
+`--max-output-tokens` (per request, thinking included; default 32 000) are frozen at
+`prepare`, with the model, the effort and the base URL. `prepare` checks the effort
+against the provider's documented levels (Anthropic `low medium high xhigh max`, OpenAI
+`none minimal low medium high xhigh max`); whether this model takes it is shown by
+preflight's live request (a refusal stops it as `request_rejected`). `preflight` and
+`run` stop with exit 3 when the key variable is not set.
+
+### The loop
+
+One process per attempt, started by the runner exactly like a CLI (it is the system's
+"harness binary": `node <repo>/v1/lib/runner/api/loop.mjs <attempt>/harness/api-config.json`,
+its sha256 frozen and re-checked like a CLI's), under the same wall clock, kill, event
+and stderr capture, watchdog, integrity checks, classification and scoring. Everything
+a session depends on is frozen in `harness/api-config.json` (hashed into the
+invocation): provider, model, effort, base URL, system prompt, tool definitions,
+budget, output and retry limits, and the Seatbelt profile. The key is not: the runner
+reads it from its own environment when the attempt launches and hands it to the loop on
+stdin (`{ key, prompt }`), never through argv or the environment (both visible to other
+processes) and never into a file. The loop holds it in memory, and everything it prints
+passes through a redactor (the key itself, `x-api-key`/`authorization` values, `sk-…`
+shapes become `[REDACTED]`); the runner redacts preflight's live request the same way.
+Tests search every file of a batch for the key, including when the mock echoes it back
+in an error.
+
+The session: send the conversation; log the usage; run the tool calls in order, each
+counted against the tool budget; send the results back; repeat until the model replies
+without a tool call (status `completed`) or a budget is exhausted (`budget_exhausted`).
+A reply cut off at the output limit is continued ("continue where you stopped; write
+long files in parts"), and calls in it are not run (they may be incomplete). No
+context compaction: a full context is the model's failure (`generation_failed`). The
+history is append-only: every assistant turn is sent back exactly as it came (Claude's
+thinking blocks, OpenAI's reasoning items with their encrypted content), as both APIs
+require. Requests are non-streaming, over `node:https` (Node's `fetch` gives up on
+headers after 300 s), with TCP keep-alive and a 20-minute idle timeout.
+
+**Prompts.** The task prompt is the CLI systems' text (`prompt.mjs`, `buildPrompt`)
+with two paragraphs adapted, the same for both API systems: the tool paragraph names
+`shell`, `read_file`, `write_file`, `list_dir`, `view_image`, and the time-limit
+condition names the budget instead ("There is a hard budget of N tokens (the input and
+output of every request, summed) and M tool calls. When it runs out the session is
+stopped, …"), because the wall clock is not the binding limit here. The system prompt
+(`apiSystemPrompt`, identical for both providers) names the tools, the budget, the
+one-time notice, the wall-clock safety limit, and that the session ends when the model
+replies without a tool call. Both are frozen into the batch (`prompt.txt`, the config).
+
+**Tools** (`api/tools.mjs`, one definition for both providers; OpenAI's are sent with
+`strict: false`, because the Responses API's default strict mode needs every property
+required):
+
+| tool | arguments | result |
+| --- | --- | --- |
+| `shell` | `command`, optional `timeout_seconds` (default 120, at most 300) | `/bin/bash -c` in the workspace under the sandbox; stdout and stderr interleaved, cut to 20 000 characters (the first and last 10 000), then `[exit code N]`; the command's process group is killed when it ends or times out |
+| `read_file` | `path` | the text (cut to 20 000 characters; at most 4 MB read); binary files are refused with a hint |
+| `write_file` | `path`, `content` | writes the file, creating missing directories |
+| `list_dir` | `path` | one entry per line: `name/`, `name (N bytes)`, `name@ (symbolic link)` |
+| `view_image` | `path` | the PNG or JPEG itself, as an image block (Anthropic: `image` in the `tool_result`; OpenAI: `input_image` in the `function_call_output`). PNGs over 2000 px on a side are scaled down (Claude rejects larger images once a request holds more than 20, and every image stays in the history); larger JPEGs are refused; at most 5 MB |
+
+A refused or failed call comes back to the model as an error result (Anthropic
+`is_error`), never as a crash of the session.
+
+**Budget** (`api/budget.mjs`): tokens are the sum over requests of input plus output
+tokens as the API reports them, cached input counted in full (Anthropic: `input_tokens +
+cache_creation_input_tokens + cache_read_input_tokens + output_tokens`; OpenAI:
+`input_tokens + output_tokens`). The token budget is checked before each request (the
+request that crosses it is the last, and its tool calls still run); the tool budget
+before each call (at most M calls run; every call the model asks for counts, unknown
+tools and unparsable arguments included, except calls in a reply cut off at the output
+limit). Once, when either reaches 85 %, the next tool results carry "[harness] Budget
+notice: about N tokens and M tool calls are left. Write output/model.glb now." The wall
+clock is only a safety cap: 2 × the task's `wall_seconds`, enforced by the runner (a
+session that reaches it is a `timeout`).
+
+**Effort, thinking, caching.** Anthropic: `output_config: { effort }` and `thinking: {
+type: "adaptive" }` (Claude Opus 5.5 always thinks and defaults to effort `medium`;
+models that reject adaptive thinking fail preflight's live request), `cache_control` on
+the system prompt block and the last tool, plus top-level automatic caching, which moves
+the breakpoint to the end of each new request (3 of the 4 allowed breakpoints, no edits
+to earlier turns), `anthropic-version: 2023-06-01`. OpenAI: `reasoning: { effort }`,
+`store: false`, `include: ["reasoning.encrypted_content"]` (documented as legacy but
+accepted), the whole output replayed as input each turn, automatic caching with a
+per-attempt `prompt_cache_key`. Cached input is reported in `cached_input_tokens`.
+
+**Failures.** The loop classifies every HTTP failure itself (`api/errors.mjs`) and
+states its verdict in its `result` event; the runner takes it from there with its
+existing wait, retry, stop and cap machinery.
+
+| answer | reason | in the loop | then |
+| --- | --- | --- | --- |
+| 429 with `retry-after`, `anthropic-ratelimit-*-reset` or `x-ratelimit-reset-*` | `rate_limit` | waited out if one wait is at most 2 min and all waits of one request at most 8 min (below the 10-minute watchdog) | `infra_error`, `retry_after` from the header: the batch holds until then |
+| 429 spend cap (`enforced_spend_limit_reached`), quota or credit codes; 402; 400 "credit balance" / "specified API usage limits" | `billing` | — | stop |
+| 529, 503 | `overloaded` | 3 retries, 10 / 30 / 90 s apart | `infra_error`, retry hold |
+| 500, 502, 504, 408, 409, a 200 that is not a response | `server_error` | the same | the same |
+| DNS, refused, reset, TLS, dropped connection, timeout | `network` | the same | the same |
+| 401, 403 | `auth` | — | stop |
+| 404 naming the model; `model_not_found` | `model_unavailable` | — | stop |
+| other 400 / 404 / 413 before any model turn | `request_rejected` | — | stop |
+| context window error (400 "prompt is too long", `context_length_exceeded`) | — | — | `generation_failed` (the model's) |
+| other 400 / 413 after model turns | — | — | `generation_failed` |
+| the loop's own exception, or its end without a `result` event | `cli_crash` | — | `infra_error`, retry |
+
+**Events** (`events.jsonl`, one JSON object per line, each with `t`, ms since the loop
+started): `session` (provider, model, effort, base URL, budget, tools); `request` (`n`,
+`ok`, HTTP status, ms, request id, model, `stop_reason`, `usage` normalised as above
+plus `raw_usage`, `tokens_used`, `calls_used`; or, failed: `reason`, `action`,
+`message`); `retry` (`reason`, `attempt`, `delay_ms`, `source`); `text` (model text);
+`tool` (`call`, `name`, `args` summary (paths, the command, the byte count of a
+write), `executed`, ms, `ok`, `refused`, exit code, timeout, output size, truncation, an
+excerpt); `notice` (`budget` or `cut_off`); `result` (`status` completed /
+budget_exhausted / error, `stop_reason`, `exhausted`, `error_kind`, `infra`, totals).
+`api/events.mjs` reduces it to `turns`, `commands`, `tools`, `usage`; the model's notes
+are whatever it wrote to `output/notes.md`.
+
+**Wire formats, as documented** (read 2026-10-05; each module cites its pages):
+platform.claude.com/docs/en/ `agents-and-tools/tool-use/overview.md`,
+`agents-and-tools/tool-use/handle-tool-calls.md`, `build-with-claude/effort.md`,
+`build-with-claude/prompt-caching.md`, `build-with-claude/vision.md`, `api/errors.md`,
+`api/rate-limits.md`; developers.openai.com/api/docs/ (platform.openai.com/docs
+redirects there) `guides/function-calling`, `guides/reasoning`,
+`guides/conversation-state`, `guides/images-vision`, `guides/error-codes`,
+`guides/rate-limits`, and `api/reference/resources/responses/methods/create`.
+
+**Mocks** (`api/mock/server.mjs`): one local HTTP server per protocol, scripted one
+step per request (text, tool calls, a reply cut off at the output limit, a refusal,
+any HTTP error with `retry-after` or reset headers, a context-length error, a dropped
+connection, an echoed key, usage numbers). Each request is checked against the
+documented rules (headers, tool definitions, every `tool_use` answered by a
+`tool_result` first in the next user message, no prefill, at most 4 cache breakpoints;
+`store: false`, every `function_call` answered, reasoning replayed with its encrypted
+content, strict-mode schemas) and a violation is answered 400 and recorded.
+`api/mock/fixtures.mjs` holds the tests' data root, a preview kit whose tool draws a
+real PNG, a fake scorer and a scripted session that uses every tool.
+
 ## Preflight
 
 Per batch, on fresh probe workspaces built by the same code as attempts (task pack
@@ -471,8 +821,13 @@ symlinks, a hard-link attempt):
 - `shell:*`: the same probe script run by the model through its own shell tool in
   one real session that uses the batch model at its lowest effort.
 - `agent:*`: in that session, the model aims its file tools at the canaries. It uses
-  Read/Grep/Glob/Write/Edit for Claude Code, and view_image/apply_patch/code mode for
-  Codex.
+  Read/Grep/Glob/Write/Edit for Claude Code, view_image/apply_patch/code mode for
+  Codex, and read_file (text and images)/grep/list_dir/write/search_replace for Grok.
+  For Grok the shell probe's report is taken from the raw bytes of the tool result
+  (`output`): the copy shown to the model (`output_for_prompt`) has its long lines
+  wrapped at about 2000 characters and does not parse. `agent:grok-context` reads Grok's
+  own record of the probe session (`~/.grok/sessions/<cwd>/<session id>/prompt_context.json`,
+  after the session, by the runner): no instruction files, personas or memory.
 
 Probe targets include input readable; input, tools and runtime not writable even
 after `chmod`; output and tmp writable; the canary (directly, through
@@ -480,7 +835,10 @@ file/directory/dangling symlinks, through a hard link); writes outside;
 repository scoring code and contract; the task's `truth.json`; `truth/`,
 `objects/`, `tasks/`; another attempt; the batch manifest; the home directory;
 `~/.codex/{auth.json,config.toml,memories}`; `~/.claude/{settings.json,projects}`;
-`~/.claude.json`; `~/.ssh`; `/private/tmp`; the keychain entry; `three` importable;
+`~/.claude.json`; `~/.grok`, `~/.grok/sessions` (listed) and `~/.grok/auth.json` (probe
+kind `open`: opened for reading and closed, never read, so a credential file is tested
+without its content passing through the probe); `~/.ssh`; `/private/tmp`; the keychain
+entry; `three` importable;
 the preview tool rendering a non-blank PNG of the fixture house; no credential-like
 environment variable names; loopback TCP and a Unix socket (both runner-owned, so
 an accepted connection is counted by the runner itself); the harness's own
@@ -493,6 +851,21 @@ be evaluated fails preflight. A target missing on this machine is reported as
 (the model did not follow the script) is run once more in a fresh site. A failed
 check is never retried.
 
+**The API systems** prove the boundary without a model (`api/preflight.mjs`), on two
+fresh probe sites with the same canaries and planted routes: `sandbox:*` runs the probe
+script under the frozen profile with `sandbox-exec`, `shell:*` runs it through the
+`shell` tool as the model would, and `agent:*` aims the four file tools at the canaries
+and escape routes (above). Deterministic, so a failed check is the boundary's.
+`live:request` then sends one minimal request (the frozen model, effort, system prompt
+and tools, a one-line user message, at most 2048 output tokens) when the key variable
+is set: it proves the key, the model id and that the API accepts the request shape.
+Without the key the boundary is still proven, the live check is reported as skipped,
+and preflight ends with `infra: { reason: auth, action: stop }` (exit 3); a refused
+live request ends the same way with its own reason (`auth`, `billing`,
+`model_unavailable`, `request_rejected`), a failing service after two retries with
+`overloaded`/`server_error`/`network` (exit 75). Measured on this machine against the
+mocks: about 8 s per preflight.
+
 **Infrastructure errors in preflight.** The probe session is classified like an
 attempt. If it ended on an infrastructure error, the checks it failed only because
 something expected never happened (a control that did not land, a refusal never logged)
@@ -504,11 +877,13 @@ report then has `passed: false`, `failed: []` and `infra: { reason, retry_after,
 stop|no-wait|tries|aborted, hold: { until_at, ... }, session, tries }`, and `run` refuses
 with "could not finish (infrastructure: ...); run preflight again", not "did not pass". Measured cost per preflight: Claude Haiku 4.5 about
 25–30 s and US$0.04–0.07 (CLI estimate); gpt-5.6-luna low about 35–45 s and
-about 95k input tokens (mostly cached), no cost reported.
+about 95k input tokens (mostly cached), no cost reported; grok-4.6 low about 39–47 s,
+21 turns, 164k–211k input tokens (79–94% cached), about 0.8–1k output tokens and
+US$0.035–0.047 as Grok reports it (four live runs).
 
 ## What is not enforced
 
-- **The model service is remote.** Each CLI process talks to OpenAI or Anthropic
+- **The model service is remote.** Each CLI process talks to OpenAI, Anthropic or xAI
   with the user's login. Only the contestant's commands and tools are confined,
   not the CLI itself.
 - **Readable system areas.** Codex's `:minimal` set, the Node install and all of
@@ -556,3 +931,53 @@ about 95k input tokens (mostly cached), no cost reported.
   start. Codex writes under `~/.codex/tmp`. `--ephemeral` and
   `--no-session-persistence` keep transcripts out of both homes.
 - **Blender is not provided** and nothing is configured for it.
+- **The API systems' file tools are policed by the loop, not the kernel**, like Claude
+  Code's. A process the model left running could race their checks; the shell kills each
+  command's process group when it returns, so only a process that daemonized itself
+  (setsid) out of the group could. Preflight covers the known routes; new ones would need
+  new probes.
+- **What the API shell can read**: the system directories in the profile, the Node
+  install and Homebrew's Cellar/opt, the metadata (not the contents) of the workspace's
+  and those roots' ancestor directories, the root directory's listing. Python
+  (`/usr/bin/python3`) needs the Xcode command-line tools, which are not readable, so it
+  does not run there; Node does.
+- **API sessions keep every image they viewed** in their history (no compaction, by
+  design), and each request carries the whole history: the Claude API refuses requests
+  over 32 MB, so a session that views very many large images ends `generation_failed`
+  (`request_too_large`). Evidence images are at most about 3 MB.
+- **Rate-limit waits in the loop** (at most 8 minutes per request) and slow responses
+  lengthen an API session's wall time; its wall clock is a 2× safety cap, not a budget.
+- **No cost for the API systems**: no price list is frozen with a batch; `usage` is
+  exact and `cost_usd` is null.
+- **grok: the three failed requirements** (see *grok*). The contestant's shell reaches
+  loopback and the internet (R1); it and the write tool can change `input/`, `tools/`
+  and the runtime under `node_modules/`, which is hard-linked from the batch's shared
+  copy (R2; the integrity check after the session voids an attempt that changed them, and
+  a changed runtime stops the batch before the next launch); and it can read `~/.grok`, the user's other Grok session transcripts and
+  other attempts' (R3), and open the grok.com login file. Preflight fails on all three,
+  so `run` refuses grok batches; nothing in the runner overrides that.
+- **grok leaves its sessions behind.** Every Grok session writes
+  `~/.grok/sessions/<URI-encoded cwd>/` (`prompt_history.jsonl` and a directory per
+  session with `chat_history.jsonl`, `events.jsonl`, `updates.jsonl`, `system_prompt.txt`,
+  `tool_definitions.json`, `prompt_context.json`, `usage.json`, `summary.json`,
+  `terminal/` with every shell command's output, about 250 KB for a probe session),
+  appends to `~/.grok/sessions/sandbox-events.jsonl` and updates
+  `~/.grok/sessions/session_search.sqlite` and `active_sessions.json`. Grok has no
+  ephemeral mode; the runner deletes nothing under `~/.grok`.
+- **grok's own context.** Besides the prompt the model gets Grok's system prompt, two
+  rules built into the binary that Grok presents as user rules, and a reminder naming a
+  compiled-in workflow whose tool is disallowed (see *grok*). They are the product's,
+  the same for every grok attempt, and not the user's.
+- **grok's workspace holds `.grok/`** (the staged profile and prompt). Grok reads them
+  only at start; the contestant can change them afterwards to no effect on its own
+  session. Grok also watches `<cwd>/.grok/` for project MCP configuration
+  (`features.mcp_recursive_config_watch`); whether a project MCP server added mid-session
+  would start in an untrusted folder was not tested (it would run under the same
+  profile).
+- **grok preflight reads `~/.grok/sessions`**: the runner lists that directory and reads
+  the probe session's `prompt_context.json` (no credentials). The `~/.grok` targets are
+  probed for every system, so codex and claude-code preflights also show that their
+  contestants cannot read it.
+- **The API systems were not run against the real services** (no keys were available
+  while they were built): the request shapes follow the documentation and the mocks
+  enforce it, but undocumented behaviour of the real APIs has not been seen.

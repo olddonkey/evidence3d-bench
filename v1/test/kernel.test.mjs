@@ -5,7 +5,7 @@ import { encodePNG, decodePNG } from '../lib/png.mjs';
 import { validateModel, modelToGLB } from '../lib/model.mjs';
 import { soupFromModel, soupFromGLB, transformSoup, transformPoint, filterSoup, soupFromOccluders, mergeSoups } from '../lib/soup.mjs';
 import { orthoCamera, perspectiveCamera, orthoViewOfBounds, projectPoint, unproject, render, raycast } from '../lib/raster.mjs';
-import { validateTask, VARIANTS, STANDARD_ITEMS } from '../lib/contract.mjs';
+import { validateTask, VARIANTS, STANDARD_ITEMS, EVIDENCE_KINDS } from '../lib/contract.mjs';
 import { sampleModel } from '../fixtures/sample-model.mjs';
 
 const near = (actual, expected, tolerance = 1e-6) => assert.ok(Math.abs(actual - expected) <= tolerance, actual + ' is not within ' + tolerance + ' of ' + expected);
@@ -121,7 +121,12 @@ test('soups can be filtered by part and merged with occluders', () => {
 });
 
 test('variants only reference standard evidence items; task contract is enforced', () => {
-  for (const variant of Object.values(VARIANTS)) for (const item of [...variant.items, ...(variant.stale ?? [])]) assert.ok(STANDARD_ITEMS.includes(item), item);
+  for (const variant of Object.values(VARIANTS)) {
+    // A variant names standard items, or (real objects) evidence kinds.
+    assert.ok(Array.isArray(variant.items) !== Array.isArray(variant.kinds), variant.title);
+    for (const item of [...(variant.items ?? []), ...(variant.stale ?? [])]) assert.ok(STANDARD_ITEMS.includes(item), item);
+    for (const kind of variant.kinds ?? []) assert.ok(EVIDENCE_KINDS.includes(kind), kind);
+  }
   const task = { schema: 'e3d-task-v1', id: 'obj-1-t1', title: 'House', prompt: 'Rebuild it', target_state: 'As photographed in 2025-09', variant: 't1',
     frame: { unit: 'metre', up: '+Y', origin: 'x', front: 'y' }, scale_evidence: 'none',
     inputs: [{ id: 'source-1', path: 'inputs/01-photo-front.jpg', sha256: 'a'.repeat(64), bytes: 10, kind: 'photo' }],

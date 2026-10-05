@@ -16,11 +16,19 @@
 //   wait   the account is limited until a stated or unknown time
 //   retry  transient; a fresh attempt is expected to work
 //   stop   needs a human (login, billing, model id); retrying cannot help
+//   host_suspended (any system): the machine slept during the attempt (hostsleep.mjs)
+//   request_rejected (API systems): the API refused the frozen request before
+//   any model turn (an effort or a parameter the model does not take)
 export const INFRA_REASONS = {
   usage_limit: 'wait', rate_limit: 'wait',
-  overloaded: 'retry', server_error: 'retry', network: 'retry', cli_crash: 'retry', cli_stalled: 'retry', runner_interrupted: 'retry',
-  auth: 'stop', billing: 'stop', model_unavailable: 'stop',
+  overloaded: 'retry', server_error: 'retry', network: 'retry', cli_crash: 'retry', cli_stalled: 'retry', runner_interrupted: 'retry', host_suspended: 'retry',
+  auth: 'stop', billing: 'stop', model_unavailable: 'stop', request_rejected: 'stop',
 };
+
+// The API systems (api-anthropic, api-openai) run our own loop, which
+// classifies every HTTP failure itself (api/errors.mjs) and states its
+// verdict in its final `result` event; nothing is read from message text.
+const isApi = system => /^api-/.test(system ?? '');
 
 // A timed-out session counts as infrastructure only if the CLI was still
 // retrying or waiting on the service when the wall clock expired: its last
@@ -50,6 +58,31 @@ const CODEX_PATTERNS = [
   ['server_error', /exceeded retry limit, last status: 5\d\d|unexpected status 5\d\d|internal server error|internal_server_error|Error while reading the server response/i], // live (fake server): 503
   ['network', /stream disconnected|Connection failed|waiting for network|error sending request|workspace routing discovery failed|request timed out|timed out|connection (reset|refused|closed)|broken pipe|\bdns\b|\btls\b|certificate|websocket/i], // live: no network, TLS, refused, pilot logs
 ];
+
+// Grok Build's messages (1.0.46), most specific first: the result event's
+// errors[] (or its result text), else stderr. Observed live: unknown model id.
+// The rest is the CLI's own text found in its binary (inferred), see README.
+// No Grok message found states when a limit resets, so retry_after stays null.
+const GROK_NOT_INFRA = /exceed_context_size|context_length_exceeded|maximum context length|maximum prompt length|prompt is too long|context window|output limit|max_tokens/i;
+const GROK_PATTERNS = [
+  ['model_unavailable', /unknown model id|Couldn't set model|is not in your available models|model_not_found|model isn't available/i], // live: bogus model id
+  ['usage_limit', /hit your (free |weekly )?(usage )?limit|usage limit reached|usage limit for now|free-usage-exhausted/i], // inferred
+  ['billing', /out of credits|spending limit|usage balance exhausted|purchase credits|status 402|payment required/i], // inferred
+  ['rate_limit', /hit the rate limit|rate limit exceeded|rate limited|status 429|too many requests/i],              // inferred
+  // Before auth: a transient outage of the sign-in service, not a lost login.
+  ['overloaded', /authentication temporarily unavailable/i],                                                       // inferred
+  ['auth', /Not logged in|session (has )?expired|credentials were rejected|could not renew it|sign-in was rejected|sign in again|deployment key was rejected|status 40[13]\b|unauthorized|authentication/i], // inferred
+  ['overloaded', /overloaded|temporarily unavailable|service is busy|service unavailable|service_unavailable|status 503|at capacity/i], // inferred
+  ['server_error', /internal server error|bad gateway|gateway timeout|status 50[0-9]\b|went wrong on (our|the server)|server-side stream error|server returned an unexpected error/i], // inferred
+  ['network', /error sending request|connection (refused|reset|closed)|connection failed|secure connection to Grok failed|connection to Grok timed out|check your network|tcp connect|dns error|failed to lookup|resolve host|network is unreachable|timed out|stopped responding|stream disconnected/i], // inferred
+];
+
+export function grokReason(text) {
+  text = String(text ?? '');
+  if (GROK_NOT_INFRA.test(text) || NOT_INFRA.some(pattern => pattern.test(text))) return null;
+  for (const [reason, pattern] of GROK_PATTERNS) if (pattern.test(text)) return reason;
+  return null;
+}
 
 // Claude Code's own classification of an API error, carried on the synthetic
 // assistant message (`error`) and on system/api_retry events (live: all of
@@ -92,6 +125,7 @@ function codexReason(text) {
 // result, thinking. A CLI that never got this far did not run the model.
 export function isModelActivity(system, event) {
   if (!event || typeof event !== 'object') return false;
+  if (isApi(system)) return (event.type === 'request' && event.ok === true) || event.type === 'tool' || event.type === 'text';
   if (system === 'codex') {
     if (event.type === 'turn.completed') return true;
     return /^item\./.test(event.type ?? '') && event.item && event.item.type !== 'error';
@@ -107,6 +141,11 @@ export function modelTurns(system, events) {
 
 // The CLI telling us it is retrying or waiting on the service.
 function infraSignal(system, event) {
+  if (isApi(system)) {
+    if (event?.type !== 'retry' || !INFRA_REASONS[event.reason]) return null;
+    return { reason: event.reason, text: JSON.stringify({ retry: event.attempt, reason: event.reason, status: event.status ?? null, delay_ms: event.delay_ms, message: String(event.message ?? '').slice(0, 300) }),
+      delay_ms: Number(event.delay_ms) || 0 };
+  }
   if (system === 'codex') {
     const text = event?.type === 'error' ? event.message : event?.type === 'item.completed' && event.item?.type === 'error' ? event.item.message : null;
     if (typeof text !== 'string') return null;
@@ -307,7 +346,8 @@ export function detectInfra({ system, events = [], eventMs = null, run, summary,
   }
   // A session that completed did its work, whatever the exit code says
   // afterwards (that stays generation_failed, not an infrastructure error).
-  if (summary?.completed && !run.timed_out) return null;
+  // One that used up its budget (API systems) ended on its own terms too.
+  if ((summary?.completed || summary?.budget_exhausted) && !run.timed_out) return null;
 
   if (run.timed_out) {
     // The last thing that happened before the kill.
@@ -330,6 +370,8 @@ export function detectInfra({ system, events = [], eventMs = null, run, summary,
     return null;
   }
 
+  if (isApi(system)) return apiInfra(events, base, stderrTail, run);
+  if (system === 'grok') return grokInfra(events, base, stderrTail, run, turns);
   const terminal = system === 'codex' ? codexTerminal(events) : claudeTerminal(events);
   if (terminal) {
     const reason = system === 'codex' ? codexReason(terminal.text) : claudeReason(terminal.category, terminal.text, terminal.status);
@@ -347,6 +389,41 @@ export function detectInfra({ system, events = [], eventMs = null, run, summary,
   if (turns === 0) {
     return record('cli_crash', { ...base, message: terminal?.text ?? 'the CLI exited (' + (run.signal ?? 'exit ' + run.exit_code) + ') before the model produced anything',
       evidence: [terminal?.text, stderrTail, 'exit ' + run.exit_code + (run.signal ? ' ' + run.signal : '')].filter(Boolean), retry_after: null });
+  }
+  return null;
+}
+
+// What ended an API session: the loop's verdict in its result event. An
+// infrastructure verdict is taken as stated; a model failure (its context
+// filled up, a request it shaped was refused) is not one; a loop that ended
+// without its result record failed itself, whatever the model had done.
+function apiInfra(events, base, stderrTail, run) {
+  const result = events.findLast(event => event?.type === 'result');
+  if (result?.infra?.reason && INFRA_REASONS[result.infra.reason]) {
+    const infra = result.infra, retries = events.filter(event => event?.type === 'retry').length;
+    return record(infra.reason, { ...base, message: String(infra.message ?? infra.reason),
+      evidence: [String(infra.message ?? ''), 'HTTP ' + (infra.status ?? '-'), ...(retries ? [retries + ' in-loop retries/waits before it'] : [])].filter(Boolean),
+      retry_after: infra.retry_after ?? null, retry_after_source: infra.retry_after ? infra.retry_after_source ?? 'loop' : null, retry_after_text: null });
+  }
+  if (result) return null;
+  return record('cli_crash', { ...base, message: 'the API loop ended (' + (run.signal ?? 'exit ' + run.exit_code) + ') without its result record',
+    evidence: [stderrTail, 'exit ' + run.exit_code + (run.signal ? ' ' + run.signal : '')].filter(Boolean), retry_after: null });
+}
+
+// What ended a Grok session: an error result's errors[] (or result text),
+// else stderr ("Error: ..."), matched against GROK_PATTERNS. A session that
+// never reached the model and says nothing recognisable is a CLI crash;
+// after model turns, unrecognised text stays the model's failure.
+function grokInfra(events, base, stderrTail, run, turns) {
+  const result = events.findLast(event => event?.type === 'result');
+  if (result && !result.is_error) return null;
+  const text = [...(Array.isArray(result?.errors) ? result.errors : []), typeof result?.result === 'string' ? result.result : '', !result ? stderrTail ?? '' : '']
+    .filter(Boolean).join(' | ');
+  const reason = grokReason(text) ?? (!result ? grokReason(stderrTail) : null);
+  if (reason) return record(reason, { ...base, message: text || stderrTail, evidence: [text, stderrTail].filter(Boolean) });
+  if (turns === 0) {
+    return record('cli_crash', { ...base, message: text || 'grok exited (' + (run.signal ?? 'exit ' + run.exit_code) + ') before the model produced anything',
+      evidence: [text, stderrTail, 'exit ' + run.exit_code + (run.signal ? ' ' + run.signal : '')].filter(Boolean), retry_after: null });
   }
   return null;
 }

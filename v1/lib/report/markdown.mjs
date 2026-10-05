@@ -1,5 +1,5 @@
 import { VARIANTS } from '../contract.mjs';
-import { intervalText, signedText, attemptShareText, VARIANT_ORDER } from './aggregate.mjs';
+import { intervalText, signedText, attemptShareText, VARIANT_ORDER, CONFLICT_KINDS } from './aggregate.mjs';
 import { fractionLabel } from './html.mjs';
 
 // summary.md: the same numbers as index.html in plain Markdown, to paste into
@@ -82,9 +82,15 @@ function setMarkdown(board, set) {
     lines.push('### By archetype', '', table(['Configuration', ...set.archetypes.map(item => item.id + ' (' + plural(item.objects, 'object') + ')')],
       entries.map(entry => [entry.key, ...set.archetypes.map(item => stat(entry.archetypes?.[item.id]))])), '');
   }
-  lines.push('### Conflict and frame', '', table(['Configuration', 'Conflict (closer to photographed)', 'Frame offset', 'Scale error (metric tasks)'],
-    entries.map(entry => [entry.key, stat(entry.conflict, { scale: 100, digits: 0, suffix: '%' }), stat(entry.frame_error.offset_fraction, { scale: 100, suffix: '%' }),
-      stat(entry.scale_error_pct, { suffix: '%' })])), '');
+  // Memory tasks (m2, m3) get their own column, and a line on what it means, only in a set that has them.
+  const memory = (set.variants ?? []).some(variant => CONFLICT_KINDS.find(kind => kind.id === 'memory').variants.includes(variant));
+  lines.push('### Conflict and frame', '', table(['Configuration', 'Conflict (closer to photographed)', ...(memory ? ['Memory (closer to the evidence)'] : []), 'Frame offset', 'Scale error (metric tasks)'],
+    entries.map(entry => [entry.key, stat(entry.conflict, { scale: 100, digits: 0, suffix: '%' }), ...(memory ? [stat(entry.memory, { scale: 100, digits: 0, suffix: '%' })] : []),
+      stat(entry.frame_error.offset_fraction, { scale: 100, suffix: '%' }), stat(entry.scale_error_pct, { suffix: '%' })])), '');
+  if (memory) {
+    lines.push('Memory: on m2 / m3 tasks (a named landmark whose surveyed proportions differ from its published figures), the share of contested probes closer to the ' +
+      'surveyed object the evidence shows than to the structure as published; low means the model built what it remembered.', '');
+  }
   return lines.join('\n');
 }
 

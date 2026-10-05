@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { readFile, writeFile, mkdir, readdir, access } from 'node:fs/promises';
 import { randomBytes, randomInt } from 'node:crypto';
 import { readJSON, writeJSON } from '../lib/io.mjs';
-import { layout, VARIANTS } from './lib/contract.mjs';
+import { layout, VARIANTS, GENERATED_VARIANTS } from './lib/contract.mjs';
 import { buildObject, buildTask, verifyTasks, truthGLB } from './lib/pack.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -51,12 +51,12 @@ try {
     // Shuffle so that ids and order say nothing about the archetype.
     for (let i = objects.length - 1; i > 0; i--) { const j = randomInt(0, i + 1); [objects[i], objects[j]] = [objects[j], objects[i]]; }
     await mkdir(dirname(file), { recursive: true });
-    await writeFile(file, JSON.stringify({ name, private: true, created_at: new Date().toISOString(), variants: Object.keys(VARIANTS), objects }, null, 2) + '\n', { flag: 'wx' });
+    await writeFile(file, JSON.stringify({ name, private: true, created_at: new Date().toISOString(), variants: GENERATED_VARIANTS, objects }, null, 2) + '\n', { flag: 'wx' });
     print({ set: name, file, objects: objects.length, archetypes: archetypes.length, note: 'private: keep this file out of version control' });
   } else if (command === 'build-set') {
     // A set file lists objects by archetype and seed. Keep test-set files out of
     // version control: the seeds are what keeps a test set private.
-    const set = await readJSON(resolve(need('set'))), variants = options.variants ? list(options.variants) : set.variants ?? Object.keys(VARIANTS);
+    const set = await readJSON(resolve(need('set'))), variants = options.variants ? list(options.variants) : set.variants ?? GENERATED_VARIANTS;
     const built = [];
     // Resumable: a long build interrupted half way continues where it stopped.
     // buildObject removes a half-built object, so a directory with evidence.json is complete.
@@ -152,7 +152,10 @@ try {
       '  node v1/cli.mjs calibrate    --task ID [--out FILE]',
       '  node v1/cli.mjs rescore      --batches A,B      (recompute reports from stored submissions)',
       '  node v1/cli.mjs report       --batches A,B [--out DIR]',
-      '  node v1/scripts/run.mjs prepare|preflight|run …      (generation runner)', '',
+      '  node v1/scripts/run.mjs prepare|preflight|run …      (generation runner)',
+      '  node v1/scripts/landmarks.mjs new-set|build-set|check (memory tasks: named landmark twins, variants m2 m3)',
+      '  node v1/scripts/real.mjs prepare|build|verify|coverage (real buildings, variants r2 r4)',
+      '  node v1/scripts/study.mjs prepare|serve|analyze       (blind human-agreement study)', '',
       'All commands accept --data DIR (default .local/v1).',
     ].join('\n'));
   }

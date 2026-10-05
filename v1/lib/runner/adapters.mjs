@@ -1,9 +1,10 @@
-import { realpath, stat, readFile } from 'node:fs/promises';
+import { realpath, stat, readFile, mkdir, copyFile, lstat, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { captureProcess, childEnvironment, BASE_PATH } from './process.mjs';
-import { parseCodexEvents, parseClaudeEvents, CLAUDE_TOOLS } from './events.mjs';
+import { parseCodexEvents, parseClaudeEvents, parseGrokEvents, CLAUDE_TOOLS, GROK_TOOLS } from './events.mjs';
 import { sha256File } from './workspace.mjs';
+import { API_ADAPTERS } from './api/adapter.mjs';
 
 // Harness adapters. Each one knows how to inspect its CLI (version, login,
 // model), how to start one contestant session confined to a workspace, and how
@@ -219,10 +220,122 @@ export const claudeCode = {
   parse: parseClaudeEvents,
 };
 
-export const ADAPTERS = { codex, 'claude-code': claudeCode };
+// api-anthropic and api-openai: one agent loop of our own against the
+// vendors' APIs (api/adapter.mjs).
+// ---------------------------------------------------------------- grok
+//
+// `grok -p` (Grok Build, checked against 1.0.46) under its own sandbox: a
+// Seatbelt profile that Grok applies to its whole process at start-up, so the
+// file tools and every shell command it runs are confined by the kernel alike.
+// The profile (`e3d`, extending the built-in `strict`) is frozen with the
+// attempt in harness/grok-sandbox.toml and copied to <ws>/.grok/sandbox.toml
+// just before launch (Grok reads custom profiles only from the working
+// directory or ~/.grok, and refuses to start when the profile cannot be
+// applied). The prompt goes the same way (--prompt-file must be readable
+// under the sandbox, which the attempt directory is not). Everything Grok
+// would discover from the user's environment is switched off: Claude, Cursor
+// and Codex compatibility (skills, rules, agents, MCP servers, hooks,
+// sessions), managed MCP servers, memory, telemetry, the auto-updater; the
+// tool set is cut to six; sub-agents, plan mode and web search are off. What
+// this cannot achieve on macOS is proven, not assumed: see README "### grok".
+export const GROK_DISALLOWED_TOOLS = ['todo_write', 'monitor', 'search_tool', 'use_tool', 'workflow', 'enter_plan_mode', 'exit_plan_mode', 'ask_user_question',
+  'send_feedback', 'image_gen', 'image_edit', 'image_to_video', 'reference_to_video', 'spawn_subagent', 'kill_command_or_subagent', 'get_command_or_subagent_output',
+  'scheduler_create', 'scheduler_delete', 'scheduler_list', 'Agent'];
+export const GROK_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+export const GROK_PROFILE = 'e3d';
+const GROK_COMPAT_OFF = Object.fromEntries(['CLAUDE', 'CURSOR', 'CODEX'].flatMap(vendor => ['SKILLS', 'RULES', 'AGENTS', 'MCPS', 'HOOKS', 'SESSIONS']
+  .map(surface => ['GROK_' + vendor + '_' + surface + '_ENABLED', '0'])));
+export const GROK_ENV = { ...GROK_COMPAT_OFF, GROK_MANAGED_MCPS_ENABLED: '0', GROK_MEMORY: '0', GROK_SUBAGENTS: '0', GROK_WEB_FETCH: '0', GROK_BACKEND_SEARCH: '0',
+  GROK_SESSION_SEARCH: '0', GROK_LSP_TOOLS: '0', GROK_TELEMETRY_ENABLED: '0', GROK_TELEMETRY_TRACE_UPLOAD: '0', GROK_DISABLE_AUTOUPDATER: '1',
+  // The shell inherits this environment instead of the user's login shell
+  // (which would also drop the node bin from PATH).
+  GROK_CONFIG: JSON.stringify({ toolset: { bash: { login_shell_capture: false } } }) };
+// Grok-owned directories a contestant has no business reading and Grok can
+// run without. Denying bundled/ is also what keeps Grok's bundled skills
+// (19 in 1.0.46, among them threejs-frame-conventions) out of the session:
+// no flag, environment variable or overlay key turns them off, and Grok does
+// not list what it cannot read (live: init.skills went from 19 to 0, the
+// first request from 5818 to 3043 input tokens). ~/.grok/sessions,
+// config.toml and auth.json cannot be denied: Grok refuses to start.
+export const GROK_HOME_DENY = ['memory', 'memory-v2', 'memtrace', 'logs', 'bundled', 'marketplace-cache', 'installed-plugins', 'hooks', 'docs'];
+export const grokHome = () => join(homedir(), '.grok');
+const tomlList = values => '[' + values.map(value => JSON.stringify(value)).join(', ') + ']';
+
+export function grokSandboxProfile({ workspace, node, deny = [] }) {
+  return ['# Evidence3D: the sandbox profile of one grok attempt (frozen with the batch; copied to <workspace>/.grok/ at launch).',
+    '[profiles.' + GROK_PROFILE + ']', 'extends = "strict"', 'restrict_network = true',
+    'read_only = ' + tomlList([join(workspace, 'input'), join(workspace, 'tools'), join(workspace, 'node_modules'), ...node.read_roots]),
+    'deny = ' + tomlList(deny), ''].join('\n');
+}
+
+export const grok = {
+  id: 'grok',
+  defaultBinary: () => process.env.E3D_GROK_BIN || join(homedir(), '.grok', 'bin', 'grok'),
+  async inspect({ binary, model, effort }) {
+    const path = await realpath(binary);
+    const version = await run(path, ['--version']);
+    if (version.exit_code !== 0) throw new Error('grok --version failed: ' + version.stderr.slice(0, 300));
+    // `grok models` says how the CLI is logged in and lists the models it can
+    // use, without reading any credential file here.
+    const listing = await run(path, ['models'], { env: childEnvironment(GROK_ENV) });
+    const login = /You are logged in with (.+?)\.?\s*$/m.exec(listing.stdout + listing.stderr)?.[1]?.trim() ?? null;
+    if (listing.exit_code !== 0 || !login) throw new Error('grok needs an existing login (grok models says how it is logged in): ' + (listing.stdout + listing.stderr).slice(0, 300));
+    if (/api.?key/i.test(login)) throw new Error('grok is logged in with an API key; the runner uses the grok.com login and never configures API keys');
+    const models = [...listing.stdout.matchAll(/^\s*[*-]\s+(\S+)/gm)].map(match => match[1]);
+    if (!models.includes(model)) throw new Error('Model ' + model + ' is not among the models grok offers (' + models.join(', ') + ')');
+    // The effort levels a model advertises are in Grok's model catalogue
+    // cache (configuration, no credentials); models outside it get the
+    // canonical list and are checked by preflight's session.
+    let levels = GROK_EFFORTS, chosen = effort ?? null;
+    try {
+      const entry = JSON.parse(await readFile(join(grokHome(), 'models_cache.json'), 'utf8')).models?.[model]?.info;
+      // Lowest first, as for the other CLIs (preflight's probe session takes the first).
+      if (Array.isArray(entry?.reasoning_efforts)) {
+        levels = entry.reasoning_efforts.map(level => level.value ?? level.id).sort((a, b) => GROK_EFFORTS.indexOf(a) - GROK_EFFORTS.indexOf(b));
+        chosen ??= entry.reasoning_effort ?? null;
+      }
+    } catch {}
+    if (chosen !== null && !levels.includes(chosen)) throw new Error('Model ' + model + ' does not support effort ' + chosen + ' (' + levels.join(', ') + ')');
+    const deny = [...await existing(GROK_HOME_DENY.map(name => join(grokHome(), name))), ...await existing(['/private/tmp', '/private/var/tmp'])];
+    return {
+      system: 'grok', binary, binary_realpath: path, binary_sha256: await sha256File(path), version: version.stdout.trim(),
+      release_root: dirname(path), login, model, effort: chosen, effort_levels: levels, grok_home: grokHome(), sandbox_deny: deny,
+    };
+  },
+  // No --debug-file: under the sandbox Grok can only write it into the
+  // workspace or a temp directory, where the contestant could read it, and
+  // Grok's debug log can carry configuration values such as provider keys.
+  invocation({ harness, model, effort, workspace, attemptDir, node }) {
+    const profilePath = join(attemptDir, 'harness', 'grok-sandbox.toml');
+    const args = ['--prompt-file', join(workspace, '.grok', 'prompt.txt'), '--output-format', 'streaming-messages-json', '-m', model];
+    if (effort) args.push('--effort', effort);
+    args.push('--cwd', workspace, '--sandbox', GROK_PROFILE, '--permission-mode', 'bypassPermissions',
+      '--tools', GROK_TOOLS.join(','), '--disallowed-tools', GROK_DISALLOWED_TOOLS.join(','), '--no-subagents', '--no-plan', '--disable-web-search');
+    const tmp = join(workspace, 'tmp');
+    const env = childEnvironment({ PATH: node.bin + ':' + BASE_PATH, TMPDIR: tmp, ...GROK_ENV });
+    return { command: harness.binary_realpath, args, cwd: workspace, env, stdin: 'prompt',
+      files: { [profilePath]: grokSandboxProfile({ workspace, node, deny: harness.sandbox_deny ?? [] }) } };
+  },
+  // Right before launch: the frozen profile and prompt into <ws>/.grok/,
+  // replacing whatever is there.
+  async stage({ attemptDir, workspace }) {
+    const dir = join(workspace, '.grok');
+    const info = await lstat(dir).catch(() => null);
+    if (info && (!info.isDirectory() || info.isSymbolicLink())) await rm(dir, { recursive: true, force: true });
+    await mkdir(dir, { recursive: true });
+    for (const [from, to] of [[join(attemptDir, 'harness', 'grok-sandbox.toml'), 'sandbox.toml'], [join(attemptDir, 'prompt.txt'), 'prompt.txt']]) {
+      await rm(join(dir, to), { force: true });
+      await copyFile(from, join(dir, to));
+    }
+  },
+  sandboxCommand: null,
+  parse: parseGrokEvents,
+};
+
+export const ADAPTERS = { codex, 'claude-code': claudeCode, grok, ...API_ADAPTERS };
 
 export function adapterFor(system) {
   const adapter = ADAPTERS[system];
-  if (!adapter) throw new Error('Unknown system ' + system + ' (expected ' + Object.keys(ADAPTERS).join(' or ') + ')');
+  if (!adapter) throw new Error('Unknown system ' + system + ' (expected ' + Object.keys(ADAPTERS).join(', ') + ')');
   return adapter;
 }

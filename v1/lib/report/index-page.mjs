@@ -1,6 +1,6 @@
 import { VARIANTS } from '../contract.mjs';
 import { UNNAMED_SET, UNKNOWN_SET } from './collect.mjs';
-import { intervalText, attemptShareText, VARIANT_ORDER } from './aggregate.mjs';
+import { intervalText, attemptShareText, VARIANT_ORDER, CONFLICT_KINDS } from './aggregate.mjs';
 import { esc, num, percent, statCell, sdCell, slug, fractionLabel, page, NOT_EVALUATED } from './html.mjs';
 
 // index.html: per task set the leaderboard, the pairwise comparison, where the
@@ -38,13 +38,19 @@ function scoreTable(entries) {
     ]);
 }
 
-function diagnosticsTable(entries) {
+// Memory tasks get their own column only in a set that has them.
+const hasMemory = set => (set.variants ?? []).some(variant => CONFLICT_KINDS.find(kind => kind.id === 'memory').variants.includes(variant));
+
+function diagnosticsTable(entries, set) {
+  const memory = hasMemory(set);
   return entryTable(entries,
     '<th class="num" title="share of contested probes closer to the as-photographed state">Conflict</th>' +
+      (memory ? '<th class="num" title="memory tasks: share of contested probes closer to the surveyed object the evidence shows than to the published figures">Memory</th>' : '') +
       '<th class="num" title="alignment offset as % of the truth diagonal">Frame offset</th><th class="num" title="absolute alignment yaw">Frame yaw</th>' +
       '<th class="num" title="|fitted scale - 1| on metric tasks">Scale error</th><th class="num">Median wall</th><th class="num">Tokens / att.</th><th class="num">Cost / att.</th>',
     entry => [
       statCell(entry.conflict, { scale: 100, digits: 0, suffix: '%' }),
+      ...(memory ? [statCell(entry.memory, { scale: 100, digits: 0, suffix: '%' })] : []),
       statCell(entry.frame_error.offset_fraction, { scale: 100, digits: 1, suffix: '%' }),
       statCell(entry.frame_error.yaw_deg, { digits: 1, suffix: '°' }),
       statCell(entry.scale_error_pct, { digits: 1, suffix: '%' }),
@@ -309,13 +315,15 @@ ${varianceSection(set)}
 ${deltaTable(entries, set)}
 <p class="legend">Per object, the mean score on one variant minus the mean score on another, over objects that have both; every pair of variants in the set, not only adjacent rungs.
 t4 &minus; t2 is what scaled drawings and survey notes add to photographs; c1 &minus; t4 what out-of-date drawings cost against current drawings and notes (c1 is t3 with stale drawings, so with t3 present c1 &minus; t3 is the cleaner contrast).
+Variants are paired only within their family (generated objects t1&ndash;t4 and c1; named landmarks m2, m3; real buildings r2, r4): m3 &minus; m2 is what scaled drawings add on a named landmark.
 Under each mean: the bootstrap interval, then the Student-t interval, which is the honest one at a handful of objects.</p>
 <h3>By archetype</h3>
 ${archetypeTable(entries, set)}
 <p class="legend">Mean score over the objects of each archetype (from the ground-truth model), same averaging as the leaderboard. With few objects per archetype these are descriptions, not comparisons.</p>
 <h3>Evidence use, frame and cost</h3>
-${diagnosticsTable(entries)}
-<p class="legend"><strong>Conflict</strong>: on c1 tasks (drawings out of date), the share of contested probes closer to the as-photographed building.
+${diagnosticsTable(entries, set)}
+<p class="legend"><strong>Conflict</strong>: on c1 tasks (drawings out of date), the share of contested probes closer to the as-photographed building.${hasMemory(set)
+    ? '\n<strong>Memory</strong>: on m2 / m3 tasks (a named landmark whose surveyed proportions differ from its published figures), the share of contested probes closer to the surveyed object the evidence shows than to the structure as published; low means the model built what it remembered.' : ''}
 Frame and scale errors use valid attempts only; scale error is |fitted scale &minus; 1| on metric tasks.
 Tokens are input (including cached reads) + output as recorded in result.json; cost is whatever the harness reported (Claude Code: its list-price estimate) and stays n/a when not reported.</p>
 <h3>Tasks</h3>

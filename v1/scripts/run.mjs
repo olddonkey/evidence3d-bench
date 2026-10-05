@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Evidence3D v1 generation runner.
-//   node v1/scripts/run.mjs prepare   --id <batch> --system codex|claude-code --model <id> [--effort <level>]
+//   node v1/scripts/run.mjs prepare   --id <batch> --system codex|claude-code|grok|api-anthropic|api-openai --model <id> [--effort <level>]
 //                                     --tasks a,b,c [--attempts 1] [--data <root>] [--binary <cli path>]
+//                                     [--token-budget 2000000] [--tool-budget 200] [--max-output-tokens 32000]   (API systems)
 //   node v1/scripts/run.mjs preflight --batch <dir> [--probe-model <id>] [--probe-effort <level>] [--no-wait]
 //   node v1/scripts/run.mjs run       --batch <dir> [--concurrency 1] [--no-wait] [--resume-now] [--max-reruns 5] [--retry-stall-minutes 10]
 //   node v1/scripts/run.mjs status    --batch <dir>[,<dir>...] [--json]
@@ -12,15 +13,21 @@
 // and started again with the same command: it continues where it stopped,
 // re-running attempts that ended in an infrastructure error. On a usage or
 // rate limit it waits inside the same invocation (--no-wait: it exits).
+// The API systems read ANTHROPIC_API_KEY / OPENAI_API_KEY from the environment
+// (E3D_ANTHROPIC_BASE_URL / E3D_OPENAI_BASE_URL point them elsewhere, frozen
+// at prepare); preflight and run stop with exit 3 when the key is not set.
+// The CLI binaries default to E3D_CODEX_BIN, E3D_CLAUDE_BIN and E3D_GROK_BIN
+// (else ~/.local/bin/codex.opencodex-real, ~/.local/bin/claude, ~/.grok/bin/grok).
 // Exit codes: 0 nothing left to run, 1 error, 3 stopped for a human (login,
-// billing, model id, a changed scorer/runner/CLI), 75 would have had to wait
+// key, billing, model id, a changed scorer/runner/CLI), 75 would have had to wait
 // (--no-wait; run again after the time printed), 130 stopped by a signal.
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { prepare, preflight, execute, summarize, batchStatus, describeState, DEFAULT_DATA_ROOT, DEFAULT_MAX_RERUNS, DEFAULT_RETRY_STALL_SECONDS } from '../lib/runner/index.mjs';
 
 const USAGE = `Usage:
-  node v1/scripts/run.mjs prepare   --id <batch> --system codex|claude-code --model <id> [--effort <level>] --tasks a,b,c [--attempts 1] [--data <root>] [--binary <path>]
+  node v1/scripts/run.mjs prepare   --id <batch> --system codex|claude-code|grok|api-anthropic|api-openai --model <id> [--effort <level>] --tasks a,b,c [--attempts 1] [--data <root>]
+                                    [--binary <path>] (CLI systems) [--token-budget 2000000] [--tool-budget 200] [--max-output-tokens 32000] (API systems)
   node v1/scripts/run.mjs preflight --batch <dir> [--probe-model <id>] [--probe-effort <level>] [--no-wait]
   node v1/scripts/run.mjs run       --batch <dir> [--concurrency 1] [--no-wait] [--resume-now] [--max-reruns ${DEFAULT_MAX_RERUNS}] [--retry-stall-minutes ${DEFAULT_RETRY_STALL_SECONDS / 60}]
   node v1/scripts/run.mjs status    --batch <dir>[,<dir>...] [--json]
@@ -32,6 +39,7 @@ const EXIT = { done: 0, error: 1, stopped: 3, wait: 75, interrupted: 130 };
 const OPTIONS = {
   id: { type: 'string' }, system: { type: 'string' }, model: { type: 'string' }, effort: { type: 'string' }, tasks: { type: 'string' },
   attempts: { type: 'string' }, data: { type: 'string' }, binary: { type: 'string' }, batch: { type: 'string' },
+  'token-budget': { type: 'string' }, 'tool-budget': { type: 'string' }, 'max-output-tokens': { type: 'string' },
   concurrency: { type: 'string' }, 'probe-model': { type: 'string' }, 'probe-effort': { type: 'string' }, json: { type: 'boolean' },
   'no-wait': { type: 'boolean' }, 'resume-now': { type: 'boolean' }, 'max-reruns': { type: 'string' }, 'retry-stall-minutes': { type: 'string' },
   help: { type: 'boolean', short: 'h' },
@@ -90,8 +98,12 @@ async function main(argv) {
     const { batchDir, manifest } = await prepare({
       id: need('id'), system: need('system'), model: need('model'), effort: values.effort, tasks: need('tasks').split(',').map(s => s.trim()).filter(Boolean),
       attempts: integer(values.attempts, 'attempts', 1), dataRoot: resolve(values.data ?? DEFAULT_DATA_ROOT), binary: values.binary, log: print,
+      tokenBudget: integer(values['token-budget'], 'token-budget', undefined), toolBudget: integer(values['tool-budget'], 'tool-budget', undefined),
+      maxOutputTokens: integer(values['max-output-tokens'], 'max-output-tokens', undefined),
     });
-    print({ event: 'ready', batch: batchDir, system: manifest.system, model: manifest.model, effort: manifest.effort, next: 'node v1/scripts/run.mjs preflight --batch ' + batchDir });
+    print({ event: 'ready', batch: batchDir, system: manifest.system, model: manifest.model, effort: manifest.effort,
+      ...(manifest.harness.key_variable ? { key_variable: manifest.harness.key_variable, key_present: manifest.harness.key_present, base_url: manifest.harness.base_url, budget: manifest.harness.budget } : {}),
+      next: 'node v1/scripts/run.mjs preflight --batch ' + batchDir });
     return EXIT.done;
   }
   if (command === 'preflight') {

@@ -1,6 +1,6 @@
 import { join, resolve } from 'node:path';
 import { writeJSON } from '../../../lib/io.mjs';
-import { layout, VARIANTS, PROTOCOL } from '../contract.mjs';
+import { layout, VARIANTS, CONFLICT_VARIANTS, PROTOCOL } from '../contract.mjs';
 import { collectRuns, DEFAULT_EXCLUDED_STATUSES, UNNAMED_SET, UNKNOWN_SET, UNKNOWN_ARCHETYPE, scorerIdentity } from './collect.mjs';
 import { finite, mean, median, sampleSD, summarise, pairedBootstrap, tInterval, pooledSD, sdRange, detectableDifference, BOOTSTRAP_SAMPLES,
   PAIRWISE_SAMPLES, LOW_EVIDENCE_OBJECTS, SMALL_SAMPLE_OBJECTS, TIE_TOLERANCE } from './stats.mjs';
@@ -25,18 +25,38 @@ export const SET_NOTES = {
     'weights) and the task pipeline. Its numbers are development measurements, not test results.',
 };
 
-// Every pair of variants present, later rung minus earlier in VARIANT_ORDER
-// (t1 t2 t3 t4 c1): t4 - t2, c1 - t2, c1 - t4 when t2, t4 and c1 were run.
+// Which ladder a variant belongs to: generated objects (t1-t4 and the conflict
+// task c1), memory tasks on named landmarks (m2, m3) or real buildings (r2,
+// r4). Variants of different families pose different objects, so a difference
+// between them is no evidence delta and they are never paired.
+export const variantFamily = variant => VARIANTS[variant]?.memory ? 'memory' : VARIANTS[variant]?.real ? 'real' : 'generated';
+
+// Every pair of variants present within one family, later rung minus earlier in
+// VARIANT_ORDER (t1 t2 t3 t4 c1 m2 m3 r2 r4): t4 - t2, c1 - t2, c1 - t4 when
+// t2, t4 and c1 were run; m3 - m2; r4 - r2.
 export function variantPairs(variants) {
   const present = VARIANT_ORDER.filter(variant => variants.includes(variant)), pairs = [];
-  for (let j = 1; j < present.length; j++) for (let i = 0; i < j; i++) pairs.push([present[j], present[i]]);
+  for (let j = 1; j < present.length; j++) for (let i = 0; i < j; i++) if (variantFamily(present[i]) === variantFamily(present[j])) pairs.push([present[j], present[i]]);
   return pairs;
 }
 
 export const cellKey = attempt => [attempt.system, attempt.model, attempt.effort ?? '-'].join(' / ');
 
+// Variants whose truth carries an alternate state (contract CONFLICT_VARIANTS),
+// by what the alternate stands for. On c1 it is the earlier state the stale
+// drawings show; on the memory tasks the structure as published, which the
+// contestant may remember. "Closer to primary" means following the evidence on
+// both, but the two are reported apart: they measure different temptations.
+export const CONFLICT_KINDS = [
+  { id: 'conflict', label: 'Conflict', variants: CONFLICT_VARIANTS.filter(variant => !VARIANTS[variant].memory),
+    primary: 'as photographed', alternate: 'out-of-date drawings', share: 'closer to the as-photographed state' },
+  { id: 'memory', label: 'Memory', variants: CONFLICT_VARIANTS.filter(variant => VARIANTS[variant].memory),
+    primary: 'evidence', alternate: 'memory', share: 'closer to the surveyed object (the evidence) than to the published figures (memory)' },
+];
+export const conflictKind = variant => CONFLICT_KINDS.find(kind => kind.variants.includes(variant)) ?? null;
+
 // Share of contested probes on which the candidate sided with the primary
-// (as-photographed) state, over all alternates of one report.
+// state (the evidence), over all alternates of one report.
 export function conflictShare(report) {
   let primary = 0, total = 0;
   for (const alternate of report?.alternates ?? []) {
@@ -165,14 +185,20 @@ function cellEntry(key, set, attempts, seed, { deltaPairs = [], archetypes = [] 
     if (!attempts.some(attempt => attempt.archetype === archetype)) continue;
     byArchetype[archetype] = metric('archetype/' + archetype, attempt => attempt.score, attempt => attempt.archetype === archetype, 'all attempts; failures count as 0');
   }
-  const conflictAttempts = attempts.filter(attempt => attempt.variant === 'c1');
-  const conflict = {
-    ...metric('conflict', attempt => attempt.valid ? conflictShare(attempt.report) : undefined, attempt => attempt.variant === 'c1',
-      'valid c1 attempts; share of contested probes closer to the primary (as photographed) state'),
-    probes: conflictCounts(conflictAttempts),
-    c1_attempts: conflictAttempts.length,
-    failed_attempts: conflictAttempts.filter(attempt => !attempt.valid).length,
+  // One entry per kind of alternate: `conflict` (c1) and `memory` (m2, m3).
+  const evidenceUse = kind => {
+    const inKind = attempt => kind.variants.includes(attempt.variant), counted = attempts.filter(inKind);
+    return {
+      ...metric(kind.id, attempt => attempt.valid ? conflictShare(attempt.report) : undefined, inKind,
+        'valid ' + kind.variants.join(' / ') + ' attempts; share of contested probes ' + kind.share),
+      probes: conflictCounts(counted),
+      variants: kind.variants,
+      // c1_attempts is the name earlier leaderboards used for the conflict task.
+      [kind.id === 'conflict' ? 'c1_attempts' : kind.id + '_attempts']: counted.length,
+      failed_attempts: counted.filter(attempt => !attempt.valid).length,
+    };
   };
+  const [conflict, memory] = CONFLICT_KINDS.map(evidenceUse);
   const frameError = attempt => attempt.valid ? attempt.report.alignment?.frame_error : undefined;
   const statuses = {};
   for (const attempt of attempts) statuses[attempt.status] = (statuses[attempt.status] ?? 0) + 1;
@@ -197,6 +223,7 @@ function cellEntry(key, set, attempts, seed, { deltaPairs = [], archetypes = [] 
     ladder,
     evidence_deltas: evidenceDeltas,
     conflict,
+    memory,
     shape: metric('shape', attempt => attempt.valid ? attempt.report.shape_score : 0, undefined,
       'all attempts; failures count as 0; shape_score as reported by the scorer'),
     detail: metric('detail', attempt => attempt.valid ? attempt.report.detail?.score : 0, undefined,
@@ -668,14 +695,16 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
         '" when truth.json is missing); results from different sets are never pooled',
       low_evidence: 'flagged when fewer than ' + LOW_EVIDENCE_OBJECTS + ' objects back the number',
       ladder: 'per object: mean score on the higher rung minus mean score on the lower rung; only objects with both rungs',
-      evidence_deltas: 'every pair of variants present in the set, later minus earlier in ' + VARIANT_ORDER.join(' ') +
-        ': per object, mean score on one minus mean score on the other; only objects with both; bootstrap and Student-t intervals over objects',
+      evidence_deltas: 'every pair of variants of one family present in the set (generated t1-t4 and c1; memory m2, m3; real r2, r4), later minus earlier in ' +
+        VARIANT_ORDER.join(' ') + ': per object, mean score on one minus mean score on the other; only objects with both; bootstrap and Student-t intervals over objects',
       archetypes: 'per archetype (objects/<id>/model.json): mean over that archetype\'s objects, same averaging as the score',
       variance: 'between attempts: pooled SD over tasks with >= 2 counted attempts; between objects: SD of per-object means; paired: SD of per-object differences, ' +
         'from which the half-width of the 95% t interval (resolution) and the true difference detected with 80% power by a two-sided 95% t test, ' +
         'also projected to ' + plannedObjects + ' objects; SD ranges are 95% chi-square intervals (normal noise assumed); fewer than ' + LITTLE_DATA_DF +
         ' degrees of freedom is marked as little data',
       conflict: 'c1 tasks: share of contested probes whose measurement is closer to the as-photographed state',
+      memory: 'm2 / m3 tasks (named landmarks whose surveyed form differs from the published one): share of contested probes whose measurement is ' +
+        'closer to the surveyed object the evidence shows than to the structure as published',
       excluded_statuses: excludeStatuses,
     },
     tolerances,

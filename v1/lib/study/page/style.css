@@ -1,0 +1,55 @@
+/* Four columns (one per view) of A / reference / B, sized so that a whole
+   pair fits one screen: the cell width is the smaller of a quarter of the
+   width and what three rows leave of the height. */
+:root {
+  --label-w: 60px;
+  --cell-w: min(calc((100vw - 130px) / 4), calc((100vh - 186px) / 3 * 4 / 3));
+  --bg: #fafaf8;
+  --ink: #1d1d1f;
+  --muted: #6b6b70;
+  --line: #d6d3cb;
+  --ref: #36587a;
+  --picture: #f3f2ee;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.45 system-ui, -apple-system, "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; }
+body { display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
+header { width: calc(var(--label-w) + 4 * var(--cell-w) + 32px); max-width: 100%; padding: 10px 0 6px; }
+.top { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
+.instruction { margin: 0; font-size: 17px; font-weight: 600; }
+#progress { font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.task { margin: 2px 0 0; min-height: 1.4em; color: var(--muted); font-size: 13px; }
+
+.grid { display: grid; grid-template-columns: var(--label-w) repeat(4, var(--cell-w)); gap: 4px 8px; align-items: center; }
+.grid[hidden] { display: none; }
+.view-label { text-align: center; color: var(--muted); font-size: 13px; }
+.row-label { text-align: center; font-weight: 700; font-size: 24px; }
+.row-label.ref { color: var(--ref); font-size: 15px; }
+.cell { margin: 0; padding: 0; border: 0; background: none; cursor: zoom-in; }
+.cell img { display: block; width: var(--cell-w); height: calc(var(--cell-w) * 0.75); border: 1px solid var(--line); border-radius: 4px; background: var(--picture); }
+.cell.ref img { border: 2px solid var(--ref); }
+.cell img.loading { visibility: hidden; }
+.cell:focus-visible { outline: 2px solid var(--ref); outline-offset: 2px; border-radius: 4px; }
+
+.message { margin: 48px 0; font-size: 18px; text-align: center; }
+
+footer { display: flex; flex-direction: column; align-items: center; padding: 8px 0 10px; }
+.controls { display: flex; gap: 10px; align-items: center; }
+button { font: inherit; padding: 8px 16px; border-radius: 8px; border: 1px solid #b7b4ab; background: #fff; color: var(--ink); cursor: pointer; }
+button.choice { min-width: 160px; font-weight: 600; }
+button.chosen { background: #e6edf4; border-color: var(--ref); }
+button:disabled { opacity: 0.45; cursor: default; }
+button:focus-visible { outline: 2px solid var(--ref); outline-offset: 2px; }
+kbd { font: 12px ui-monospace, Menlo, monospace; border: 1px solid #c7c4bb; border-bottom-width: 2px; border-radius: 4px; padding: 0 5px;
+  color: var(--muted); background: #f6f5f1; }
+.status { margin: 6px 0 0; min-height: 1.4em; color: var(--muted); font-size: 13px; }
+.status.error { color: #a1281e; font-weight: 600; }
+
+.zoom { position: fixed; inset: 0; z-index: 10; background: rgba(24, 24, 26, 0.86); display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: zoom-out; }
+.zoom[hidden] { display: none; }
+.zoom figure { margin: 0; }
+/* At most 1.5 times the rendered 560 x 420, so the picture is not blown up into blur. */
+.zoom img { display: block; width: min(92vw, 840px, calc(84vh * 4 / 3)); height: auto; aspect-ratio: 4 / 3; background: var(--picture); border-radius: 6px; }
+.zoom figcaption { color: #fff; text-align: center; margin-top: 10px; font-size: 20px; font-weight: 600; }
+.zoom-hint { color: #d4d4d8; font-size: 13px; margin: 8px 0 0; }

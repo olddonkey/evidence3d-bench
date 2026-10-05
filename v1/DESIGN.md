@@ -118,13 +118,18 @@ model space, depth grows along `forward`, pixel (0,0) top-left.
 ```
 objects/<object-id>/
     model.json  model.glb                 private ground truth
-    alternates/<alt-id>/model.json  model.glb  change.json     earlier state (decoy)
-    evidence/evidence.json                every rendered evidence item + cameras
+    alternates/<alt-id>/model.json  model.glb  change.json     the alternate state: `earlier` (the
+                                          decoy behind c1's stale drawings) or `remembered` (a
+                                          landmark to its published figures, memory tasks)
+    evidence/evidence.json                every evidence item + cameras
     evidence/<files>                      photos/*.jpg  drawings/*.png  notes/*.md
 tasks/<task-id>/task.json  inputs/*       the public pack — all a contestant gets
 truth/<task-id>/truth.json                which object/variant/evidence the task used
 runs/<batch-id>/…                         generation attempts and their scores
 reports/<name>/…                          aggregated results
+sets/<name>.json                          private sets (test, memory): seeds, never in git
+study/<name>/…                            a human-agreement study: pairs, key, images, votes
+real-sources/<source>/…                   photographs of real buildings (never in git)
 ```
 
 ### Evidence item (`evidence.json` is `{ schema: "e3d-evidence-v1", object, items: [...] }`)
@@ -164,6 +169,26 @@ captured_at, description, sha256, bytes }`, `output { model, notes, rules[] }`,
 | `t3` | t2 + plan + front and right elevation drawings with scale bars | metric |
 | `t4` | t3 + survey notes with named dimensions | metric |
 | `c1` | t3, but the drawings show an earlier state; photographs are newer and the task asks for the building as photographed | metric |
+| `m2` | as t2, of a **named landmark** whose surveyed proportions differ from the published ones | not fixed |
+| `m3` | as t3, of the same | metric |
+| `r2` | every photograph and the aerial of a **real building** (items chosen by kind, not by standard id) | not fixed |
+| `r4` | r2 + survey notes with a handful of dimensions | metric |
+
+`GENERATED_VARIANTS` (t1–t4, c1) are what every generated object supports and what
+`new-set` / `build-set` build by default. `CONFLICT_VARIANTS` (c1, m2, m3) are the
+variants whose truth carries an alternate state; the scorer judges every contested
+probe as closer to the primary, closer to the alternate, or neither, and the report
+gives the share closer to the primary — "followed the photographs, not the stale
+drawings" for c1, "followed the evidence, not the memory" for m2/m3 (reported
+separately: they are different temptations).
+
+The task prompt is the same text for every variant except its evidence rule:
+generated objects — "Use only this evidence. Do not rely on knowing a similar real
+building."; memory tasks — "…even where it disagrees with what you know or remember
+about this structure. The surveyed object is what is scored, not published figures.";
+real buildings — "…Do not rely on knowing this or a similar real building. The
+photographs are real: expect lens distortion, people, vehicles and signage." The
+target-state date is the date of the newest photograph among the inputs.
 
 ## 8. Module contracts
 
@@ -183,6 +208,25 @@ tower, a different number of bays, a canopy added later). `change = { note:
 "sentence describing what changed", contested_probes: [probe ids] }`; contested
 probes exist in **both** models with the same id/origin/direction and hit
 measurably different distances (≥ 4 % of the bbox diagonal apart).
+
+**Landmarks** (`v1/lib/generator/landmarks/**`, not part of `ARCHETYPES`):
+
+```js
+export const LANDMARKS;                                 // elizabeth-tower, arc-de-triomphe, washington-monument, lincoln-memorial
+export function generateLandmark({ landmark, seed });   // → { model, alternate: { id: 'remembered', model, change, stale: false } }
+export function publishedModel(landmark);               // the structure to its published figures (sources cited in the code)
+```
+
+`model` is the seeded twin: at least three named quantities changed by 12–30 % (or
+counts by ≥ 2), never reducible to a uniform scale (so the difference survives the
+scale-free `m2` alignment). Every twin keeps a **datum** part identical to the
+published model (a plinth, a shaft section, the terrace): the scorer reads contested
+probes in the frame fixed by the surface both states share, and without one the
+scale-free fit meets a memorised model half way and the probes read "neither".
+`node v1/scripts/landmarks.mjs new-set | build-set | check` builds a private set and
+checks, per task, that the truth scores 100 with every contested probe on the primary
+and the published model scores clearly lower with every contested probe on the
+alternate.
 
 ### B. Photographs — `v1/lib/evidence/photos.mjs`, `v1/blender/**`
 
@@ -211,12 +255,26 @@ export async function loadContext({ taskDir, truthDir, dataRoot });   // truth s
 
 ### E. Runner — `v1/lib/runner/**`, `v1/scripts/run.mjs`
 
-Generation under isolation for two harnesses, `codex` and `claude-code`, with
-preflight probes, timing, token accounting, and scoring of what was produced.
-Details and the evidence for each boundary: `v1/lib/runner/README.md`.
+Generation under isolation, with preflight probes, timing, token accounting, and
+scoring of what was produced. Details and the evidence for each boundary:
+`v1/lib/runner/README.md`. Systems:
 
-- `result.json` status: `completed`, `timeout`, `generation_failed`,
-  `missing_artifact`, `invalid_artifact`, `score_error`, `infra_error`.
+| `--system` | What runs | Budget | Boundary | State |
+| --- | --- | --- | --- | --- |
+| `codex`, `claude-code` | the vendor CLI with its own tools and built-in prompt | wall clock | the CLI's own Seatbelt sandbox, proven by preflight | used for every result so far |
+| `api-anthropic`, `api-openai` | one minimal agent loop of ours (tools `shell`, `read_file`, `write_file`, `list_dir`, `view_image`; same prompts for both) against the Messages / Responses API | tokens and tool calls (wall clock only as a safety cap); exhausting it is the status `budget_exhausted`, a sample | our Seatbelt profile around every shell command, path confinement in code, proven by a model-free preflight | tested against local mock servers only: no API key has been available |
+| `grok` | Grok Build CLI | wall clock | Grok applies one Seatbelt profile to itself and every child inherits it: no way to block the shell's network, keep `input/` read-only or hide `~/.grok` | wired, but its preflight fails closed on those three requirements; no batch has run |
+
+A system whose preflight does not pass cannot run: there is no override.
+
+- `result.json` status: `completed`, `timeout`, `budget_exhausted` (API systems),
+  `generation_failed`, `missing_artifact`, `invalid_artifact`, `score_error`,
+  `infra_error`.
+- **Host sleep.** When an attempt ends, the runner checks `pmset -g log`: 30 s or
+  more of host sleep inside the attempt, or more than 60 s over its wall limit,
+  makes it `infra_error` / `host_suspended` (re-run, not counted towards the re-run
+  cap). The rule never looks at the score. Batches frozen before this existed use
+  `v1/scripts/host-sleeps.py` + `relabel-host-suspended.mjs` after the fact.
 - **`infra_error` is not a sample.** The harness could not run the model (usage
   or rate limit, lost login, network, service outage, CLI crash before any
   model turn, runner interrupted). It has `score: null` and an `infra` block
@@ -250,10 +308,50 @@ zero), variance between attempts and between objects with the smallest
 detectable difference, and breakdowns by variant, archetype and evidence
 delta. Details: `v1/lib/report/README.md`.
 
+### H. Human-agreement study — `v1/lib/study/**`, `v1/scripts/study.mjs`
+
+A blind paired comparison of the headline score with a human rater. `prepare`
+selects pairs of valid submissions for the same task, stratified by score gap
+([0,3), [3,8), [8,15), [15,100]), at most two per task, with 10 % repeated pairs
+(sides swapped) for self-consistency; renders the truth and both submissions with
+identical cameras and neutral shading, each submission in the pose the scorer
+fitted; writes `pairs.json` (public: opaque ids and image names only) and
+`key.json` (private: attempts, scores, strata). `serve` is a rating page on
+127.0.0.1 that appends votes to `votes.jsonl`. `analyze` reports, over the
+original pairs, how often the rater chose the higher-scored submission (Wilson
+95 %), per stratum and per score component, the tie rate, the self-consistency on
+repeats and the largest disagreements. Details: `v1/lib/study/README.md`.
+
+### I. Real buildings — `v1/lib/real/**`, `v1/real/<source>/`, `v1/scripts/real.mjs`
+
+A real object is authored, not generated. `v1/real/<source>/` holds the truth model
+(`model.mjs`: every number cites the drawing sheet and dimension string it was read
+from), the evidence list (`evidence.mjs`: photographs with fitted cameras and
+occluders, and the words that must not appear in a pack), survey notes for `r4`,
+the sheet registrations used for verification, and `PROVENANCE.md` (conflicts
+between sheets and which was believed, what could not be read, the estimated truth
+uncertainty). `real.mjs prepare` copies and cleans the photographs (map labels and
+watermarks masked) into `real-sources/`; `build` writes the object with
+`writeProvidedObject` and the `r2`/`r4` tasks with `buildTask` under a neutral id
+(`real-0001`: task ids are public); `verify` renders the truth onto each drawing
+sheet's pixel grid and reports line residuals; `coverage` says which faces the
+photographs actually show. The planning drawings are the truth and are never
+evidence. Details: `v1/lib/real/README.md`.
+
 ### Orchestrator — `v1/lib/pack.mjs`, `v1/cli.mjs`, this file
 
 Builds objects (model → GLB → evidence), assembles task packs and truth,
 exposes the CLI, wires modules together.
+
+```js
+export async function buildObject({ dataRoot, archetype, seed, model, alternate, id, blender, quality });
+// alternate: default = decoyModel's earlier state (+ stale drawings); a memory object passes
+// { id: 'remembered', model, change, stale: false }
+export async function writeProvidedObject({ dataRoot, model, id, items, alternate });
+// an object whose evidence is not rendered (real buildings); files already in <object>/evidence/
+export async function buildTask({ dataRoot, objectId, variant, set });
+// evidence by standard item, or by kind for the r- variants; every alternates/<id>/ goes into truth.json
+```
 
 ## 9. Scoring definition (module D implements exactly this)
 

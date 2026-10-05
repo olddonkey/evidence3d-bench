@@ -25,6 +25,10 @@ for (const probe of plan.probes) {
       results[probe.id] = { outcome: 'allowed', sha256_16: digest(bytes), bytes: bytes.length };
     } else if (probe.kind === 'list') {
       results[probe.id] = { outcome: 'allowed', entries: fs.readdirSync(probe.path).length };
+    } else if (probe.kind === 'open') {
+      // Credential files: opened for reading and closed, never read.
+      fs.closeSync(fs.openSync(probe.path, 'r'));
+      results[probe.id] = { outcome: 'allowed' };
     } else if (probe.kind === 'write') {
       // An existing file is made writable first, as a contestant would: the
       // read-only file mode is not the boundary, the sandbox is.
@@ -135,7 +139,7 @@ export function evaluateProbes(plan, observed, ground) {
     const fail = reason => { check.status = 'fail'; check.reason = reason; };
     const pass = () => { check.status = 'pass'; };
     const canary = seen.sha256_16 && seen.sha256_16 === ground.canarySha16 ? ' and the canary came back' : '';
-    if (probe.kind === 'read' || probe.kind === 'list') {
+    if (probe.kind === 'read' || probe.kind === 'list' || probe.kind === 'open') {
       if (probe.expect === 'allow') seen.outcome === 'allowed' ? pass() : fail('expected readable, got ' + seen.outcome);
       else if (seen.outcome === 'allowed') fail('readable' + canary);
       else denied(seen.outcome) ? pass() : fail('unexpected outcome ' + seen.outcome);

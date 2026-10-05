@@ -33,7 +33,28 @@ export const VARIANTS = {
   // photographs are newer and the task asks for the building as photographed.
   c1: { title: 'Photographs plus out-of-date drawings', scale: 'metric', stale: ['plan', 'elevation-front', 'elevation-right'],
     items: ['photo-front', 'photo-left', 'photo-right', 'photo-rear', 'aerial', 'plan', 'elevation-front', 'elevation-right'] },
+  // Memory tasks. The object is a well-known structure, named in the task, whose
+  // surveyed proportions and dimensions differ from the published ones. The
+  // evidence is that of t2 / t3; the truth carries a "remembered" alternate built
+  // to the published figures, so contested probes tell whether a submission
+  // followed the evidence or the memory.
+  m2: { title: 'Photographs and an aerial view of a named landmark', scale: 'none', memory: true,
+    items: ['photo-front', 'photo-left', 'photo-right', 'photo-rear', 'aerial'] },
+  m3: { title: 'Photographs, an aerial view and scaled drawings of a named landmark', scale: 'metric', memory: true,
+    items: ['photo-front', 'photo-left', 'photo-right', 'photo-rear', 'aerial', 'plan', 'elevation-front', 'elevation-right'] },
+  // Real buildings: photographs taken on site, a hand-authored truth model from
+  // withheld planning drawings. A real object has whatever photographs exist, so
+  // these variants select evidence by kind instead of by standard item.
+  r2: { title: 'Photographs of a real building and an aerial view', scale: 'none', real: true, kinds: ['photo', 'aerial'] },
+  r4: { title: 'Photographs, an aerial view and survey notes of a real building', scale: 'metric', real: true, kinds: ['photo', 'aerial', 'notes'] },
 };
+
+// The variants every generated object supports: what a set is built with by default.
+export const GENERATED_VARIANTS = ['t1', 't2', 't3', 't4', 'c1'];
+
+// Variants whose truth carries an alternate state (the conflict task and the
+// memory tasks): the report measures which state a submission is closer to.
+export const CONFLICT_VARIANTS = ['c1', 'm2', 'm3'];
 
 export const DEFAULT_BUDGET = { wall_seconds: 1800, max_artifact_bytes: 67108864, max_triangles: 1500000 };
 

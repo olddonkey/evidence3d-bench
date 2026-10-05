@@ -1,3 +1,5 @@
+import { parseApiEvents, apiToolProblems } from './api/events.mjs';
+
 // Event-stream parsers. Each harness prints one JSON object per line; these
 // reduce a stream to the accounting a result record needs. Nothing here trusts
 // what the model says about itself: counts come from tool events, usage from
@@ -105,6 +107,64 @@ export function parseClaudeEvents(events) {
 }
 
 export const CLAUDE_TOOLS = ['Bash', 'Read', 'Glob', 'Grep', 'Edit', 'Write'];
+
+// Grok Build `-p --output-format streaming-messages-json` (checked against
+// 1.0.46): the Messages wire format, like Claude Code's stream-json:
+//   system{subtype:init, model, tools, mcp_servers, skills, slash_commands, permissionMode, apiKeySource}
+//   assistant{message{model, content:[text|thinking|tool_use{name,input}], usage}}
+//   user{message{content:[tool_result{tool_use_id, content, is_error}]}}
+//   result{subtype: success|error_during_execution|error_max_turns, is_error, num_turns, result,
+//          stop_reason, total_cost_usd, usage, modelUsage{<billed model id>: {...}}, errors[]}
+// result.usage keeps input_tokens (uncached), cache_read_input_tokens and
+// cache_creation_input_tokens apart; they are folded in as for Claude. A
+// total_cost_usd of 0 means "not known" in this format (Grok's own
+// documentation), so it is recorded as null. A tool result's content is a JSON
+// text whose `output` holds the raw bytes of a shell command's output and
+// whose `output_for_prompt` is what the model saw (long lines wrapped).
+export const GROK_TOOLS = ['run_terminal_command', 'read_file', 'search_replace', 'list_dir', 'grep', 'write'];
+
+export function parseGrokEvents(events) {
+  const tools = {}, errors = [];
+  let init = null, result = null, commands = 0, assistantMessages = 0, finalMessage = null, model = null;
+  for (const event of events) {
+    if (!event || typeof event !== 'object') continue;
+    if (event.type === 'system' && event.subtype === 'init') init = event;
+    else if (event.type === 'assistant' && Array.isArray(event.message?.content)) {
+      assistantMessages++;
+      model ??= event.message.model ?? null;
+      for (const block of event.message.content) {
+        if (block.type === 'tool_use') {
+          tools[block.name] = (tools[block.name] ?? 0) + 1;
+          if (block.name === 'run_terminal_command') commands++;
+        } else if (block.type === 'text' && block.text) finalMessage = block.text;
+      }
+    } else if (event.type === 'result') result = event;
+  }
+  let usage = null, usageDetail = null;
+  if (result?.usage && typeof result.usage === 'object') {
+    const u = result.usage, n = key => Number(u[key]) || 0;
+    usage = { input_tokens: n('input_tokens') + n('cache_creation_input_tokens') + n('cache_read_input_tokens'), cached_input_tokens: n('cache_read_input_tokens'),
+      output_tokens: n('output_tokens') };
+    usageDetail = { uncached_input_tokens: n('input_tokens'), cache_creation_input_tokens: n('cache_creation_input_tokens'),
+      cache_read_input_tokens: n('cache_read_input_tokens'), output_tokens: n('output_tokens') };
+  }
+  for (const text of Array.isArray(result?.errors) ? result.errors : []) errors.push(String(text));
+  if (result?.is_error && !errors.length) errors.push(String(result.result ?? result.subtype ?? 'error result'));
+  const cost = Number(result?.total_cost_usd), billed = Object.keys(result?.modelUsage ?? {});
+  return {
+    harness: 'grok', session_id: init?.session_id ?? result?.session_id ?? null,
+    turns: Number.isInteger(result?.num_turns) ? result.num_turns : assistantMessages,
+    commands, usage, usage_detail: usageDetail,
+    cost_usd: result && Number.isFinite(cost) && cost > 0 ? cost : null,
+    tools, errors,
+    final_message: typeof result?.result === 'string' ? result.result : finalMessage,
+    // The model the service billed (e.g. grok-4.6-build), else the one named in the stream.
+    model_reported: billed.length === 1 ? billed[0] : model ?? init?.model ?? null,
+    init: init ? { tools: init.tools ?? null, mcp_servers: init.mcp_servers ?? null, skills: init.skills ?? null, permission_mode: init.permissionMode ?? null,
+      api_key_source: init.apiKeySource ?? null, model: init.model ?? null } : null,
+    completed: Boolean(result) && result.is_error !== true && result.subtype === 'success',
+  };
+}
 // Built-in plugins that load even in safe mode; they add no tools (checked via
 // the init event, which lists the tool set after plugins have registered).
 export const CLAUDE_BUILTIN_PLUGINS = ['cc-plugin-agents-md', 'cc-plugin-telemetry'];
@@ -112,6 +172,20 @@ export const CLAUDE_BUILTIN_PLUGINS = ['cc-plugin-agents-md', 'cc-plugin-telemet
 // Problems with the tool surface a finished session actually used or was given.
 export function toolSurfaceProblems(system, summary) {
   const problems = [];
+  if (/^api-/.test(system)) return apiToolProblems(summary);
+  if (system === 'grok') {
+    for (const name of Object.keys(summary.tools ?? {})) if (!GROK_TOOLS.includes(name)) problems.push('grok used tool ' + name);
+    const init = summary.init;
+    if (init) {
+      const extra = (init.tools ?? []).filter(name => !GROK_TOOLS.includes(name));
+      if (extra.length) problems.push('grok was given tools ' + extra.join(', '));
+      if ((init.mcp_servers ?? []).length) problems.push('grok connected MCP servers ' + init.mcp_servers.map(server => server.name).join(', '));
+      // Skills are listed to the model in the system prompt (bundled ones too).
+      if ((init.skills ?? []).length) problems.push('grok loaded skills ' + init.skills.join(', '));
+      if (init.api_key_source && init.api_key_source !== 'oauth') problems.push('grok authenticated with an API key (' + init.api_key_source + ')');
+    }
+    return problems;
+  }
   if (system === 'codex') {
     for (const type of Object.keys(summary.tools ?? {})) if (!CODEX_ALLOWED_ITEMS.has(type)) problems.push('codex produced a ' + type + ' item');
   } else {
@@ -132,6 +206,8 @@ export function toolSurfaceProblems(system, summary) {
 export function parseEvents(system, events) {
   if (system === 'codex') return parseCodexEvents(events);
   if (system === 'claude-code') return parseClaudeEvents(events);
+  if (system === 'grok') return parseGrokEvents(events);
+  if (/^api-/.test(system)) return parseApiEvents(events);
   throw new Error('Unknown system ' + system);
 }
 

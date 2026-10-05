@@ -106,17 +106,29 @@ All on `report.score`, failures as 0, excluded attempts left out.
 ## Breakdowns
 
 - `entry.variants[v]`: mean score per variant.
-- `entry.evidence_deltas['hi-lo']`: for every pair of variants present in the
-  set (`variantPairs`, later minus earlier in t1 t2 t3 t4 c1, so t4 − t2,
-  c1 − t2 and c1 − t4 for the planned design), per object the mean score on one
-  minus the mean on the other, over objects with both, with bootstrap and t
-  intervals and paired/unpaired object counts. `entry.ladder` (adjacent rungs
-  only) is kept for readers of earlier leaderboards.
+- `entry.evidence_deltas['hi-lo']`: for every pair of variants of one family
+  present in the set (`variantPairs`, later minus earlier in `VARIANT_ORDER`,
+  so t4 − t2, c1 − t2 and c1 − t4 for the planned design), per object the mean
+  score on one minus the mean on the other, over objects with both, with
+  bootstrap and t intervals and paired/unpaired object counts. Families
+  (`variantFamily`): generated objects (t1–t4, c1), memory tasks on named
+  landmarks (m2, m3) and real buildings (r2, r4); variants of different
+  families are never paired (an m2 object is not a t2 object). `entry.ladder`
+  (adjacent t rungs only) is kept for readers of earlier leaderboards.
 - `entry.archetypes[a]`: mean score over the objects of each archetype
   (`objects/<id>/model.json` → `archetype`; `unknown` when model.json is
   missing, which is also a problem).
 - `entry.conflict`: on c1 tasks, the share of contested probes closer to the
   as-photographed state.
+- `entry.memory`: on the memory tasks m2 and m3 (a named landmark whose
+  surveyed form differs from its published figures; the truth's alternate
+  `remembered` is the structure as published), the share of contested probes
+  closer to the surveyed object the evidence shows. Both come from the
+  contract's `CONFLICT_VARIANTS`, split by `CONFLICT_KINDS` (a memory variant
+  is one with `memory: true`): they measure different temptations, out-of-date
+  drawings and remembered figures, so they are never pooled. The index page,
+  `summary.md` and the task pages label each for what it means; the Memory
+  column appears only in a set that has memory tasks.
 
 ## Scale
 
@@ -165,5 +177,6 @@ a row is marked as entering `shape_score` only when the report says so
 made up and labelled synthetic: `SAMPLE_ATTEMPTS` (small) and
 `syntheticDesign()` (objects in named sets, archetypes, t2/t4/c1, two
 configurations at three attempts per task, one split over two batch
-directories, one at one attempt, an `infra_error` and a timeout). Never mix it
-with real results.
+directories, one at one attempt, an `infra_error` and a timeout). A spec with
+`contested` on a conflict variant gets an alternate in its truth and report:
+`before-canopy` on c1, `remembered` on m2 / m3. Never mix it with real results.

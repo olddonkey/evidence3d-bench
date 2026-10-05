@@ -1,7 +1,7 @@
 import { basename } from 'node:path';
 import { VARIANTS } from '../contract.mjs';
 import { UNNAMED_SET } from './collect.mjs';
-import { cellKey, conflictShare, toleranceRows } from './aggregate.mjs';
+import { cellKey, conflictShare, conflictKind, toleranceRows } from './aggregate.mjs';
 import { esc, num, percent, fractionLabel, page, NOT_EVALUATED } from './html.mjs';
 
 // One page per task: the evidence given, the ground truth next to each
@@ -56,6 +56,15 @@ const roleText = item => item.role ? '<span class="role">' + esc(item.role) + (i
 const columnHead = item => '<th class="num"><span class="col-head">' + esc(cellKey(item.attempt)) + '</span><small>' + esc(item.attempt.batch + ' · ' + (item.attempt.slot ?? 'a' + item.attempt.attempt)) +
   '</small>' + (item.role ? '<small>' + esc(item.role + (item.of > 1 ? ' of ' + item.of : '')) + '</small>' : '') + '</th>';
 
+// The share of contested probes closer to the primary state, labelled for what
+// it means on this task: the as-photographed state (c1) or the evidence rather
+// than memory (m2, m3). Other variants get the c1 row, empty, as before.
+function evidenceUseRow(attempts, metric) {
+  const kind = conflictKind(attempts[0]?.variant);
+  const label = kind?.id === 'memory' ? 'Memory <small>closer to the evidence</small>' : 'Conflict <small>closer to primary</small>';
+  return [metric(label, attempt => percent(attempt.valid && kind ? conflictShare(attempt.report) : undefined))];
+}
+
 // items: [{ attempt, role, of }]
 function numbersTable(items) {
   const attempts = items.map(item => item.attempt);
@@ -102,7 +111,7 @@ function numbersTable(items) {
       const summary = report(attempt)?.probe_summary;
       return summary ? num(summary.mean_error_m, 2, { suffix: ' m' }) + '<small>' + summary.evaluated + ' evaluated, ' + summary.missed + ' missed</small>' : NOT_EVALUATED;
     }),
-    metric('Conflict <small>closer to primary</small>', attempt => percent(attempt.valid && attempt.variant === 'c1' ? conflictShare(attempt.report) : undefined)),
+    ...evidenceUseRow(attempts, metric),
     metric('Appearance &Delta;E', attempt => {
       const appearance = report(attempt)?.appearance;
       return appearance ? num(appearance.delta_e_mean, 1) + '<small>' + percent(appearance.match_fraction) + ' matched, ' + (appearance.compared_points ?? 0) + ' pts</small>' : NOT_EVALUATED;
@@ -156,19 +165,31 @@ function probeTable(items) {
     valid.map(columnHead).join('') + '</tr></thead><tbody>' + rows.join('\n') + '</tbody></table></div>';
 }
 
-function alternatesSection(truth, items) {
+// Headings and words per kind of alternate: on a memory task the alternate is
+// the structure as published, and "primary" is the surveyed object the evidence shows.
+const ALTERNATE_WORDS = {
+  conflict: { heading: 'Conflict: out-of-date evidence', primary: 'Primary', alternate: 'Alternate', sides: {} },
+  memory: { heading: 'Memory: the evidence against the published figures', primary: 'Surveyed <small>evidence</small>', alternate: 'Published <small>memory</small>',
+    sides: { primary: 'primary (evidence)', alternate: 'alternate (memory)' },
+    legend: 'This structure is named in the task, and the surveyed object the evidence shows differs from its published figures. Each contested probe is measured on the submission: ' +
+      'closer to the surveyed value means the model followed the evidence, closer to the published value that it followed what is remembered about the structure.' },
+};
+
+function alternatesSection(truth, items, variant) {
   const alternates = truth?.alternates ?? [];
   const valid = items.map(item => item.attempt).filter(attempt => attempt.valid && attempt.report.alternates?.length);
   if (!alternates.length && !valid.length) return '';
-  let html = '<h2>Conflict: out-of-date evidence</h2>' + (alternates.length ? '<ul>' + alternates.map(alternate => '<li><code>' + esc(alternate.id) + '</code>: ' +
+  const words = ALTERNATE_WORDS[conflictKind(variant)?.id] ?? ALTERNATE_WORDS.conflict;
+  let html = '<h2>' + words.heading + '</h2>' + (words.legend ? '<p class="legend">' + esc(words.legend) + '</p>' : '') +
+    (alternates.length ? '<ul>' + alternates.map(alternate => '<li><code>' + esc(alternate.id) + '</code>: ' +
     esc(alternate.note ?? '') + ' <small>contested probes: ' + esc((alternate.contested_probes ?? []).join(', ')) + '</small></li>').join('') + '</ul>' : '');
   for (const attempt of valid) {
     for (const alternate of attempt.report.alternates) {
       html += '<h3>' + esc(attemptLabel(attempt)) + ' vs <code>' + esc(alternate.id) + '</code> <small>F against the alternate ' + num(alternate.f, 3) + '</small></h3>' +
-        '<div class="scroll"><table><thead><tr><th>Probe</th><th class="num">Primary</th><th class="num">Alternate</th><th class="num">Measured</th><th>Closer to</th></tr></thead><tbody>' +
+        '<div class="scroll"><table><thead><tr><th>Probe</th><th class="num">' + words.primary + '</th><th class="num">' + words.alternate + '</th><th class="num">Measured</th><th>Closer to</th></tr></thead><tbody>' +
         (alternate.contested ?? []).map(item => '<tr><td><code>' + esc(item.probe) + '</code></td><td class="num">' + num(item.primary_m, 2) + '</td><td class="num">' +
           num(item.alternate_m, 2) + '</td><td class="num">' + num(item.measured_m, 2) + '</td><td class="' + (item.closer_to === 'primary' ? 'good' : item.closer_to === 'alternate' ? 'bad' : '') + '">' +
-          esc(item.closer_to) + '</td></tr>').join('') + '</tbody></table></div>';
+          esc(words.sides[item.closer_to] ?? item.closer_to) + '</td></tr>').join('') + '</tbody></table></div>';
     }
   }
   return html;
@@ -235,6 +256,6 @@ ${shown.length ? numbersTable(shown) : '<p class="muted">No attempts.</p>'}
 ${detailTable(shown)}
 <h2>Probes</h2>
 ${probeTable(shown)}
-${alternatesSection(truthInfo, shown)}`;
+${alternatesSection(truthInfo, shown, taskInfo.variant)}`;
   return page({ title: taskInfo.task_id + ' · Evidence3D', body, root: '..' });
 }

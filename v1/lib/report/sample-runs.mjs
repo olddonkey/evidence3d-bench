@@ -7,7 +7,7 @@ import { buildScene } from '../model.mjs';
 import { soupFromModel, transformPoint } from '../soup.mjs';
 import { raycast } from '../raster.mjs';
 import { rng } from '../rng.mjs';
-import { layout, VARIANTS, TASK_SCHEMA, TRUTH_SCHEMA, REPORT_SCHEMA, PROTOCOL, DEFAULT_BUDGET } from '../contract.mjs';
+import { layout, VARIANTS, CONFLICT_VARIANTS, TASK_SCHEMA, TRUTH_SCHEMA, REPORT_SCHEMA, PROTOCOL, DEFAULT_BUDGET } from '../contract.mjs';
 import { encodePNG } from '../png.mjs';
 import { shadeSoup, standardViews } from '../render/shade.mjs';
 import { sampleModel } from '../../fixtures/sample-model.mjs';
@@ -58,6 +58,14 @@ function candidateBounds(model, dropGroups, alignment) {
   return { min: [0, 1, 2].map(i => Math.min(...corners.map(corner => corner[i]))), max: [0, 1, 2].map(i => Math.max(...corners.map(corner => corner[i]))) };
 }
 
+// The alternate state a conflict variant's truth carries: the earlier state for
+// c1, the structure as published ("remembered") for the memory tasks m2 / m3.
+function alternateFor(variant) {
+  return VARIANTS[variant].memory
+    ? { id: 'remembered', contested_probes: ['ridge-height'], note: 'The remembered state is the structure as published; the surveyed object differs from it in the roof pitch.' }
+    : { id: 'before-canopy', contested_probes: ['canopy-top'], note: 'The drawings predate the entrance canopy.' };
+}
+
 function report({ taskId, object, variant, model, soup, score, alignment, detailF = 0.5, probeError = 0.1, contested = null, missingGroups = [],
   thresholds = [0.01, 0.02, 0.05], shapeFractions = null, scorer = null }) {
   const diagonal = Math.hypot(...soup.bounds.max.map((value, i) => value - soup.bounds.min[i]));
@@ -93,7 +101,7 @@ function report({ taskId, object, variant, model, soup, score, alignment, detail
     detail: { score: 100 * categories.reduce((sum, category) => sum + category.f, 0) / Math.max(1, categories.length), categories, groups },
     probes,
     probe_summary: { evaluated: evaluated.length, missed: probes.length - evaluated.length, mean_error_m: probeError, mean_error_fraction: probeError / diagonal },
-    alternates: contested ? [{ id: 'before-canopy', f: f * 0.8, closer_to_primary_fraction: contested.filter(side => side === 'primary').length / contested.length,
+    alternates: contested ? [{ id: alternateFor(variant).id, f: f * 0.8, closer_to_primary_fraction: contested.filter(side => side === 'primary').length / contested.length,
       contested: contested.map((side, i) => ({ probe: model.probes[i % model.probes.length].id, primary_m: 2.6, alternate_m: 3.4,
         measured_m: side === 'primary' ? 2.65 : side === 'alternate' ? 3.35 : 3.0, closer_to: side })) }] : [],
     appearance: { delta_e_mean: 9.5, match_fraction: 0.7, compared_points: 12000 },
@@ -199,7 +207,7 @@ export async function writeSampleRuns(dataRoot, { attempts = SAMPLE_ATTEMPTS, wi
     await writeJSON(join(paths.task(taskId), 'task.json'), task);
     await writeJSON(join(paths.truth(taskId), 'truth.json'), { schema: TRUTH_SCHEMA, task_id: taskId, task_sha256: objectHash(task), object, variant,
       scale_evidence: VARIANTS[variant].scale, evidence: VARIANTS[variant].items, ...(set ? { set } : {}),
-      alternates: variant === 'c1' ? [{ id: 'before-canopy', contested_probes: ['canopy-top'], note: 'The drawings predate the entrance canopy.' }] : [] });
+      alternates: CONFLICT_VARIANTS.includes(variant) ? [alternateFor(variant)] : [] });
   }
   let clock = 0;
   for (const batch of new Set(attempts.map(attempt => attempt.batch))) {

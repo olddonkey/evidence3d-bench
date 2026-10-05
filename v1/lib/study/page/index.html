@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>几何盲评</title>
+<link rel="stylesheet" href="style.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<header>
+  <div class="top">
+    <p class="instruction">同一道题的参考模型和两份提交。哪一份的几何更接近参考？忽略颜色和材质。</p>
+    <span id="progress"></span>
+  </div>
+  <p id="task" class="task"></p>
+</header>
+<main>
+  <div id="grid" class="grid" aria-label="三组图片：A、参考、B，每列一个视角"></div>
+  <p id="message" class="message" hidden></p>
+</main>
+<footer>
+  <div class="controls">
+    <button id="back" type="button" disabled>上一对</button>
+    <button class="choice" data-choice="a" type="button" disabled><kbd>←</kbd> A 更接近 <kbd>1</kbd></button>
+    <button class="choice" data-choice="tie" type="button" disabled><kbd>↓</kbd> 分不出 <kbd>0</kbd></button>
+    <button class="choice" data-choice="b" type="button" disabled><kbd>→</kbd> B 更接近 <kbd>2</kbd></button>
+    <button id="forward" type="button" disabled>下一对</button>
+  </div>
+  <p id="status" class="status" role="status">正在读取……</p>
+</footer>
+<div id="zoom" class="zoom" hidden>
+  <figure>
+    <img id="zoom-image" alt="">
+    <figcaption id="zoom-caption"></figcaption>
+  </figure>
+  <p class="zoom-hint">↑ ↓ 切换 A／参考／B　　← → 切换视角　　Esc 或点击关闭</p>
+</div>
+</body>
+</html>

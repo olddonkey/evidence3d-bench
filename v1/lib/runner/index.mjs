@@ -12,9 +12,10 @@ import { runPreflight } from './preflight.mjs';
 import { classifyStatus, scoreOf, STATUSES, NOT_SAMPLES } from './status.mjs';
 import { detectInfra, modelTurns, retryWatch, INFRA_REASONS } from './infra.mjs';
 import { createGate, holdUntil, HOLD_KIND, SCHEDULE } from './schedule.mjs';
+import { hostSleepCheck, hostSuspension, PMSET } from './hostsleep.mjs';
 import {
   sha256, sha256File, objectHash, readJSON, writeJSON, inventory, inventoryHash, makeReadOnly,
-  buildRuntime, buildWorkspace, workspaceHashes, readArtifact, STALE_TEMPORARY, writeJSONSync,
+  buildRuntime, buildWorkspace, workspaceHashes, readArtifact, STALE_TEMPORARY, writeJSONSync, writeHarnessFile, readHarnessFile,
 } from './workspace.mjs';
 
 // The generation runner: freezes a batch (prepare), proves the isolation
@@ -163,14 +164,23 @@ const attemptDir = (batchDir, taskId, n) => join(batchDir, taskId, 'a' + n);
 
 // ---------------------------------------------------------------- prepare
 
-export async function prepare({ id, system, model, effort, tasks, attempts = 1, dataRoot = DEFAULT_DATA_ROOT, binary, repoRoot = REPO_ROOT, deps = {}, log = () => {} }) {
+// tokenBudget, toolBudget, maxOutputTokens: API systems only (frozen into the
+// harness record; see api/adapter.mjs). deps.env: where an API system looks up
+// its key and base URL (default process.env); only whether the key is set is
+// recorded.
+export async function prepare({ id, system, model, effort, tasks, attempts = 1, dataRoot = DEFAULT_DATA_ROOT, binary, tokenBudget, toolBudget, maxOutputTokens,
+  repoRoot = REPO_ROOT, deps = {}, log = () => {} }) {
   if (!ID.test(id ?? '')) throw new Error('Invalid batch id ' + id);
   if (!Array.isArray(tasks) || !tasks.length || new Set(tasks).size !== tasks.length || !tasks.every(task => ID.test(task))) throw new Error('Tasks must be a non-empty list of unique task ids');
   if (!Number.isInteger(attempts) || attempts < 1 || attempts > 20) throw new Error('attempts must be an integer from 1 to 20');
   const adapter = adapterFor(system);
+  if (!adapter.api && [tokenBudget, toolBudget, maxOutputTokens].some(value => value !== undefined)) {
+    throw new Error('--token-budget, --tool-budget and --max-output-tokens apply to the API systems only');
+  }
   dataRoot = resolve(dataRoot);
   const paths = layout(dataRoot);
-  const harness = await (deps.inspect ?? adapter.inspect)({ binary: binary ?? adapter.defaultBinary(), model, effort });
+  const harness = await (deps.inspect ?? adapter.inspect)({ binary: binary ?? adapter.defaultBinary(), model, effort,
+    ...(adapter.api ? { budget: { tokens: tokenBudget, tool_calls: toolBudget }, maxOutputTokens, retry: deps.apiRetry, env: deps.env ?? process.env } : {}) });
   const node = await nodeRuntime(deps.nodePath);
   node.sha256 = await sha256File(node.path);
   const installTools = await loadInstallTools(deps);
@@ -211,6 +221,19 @@ export async function prepare({ id, system, model, effort, tasks, attempts = 1, 
   }
 }
 
+// The invocation record of one attempt as prepare freezes it (invocation.json,
+// whose hash the manifest keeps), and the harness files it names (path ->
+// content). The API systems' wall clock is only a safety cap (a multiple of
+// the task's).
+export function attemptInvocation({ adapter, harness, task, workspace, attemptDir, node }) {
+  const spec = adapter.invocation({ harness, model: harness.model, effort: harness.effort, workspace, attemptDir, node, wallSeconds: task.budget.wall_seconds });
+  const files = {}, hashes = {};
+  for (const [path, content] of Object.entries(spec.files ?? {})) { files[path] = content; hashes[relative(attemptDir, path)] = objectHash(content); }
+  const invocation = { command: spec.command, args: spec.args, cwd: spec.cwd, env: spec.env, stdin: 'prompt.txt', files: hashes,
+    wall_seconds: adapter.wallSeconds ? adapter.wallSeconds(task) : task.budget.wall_seconds, workspace };
+  return { invocation, files };
+}
+
 async function freezeBatch({ batchDir, id, system, attempts, dataRoot, paths, adapter, harness, node, installTools, taskRecords, repoRoot, log }) {
   const runtime = await buildRuntime({ repoRoot, runtimeDir: join(batchDir, 'runtime') });
   const toolsDir = join(batchDir, 'tools');
@@ -232,11 +255,11 @@ async function freezeBatch({ batchDir, id, system, attempts, dataRoot, paths, ad
     prompt_version: PROMPT_VERSION, repository: await repositoryState(repoRoot),
     // retries: an attempt is never run again once it is a sample; one that the
     // harness could not run (an infrastructure error) is archived and re-run.
-    rules: { evaluator_feedback_during_generation: false, retries: false, infra_reruns: true, human_intervention: false, api_keys: false },
+    rules: { evaluator_feedback_during_generation: false, retries: false, infra_reruns: true, human_intervention: false, api_keys: Boolean(adapter.usesApiKey) },
     tasks: [],
   };
   for (const { task, taskBytes, truthSha, identity } of taskRecords) {
-    const prompt = buildPrompt({ system, task, threeVersion: runtime.three_version });
+    const prompt = buildPrompt({ system, task, threeVersion: runtime.three_version, budget: harness.budget ?? null });
     const record = { id: task.id, ...identity, task_sha256: objectHash(task), task_file_sha256: sha256(taskBytes), truth_sha256: truthSha,
       budget: task.budget, prompt_sha256: sha256(prompt), attempts: [] };
     for (let n = 1; n <= attempts; n++) {
@@ -246,12 +269,9 @@ async function freezeBatch({ batchDir, id, system, attempts, dataRoot, paths, ad
       record.input_sha256 ??= built.hashes.input;
       if (built.hashes.input !== record.input_sha256) throw new Error('Workspace input differs between attempts of ' + task.id);
       await writeFile(join(dir, 'prompt.txt'), prompt, { flag: 'wx' });
-      const spec = adapter.invocation({ harness, model: harness.model, effort: harness.effort, workspace, attemptDir: dir, node });
-      const files = {};
-      for (const [path, content] of Object.entries(spec.files ?? {})) { await writeJSON(path, content); files[relative(dir, path)] = objectHash(content); }
+      const { invocation, files } = attemptInvocation({ adapter, harness, task, workspace, attemptDir: dir, node });
+      for (const [path, content] of Object.entries(files)) await writeHarnessFile(path, content);
       await mkdir(join(dir, 'harness', 'debug'), { recursive: true });
-      const invocation = { command: spec.command, args: spec.args, cwd: spec.cwd, env: spec.env, stdin: 'prompt.txt', files,
-        wall_seconds: task.budget.wall_seconds, workspace };
       await writeJSON(join(dir, 'invocation.json'), invocation, { exclusive: true });
       record.attempts.push({ n, dir: relative(batchDir, dir), invocation_sha256: objectHash(invocation) });
     }
@@ -307,7 +327,7 @@ export async function frozenProblems(batchDir, manifest, { repoRoot = REPO_ROOT,
         if (objectHash(invocation) !== attempt.invocation_sha256) problems.push(attempt.dir + ': invocation changed');
         if (sha256(await readFile(join(dir, 'prompt.txt'))) !== task.prompt_sha256) problems.push(attempt.dir + ': prompt changed');
         for (const [file, hash] of Object.entries(invocation.files ?? {})) {
-          if (objectHash(await readJSON(join(dir, file))) !== hash) problems.push(attempt.dir + ': ' + file + ' changed');
+          if (objectHash(await readHarnessFile(join(dir, file))) !== hash) problems.push(attempt.dir + ': ' + file + ' changed');
         }
       } catch (error) { problems.push(attempt.dir + ': ' + error.message); }
     }
@@ -378,7 +398,8 @@ export async function preflight({ batchDir, probeModel, probeEffort, repoRoot = 
     let result;
     if (problems.length) result = { checks: problems.map(reason => ({ id: 'freeze', status: 'fail', reason })), sessions: {}, passed: false, failed: ['freeze'], not_evaluated: [] };
     else {
-      result = await runPreflight({ batchDir, manifest, adapter, harness: manifest.harness, node: manifest.node, repoRoot,
+      // The API systems prove their boundary without a model (api/preflight.mjs).
+      result = await (adapter.preflight ?? runPreflight)({ batchDir, manifest, adapter, harness: manifest.harness, node: manifest.node, repoRoot, deps,
         dataRoot: manifest.data_root, probeModel: probeModel ?? manifest.model, probeEffort: effort, scratchDir, skipAgent, internet: deps.internet, log,
         signal: stopper.signal, pids,
         infra: { wait, schedule: deps.schedule ?? SCHEDULE, seed: manifest.id + '/preflight', maxTries: deps.preflightInfraTries ?? 6,
@@ -401,7 +422,7 @@ export async function preflight({ batchDir, probeModel, probeEffort, repoRoot = 
     if (report.passed) await state('preflight_passed');
     else if (!infra) await state('preflight_failed');
     else if (infra.action === 'stop') {
-      await state('stopped', { stop: { reason: infra.reason, message: infra.message, attempt: 'preflight/' + infra.session, advice: STOP_ADVICE[infra.reason] ?? 'see the preflight report', at: new Date().toISOString() } });
+      await state('stopped', { stop: { reason: infra.reason, message: infra.message, attempt: 'preflight/' + infra.session, advice: stopAdvice(infra.reason, manifest) ?? 'see the preflight report', at: new Date().toISOString() } });
     } else await state(infra.gave_up === 'no-wait' ? 'would_wait' : 'preflight_gave_up', { hold: infra.hold ?? null, gave_up: infra.gave_up });
     return report;
   } finally {
@@ -643,16 +664,25 @@ async function runAttempt({ batchDir, manifest, task, attempt, adapter, deps, lo
     const hashes = await workspaceHashes(workspace);
     if (hashes.input !== task.input_sha256 || hashes.tools !== manifest.tools.sha256 || hashes.runtime !== manifest.runtime.sha256) throw new Error(attempt.dir + ': workspace changed after freeze');
     if ((await readdir(join(workspace, 'output'))).length) throw new Error(attempt.dir + ': output/ must start empty');
+    // A harness that reads part of its configuration from the workspace
+    // (Grok's sandbox profile) gets its frozen copy put there now, so nothing
+    // a contestant could have left in the workspace is ever read in its place.
+    if (adapter.stage) await adapter.stage({ attemptDir: dir, workspace, invocation });
     // The checks above take a moment (a workspace is hashed); a hold that
     // began meanwhile (another attempt met a limit) means this one must not
     // launch into it. Nothing has been recorded yet, so it simply goes back.
+    if (mayLaunch && !mayLaunch()) return { result: null, skipped: false, deferred: true };
+    // The host-sleep rule compares the machine's sleep counter at launch with
+    // the one at the end (hostsleep.mjs). Read before the launch is decided:
+    // the hold check below must stay in the same tick as the launch.
+    const sleepCount = await hostSource(deps).sleepCount().catch(() => null);
     if (mayLaunch && !mayLaunch()) return { result: null, skipped: false, deferred: true };
     // In the same tick as that check: from here on the attempt is launched.
     control.running.add(attempt.dir);
     log({ event: 'started', task_id: task.id, attempt: attempt.n, try: history.try, wall_seconds: invocation.wall_seconds, running: control.running.size });
     try {
       await writeJSON(join(dir, 'started.json'), { at: new Date().toISOString(), pid: process.pid, runner_started: startTimeOf(process.pid),
-        load_1m: loadavg()[0], running: control.running.size, try: history.try }, { exclusive: true });
+        load_1m: loadavg()[0], running: control.running.size, try: history.try, sleep_count: sleepCount }, { exclusive: true });
     } catch (error) { control.running.delete(attempt.dir); throw error; }
     const stopLoad = sampleLoad();
     // The retry watchdog stops a CLI that keeps retrying an unreachable
@@ -668,8 +698,10 @@ async function runAttempt({ batchDir, manifest, task, attempt, adapter, deps, lo
     }, Math.max(100, Math.min(15000, Math.round(stallMs / 4))));
     tick.unref();
     try {
+      // An API system's loop also gets its key on stdin, read from the
+      // environment now; it is never written anywhere.
       run = await captureProcess(invocation.command, invocation.args, {
-        cwd: invocation.cwd, env: invocation.env, stdin: prompt, seconds: invocation.wall_seconds, graceSeconds: deps.graceSeconds ?? 5,
+        cwd: invocation.cwd, env: invocation.env, stdin: adapter.stdin ? adapter.stdin(prompt, deps.env ?? process.env) : prompt, seconds: invocation.wall_seconds, graceSeconds: deps.graceSeconds ?? 5,
         stdoutPath: join(dir, 'events.jsonl'), stderrPath: join(dir, 'stderr.log'), signal: AbortSignal.any([control.signal, own.signal]),
         onEvent: (event, ms) => { events.push(event); watch.onEvent(event, ms); },
         onSpawn: pid => { spawnClock = performance.now(); control.pids.set(attempt.dir, pid); writeJSONSync(join(dir, 'child.json'), { pid, command: invocation.command, started: startTimeOf(pid) }); },
@@ -707,8 +739,23 @@ async function runAttempt({ batchDir, manifest, task, attempt, adapter, deps, lo
     log({ event: 'finished', task_id: task.id, attempt: attempt.n, status: 'infra_error', reason: infra.reason, score: null });
     return outcome;
   }
-  const infraFound = detectInfra({ system: manifest.system, events, eventMs: run.event_ms ?? null, run, summary,
+  // The host-sleep rule, applied to every CLI process that ended (whatever
+  // its status, never looking at the score or the artifact): a machine that
+  // slept during the attempt, or a run longer than its wall clock allows,
+  // makes it an infrastructure error. It overrides a retry-class finding (the
+  // network errors a wake produces are its symptom) and no finding at all;
+  // a limit or a stop found by the classifier is kept, because it asks for a
+  // hold or a human, with the sleep recorded beside it.
+  const startedRecord = await readJSON(join(dir, 'started.json')).catch(() => null);
+  diagnostics.host_sleep_check = await hostSleepCheck({ startedAt: run.started_at, finishedAt: run.finished_at,
+    sleepCountAtStart: startedRecord?.sleep_count ?? null, source: hostSource(deps) });
+  const suspended = hostSuspension({ run, wallLimitSeconds: invocation.wall_seconds, check: diagnostics.host_sleep_check, modelTurns: diagnostics.model_turns });
+  const classified = detectInfra({ system: manifest.system, events, eventMs: run.event_ms ?? null, run, summary,
     wallLimitSeconds: invocation.wall_seconds, now: Date.parse(run.finished_at ?? '') || Date.now() });
+  let infraFound = classified;
+  if (suspended && (!classified || INFRA_REASONS[classified.reason] === 'retry')) {
+    infraFound = classified ? { ...suspended, evidence: [...suspended.evidence, 'the classifier also found ' + classified.reason + ': ' + String(classified.message ?? '').slice(0, 300)] } : suspended;
+  } else if (suspended) infraFound = { ...classified, host_suspended: suspended.host, evidence: [...(classified.evidence ?? []), suspended.message] };
   // A broken boundary is never excused: the infrastructure finding is kept
   // for diagnosis, but the attempt stays a failure.
   const infra = integrityProblems.length ? null : infraFound;
@@ -912,11 +959,22 @@ async function removeStaleTemporaries(dirs) {
 
 // What a human has to do about a stop-class infrastructure error.
 const STOP_ADVICE = {
-  auth: 'log in again with the harness CLI (codex login / claude), then run again',
+  auth: 'log in again with the harness CLI (codex login / claude / grok login), then run again',
   billing: 'check the plan, credits or spend cap of the login, then run again',
   model_unavailable: 'the model id is unknown or not on this plan; a batch cannot change its model, so prepare a new batch with a valid one',
+  request_rejected: 'the API refused the frozen request (model, effort or another parameter); prepare a new batch with settings it accepts',
   frozen: 'restore what changed (or prepare a new batch), then run again',
 };
+
+// The API systems authenticate with a key from the environment, not a login.
+function stopAdvice(reason, manifest) {
+  if (manifest?.harness?.key_variable && reason === 'auth') return 'set ' + manifest.harness.key_variable + ' to a valid key in the environment of the runner, then run again';
+  if (manifest?.harness?.key_variable && reason === 'billing') return 'check the credits or spend limits of the API account, then run again';
+  return STOP_ADVICE[reason];
+}
+
+// Where the host-sleep rule reads the machine's power state (tests inject a fixture).
+const hostSource = deps => deps.hostSleep ?? PMSET;
 
 // A hold restored from a dead runner's state, or derived from the results on
 // disk: a restarted runner must not walk straight back into a known limit.
@@ -965,6 +1023,14 @@ export async function execute({ batchDir, concurrency = 1, repoRoot = REPO_ROOT,
   if (!Number.isInteger(maxReruns) || maxReruns < 0 || maxReruns > 100) throw new Error('maxReruns must be 0..100');
   if (!(retryStallSeconds > 0)) throw new Error('retryStallSeconds must be positive');
   const manifest = await readJSON(join(batchDir, 'manifest.json'));
+  // An API system without its key cannot run anything: stop for a human
+  // before anything else is checked (exit 3, not a preflight problem).
+  const missingKey = (deps.adapter ?? adapterFor(manifest.system)).keyProblem?.(deps.env ?? process.env);
+  if (missingKey) {
+    const error = new Error('Stopped: auth: ' + missingKey + '\n' + stopAdvice('auth', manifest));
+    error.code = 'E3D_STOPPED'; error.stop = { reason: 'auth', message: missingKey, attempt: null, advice: stopAdvice('auth', manifest), at: new Date().toISOString() };
+    throw error;
+  }
   let preflightReport;
   try { preflightReport = await readJSON(join(batchDir, 'preflight.json')); } catch { throw new Error('No preflight.json: run preflight first'); }
   if (!preflightReport.passed) {
@@ -1049,7 +1115,7 @@ export async function execute({ batchDir, concurrency = 1, repoRoot = REPO_ROOT,
     let summaryChain = Promise.resolve();
     const stopBatch = async ({ reason, message, attempt = null }) => {
       if (stop) return;
-      const advice = STOP_ADVICE[reason] ?? 'see the evidence in ' + (attempt ?? 'the log') + ', then run again';
+      const advice = stopAdvice(reason, manifest) ?? 'see the evidence in ' + (attempt ?? 'the log') + ', then run again';
       stop = { reason, message, attempt, advice, at: new Date().toISOString() };
       phase = 'stopped';
       log({ event: 'stopping', ...stop, running: [...control.running] });

@@ -52,6 +52,18 @@ export async function writeJSON(path, value, { exclusive = false } = {}) {
   } finally { if (exclusive) await unlink(temporary).catch(() => {}); }
 }
 
+// A harness file frozen with an attempt (invocation.files): JSON for a
+// `.json` path (Claude Code's settings, the API config), text otherwise
+// (Grok's TOML sandbox profile). Its hash is objectHash of what is written
+// here and of what readHarnessFile returns.
+export async function writeHarnessFile(path, content) {
+  if (typeof content === 'string' && !path.endsWith('.json')) { await mkdir(dirname(path), { recursive: true }); await writeFile(path, content); }
+  else await writeJSON(path, content);
+}
+export async function readHarnessFile(path) {
+  return path.endsWith('.json') ? readJSON(path) : readFile(path, 'utf8');
+}
+
 // The same, synchronously: for records that must be on disk before anything
 // else can happen (the pid of a process just spawned, so a restarted runner
 // can always find and stop it).

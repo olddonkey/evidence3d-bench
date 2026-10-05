@@ -7,7 +7,7 @@ import { rng } from '../lib/rng.mjs';
 import { decodePNG } from '../lib/png.mjs';
 import { aggregate, buildLeaderboard, writeReport, bootstrapMean, conflictShare, normaliseUsage, comparePair, pairedBootstrap, tInterval,
   studentQuantile, chiSquareQuantile, sdRange, pooledSD, detectableDifference, pickRepresentatives, variantPairs, summaryMarkdown, attemptShareText,
-  varianceStatement } from '../lib/report/index.mjs';
+  varianceStatement, variantFamily, CONFLICT_KINDS, LADDER } from '../lib/report/index.mjs';
 import { writeSampleRuns, syntheticDesign, SAMPLE_ATTEMPTS } from '../lib/report/sample-runs.mjs';
 
 const near = (actual, expected, tolerance = 1e-9) => assert.ok(Math.abs(actual - expected) <= tolerance, actual + ' is not within ' + tolerance + ' of ' + expected);
@@ -844,5 +844,70 @@ test('scorer provenance: report stamps and the manifest source are separate and 
     assert.ok(rescored.problems.some(problem => /synth-weak: 1 report was computed by a scorer other than the one frozen in manifest\.json/.test(problem)));
     await writeReport({ dataRoot, outDir: join(root, 'site'), size: 48, now: NOW });
     assert.match(await readFile(join(root, 'site', 'index.html'), 'utf8'), /1 report not by the scorer frozen in the manifest/);
+  });
+});
+
+// ------------------------------------------------------------ memory tasks
+
+test('memory tasks (m2, m3): their own evidence-against-memory share, labelled as such, never paired with t variants', async () => {
+  // Variants pair only within their family: generated (t1-t4, c1), memory (m2, m3), real (r2, r4).
+  assert.deepEqual(variantPairs(['t2', 't4', 'c1', 'm2', 'm3', 'r2', 'r4']).map(pair => pair.join('-')), ['t4-t2', 'c1-t2', 'c1-t4', 'm3-m2', 'r4-r2']);
+  assert.deepEqual(variantPairs(['t2', 'm2']), []);
+  assert.deepEqual([variantFamily('c1'), variantFamily('m3'), variantFamily('r2'), variantFamily('t1')], ['generated', 'memory', 'real', 'generated']);
+  assert.deepEqual(CONFLICT_KINDS.map(kind => [kind.id, kind.variants]), [['conflict', ['c1']], ['memory', ['m2', 'm3']]]);
+  assert.deepEqual(LADDER.flat().filter(variant => !variant.startsWith('t')), [], 'the adjacent-rung ladder stays on the t variants');
+
+  // On demo-house-c the codex configuration also ran m2 (one of three contested probes
+  // followed the evidence) and m3 (both did): object mean (1/3 + 1) / 2 = 2/3.
+  const memory = [
+    { system: 'codex', model: 'gpt-demo', effort: 'high', batch: 'demo-codex', object: 'demo-house-c', variant: 'm2', attempt: 1, score: 45, contested: ['primary', 'alternate', 'alternate'] },
+    { system: 'codex', model: 'gpt-demo', effort: 'high', batch: 'demo-codex', object: 'demo-house-c', variant: 'm3', attempt: 1, score: 70, contested: ['primary', 'primary'] },
+  ];
+  await withData({ attempts: [...SAMPLE_ATTEMPTS, ...memory] }, async (dataRoot, info, root) => {
+    const board = await aggregate({ dataRoot, outFile: null, now: NOW });
+    const codex = board.entries.find(entry => entry.key === CODEX), claude = board.entries.find(entry => entry.key === CLAUDE);
+    near(codex.memory.mean, 2 / 3);
+    assert.deepEqual(codex.memory.probes, { primary: 3, alternate: 2, neither: 0 });
+    assert.deepEqual([codex.memory.memory_attempts, codex.memory.failed_attempts, codex.memory.objects, codex.memory.variants], [2, 0, 1, ['m2', 'm3']]);
+    // The conflict task is reported as before, untouched by the memory attempts.
+    near(codex.conflict.mean, 2 / 3);
+    assert.deepEqual(codex.conflict.probes, { primary: 2, alternate: 1, neither: 0 });
+    assert.equal(codex.conflict.c1_attempts, 1);
+    assert.equal(claude.memory.mean, null, 'no memory task run: not evaluated');
+    assert.match(board.method.memory, /closer to the surveyed object the evidence shows than to the structure as published/);
+    // Evidence deltas: m3 - m2 is paired, no m variant with a t or c1 variant.
+    const set = board.sets[0];
+    assert.deepEqual(set.variants, ['t1', 't2', 'c1', 'm2', 'm3']);
+    assert.deepEqual(set.variant_pairs, ['t2-t1', 'c1-t1', 'c1-t2', 'm3-m2']);
+    near(codex.evidence_deltas['m3-m2'].mean, 25);
+
+    const outDir = join(root, 'site');
+    await writeReport({ dataRoot, outDir, size: 64, now: NOW });
+    const index = await readFile(join(outDir, 'index.html'), 'utf8');
+    assert.match(index, /<th class="num" title="memory tasks: share of contested probes closer to the surveyed object[^"]*">Memory<\/th>/);
+    assert.match(index, /<strong>Memory<\/strong>: on m2 \/ m3 tasks/);
+    assert.match(index, /m3 &minus; m2 is what scaled drawings add on a named landmark/);
+    const markdown = await readFile(join(outDir, 'summary.md'), 'utf8');
+    assert.match(markdown, /\| Configuration \| Conflict \(closer to photographed\) \| Memory \(closer to the evidence\) \| Frame offset/);
+    assert.match(markdown, /\| codex \/ gpt-demo \/ high \| 67% \(no interval\) † \| 67% \(no interval\) † \|/);
+    assert.match(markdown, /Memory: on m2 \/ m3 tasks/);
+    const m2 = await readFile(join(outDir, 'tasks', 'demo-house-c-m2.html'), 'utf8');
+    assert.match(m2, /<h2>Memory: the evidence against the published figures<\/h2>/);
+    assert.match(m2, /<code>remembered<\/code>: The remembered state is the structure as published/);
+    assert.match(m2, /Memory <small>closer to the evidence<\/small><\/th><td class="num">33%/);
+    assert.match(m2, /<th class="num">Surveyed <small>evidence<\/small><\/th><th class="num">Published <small>memory<\/small><\/th>/);
+    assert.match(m2, /class="good">primary \(evidence\)<\/td>/);
+    assert.match(m2, /class="bad">alternate \(memory\)<\/td>/);
+    assert.ok(!/Conflict: out-of-date evidence/.test(m2));
+    // The c1 page keeps the conflict wording.
+    const c1 = await readFile(join(outDir, 'tasks', 'demo-house-a-c1.html'), 'utf8');
+    assert.match(c1, /<h2>Conflict: out-of-date evidence<\/h2>/);
+    assert.match(c1, /Conflict <small>closer to primary<\/small><\/th><td class="num">67%/);
+  });
+  // A set without memory tasks shows no Memory column.
+  await withData({ withModels: false, withInputs: false }, async (dataRoot, info, root) => {
+    await writeReport({ dataRoot, outDir: join(root, 'site'), size: 48, now: NOW });
+    assert.ok(!/>Memory<\/th>/.test(await readFile(join(root, 'site', 'index.html'), 'utf8')));
+    assert.ok(!/Memory \(closer/.test(await readFile(join(root, 'site', 'summary.md'), 'utf8')));
   });
 });
