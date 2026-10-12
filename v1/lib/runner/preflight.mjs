@@ -608,7 +608,12 @@ export async function evaluateCodexAgent({ site, events, stderr, before, codeMod
   const tools = Array.isArray(report?.tools) ? report.tools.map(String) : null;
   if (!tools) add('tool-list', 'not_evaluated', 'model did not list its tools');
   else {
-    const forbidden = tools.filter(name => /agent|spawn|web|search|browser|mcp|image_gen|computer|fetch/i.test(name));
+    // Codex 0.162 lists tools.list_mcp_resources, tools.list_mcp_resource_templates
+    // and tools.read_mcp_resource even with no MCP server configured (the
+    // session ignores user config and sets none); they have nothing to reach,
+    // so they are not a surface. Anything else that names MCP still is.
+    const inert = /^tools\.(list_mcp_resources|list_mcp_resource_templates|read_mcp_resource)$/;
+    const forbidden = tools.filter(name => !inert.test(name) && /agent|spawn|web|search|browser|mcp|image_gen|computer|fetch/i.test(name));
     forbidden.length ? add('tool-list', 'fail', 'forbidden tools offered: ' + forbidden.join(', '), tools) : add('tool-list', 'pass', null, tools);
   }
   const codeMode = codeModeExpected || (tools ?? []).some(name => /(^|\.)exec$/.test(name));
