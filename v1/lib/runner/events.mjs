@@ -167,7 +167,12 @@ export function parseGrokEvents(events) {
 }
 // Built-in plugins that load even in safe mode; they add no tools (checked via
 // the init event, which lists the tool set after plugins have registered).
-export const CLAUDE_BUILTIN_PLUGINS = ['cc-plugin-agents-md', 'cc-plugin-telemetry'];
+// A newer CLI that ships a new built-in fails `agent:tool-surface` until the
+// plugin is reviewed and listed here; the manifest and the report record the
+// CLI version, so batches on different CLIs are flagged either way.
+//   cc-plugin-plugin-authoring (CLI 2.1.288+): a skill for writing Claude Code
+//   extensions; a skill description in the system prompt, no tools, no network.
+export const CLAUDE_BUILTIN_PLUGINS = ['cc-plugin-agents-md', 'cc-plugin-telemetry', 'cc-plugin-plugin-authoring'];
 
 // Problems with the tool surface a finished session actually used or was given.
 export function toolSurfaceProblems(system, summary) {
