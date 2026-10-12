@@ -612,7 +612,8 @@ export async function evaluateCodexAgent({ site, events, stderr, before, codeMod
     // and tools.read_mcp_resource even with no MCP server configured (the
     // session ignores user config and sets none); they have nothing to reach,
     // so they are not a surface. Anything else that names MCP still is.
-    const inert = /^tools\.(list_mcp_resources|list_mcp_resource_templates|read_mcp_resource)$/;
+    // (models report the names with or without the `tools.` namespace)
+    const inert = /^(tools\.)?(list_mcp_resources|list_mcp_resource_templates|read_mcp_resource)$/;
     const forbidden = tools.filter(name => !inert.test(name) && /agent|spawn|web|search|browser|mcp|image_gen|computer|fetch/i.test(name));
     forbidden.length ? add('tool-list', 'fail', 'forbidden tools offered: ' + forbidden.join(', '), tools) : add('tool-list', 'pass', null, tools);
   }
