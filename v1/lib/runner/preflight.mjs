@@ -488,13 +488,15 @@ export async function grokContextCheck({ grokHome, events }) {
     try { context = JSON.parse(await readFile(candidate, 'utf8')); path = candidate; break; } catch {}
   }
   if (!context) { check.reason = 'no prompt_context.json for session ' + sessionId + ' under ' + sessions; return check; }
-  const observed = { agents_md_files: context.agents_md_files ?? null, persona_summaries: context.persona_summaries ?? null,
-    memory_enabled: context.memory_enabled ?? null, memory_v2_enabled: context.memory_v2_enabled ?? null };
+  // Every memory flag Grok writes must be false (1.0.46 wrote memory_enabled
+  // and memory_v2_enabled; 1.0.50 only memory_v2_enabled); none at all fails.
+  const memory = Object.fromEntries(Object.entries(context).filter(([key]) => /memory/i.test(key)));
+  const observed = { agents_md_files: context.agents_md_files ?? null, persona_summaries: context.persona_summaries ?? null, memory };
   check.observed = { ...observed, file: path };
   const problems = [];
   if (!Array.isArray(observed.agents_md_files) || observed.agents_md_files.length) problems.push('instruction files ' + JSON.stringify(observed.agents_md_files));
   if (!Array.isArray(observed.persona_summaries) || observed.persona_summaries.length) problems.push('personas ' + JSON.stringify(observed.persona_summaries));
-  if (observed.memory_enabled !== false || observed.memory_v2_enabled !== false) problems.push('memory ' + observed.memory_enabled + '/' + observed.memory_v2_enabled);
+  if (!Object.keys(memory).length || Object.values(memory).some(value => value !== false)) problems.push('memory ' + JSON.stringify(memory));
   if (problems.length) { check.status = 'fail'; check.reason = 'Grok gave the model ' + problems.join('; '); }
   else check.status = 'pass';
   return check;

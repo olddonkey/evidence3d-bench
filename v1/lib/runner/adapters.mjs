@@ -1,4 +1,4 @@
-import { realpath, stat, readFile, mkdir, rm, chmod, mkdtemp } from 'node:fs/promises';
+import { realpath, stat, readFile, mkdir, rm, chmod, mkdtemp, readdir } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -26,7 +26,13 @@ async function existing(paths) {
 export async function nodeRuntime(nodePath = process.execPath) {
   const path = await realpath(nodePath), roots = [dirname(dirname(path))];
   for (const brew of ['/opt/homebrew', '/usr/local']) {
-    if (path.startsWith(brew + '/')) roots.push(...await existing([brew + '/Cellar', brew + '/opt', brew + '/etc/openssl@3', brew + '/etc/ca-certificates']));
+    // Node reads the OpenSSL configuration of whichever OpenSSL keg it links
+    // (`openssl@3` until node 26.10, `openssl@4` from 26.11), so every
+    // installed `etc/openssl@*` directory is readable, not one fixed version.
+    if (path.startsWith(brew + '/')) {
+      const opensslDirs = (await readdir(brew + '/etc').catch(() => [])).filter(name => /^openssl@\d+$/.test(name)).map(name => brew + '/etc/' + name);
+      roots.push(...await existing([brew + '/Cellar', brew + '/opt', ...opensslDirs, brew + '/etc/ca-certificates']));
+    }
   }
   return { path, bin: dirname(path), version: process.version, read_roots: [...new Set(roots)] };
 }

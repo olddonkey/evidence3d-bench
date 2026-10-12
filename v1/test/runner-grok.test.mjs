@@ -657,7 +657,7 @@ test('preflight\'s grok evaluation, replayed on the passing live session: every 
   assert.equal((await grokContextCheck({ grokHome, events })).status, 'pass');
   await writeFile(join(record, 'prompt_context.json'), JSON.stringify({ ...context, agents_md_files: [join(site.root, 'AGENTS.md')], memory_enabled: true }));
   const loaded = await grokContextCheck({ grokHome, events });
-  assert.deepEqual([loaded.status, loaded.reason], ['fail', 'Grok gave the model instruction files ["' + join(site.root, 'AGENTS.md') + '"]; memory true/false']);
+  assert.deepEqual([loaded.status, loaded.reason], ['fail', 'Grok gave the model instruction files ["' + join(site.root, 'AGENTS.md') + '"]; memory {"memory_enabled":true,"memory_v2_enabled":false}']);
   assert.equal((await grokContextCheck({ grokHome, events: events.slice(1) })).reason, 'the session named no session id');
 
   // Variations on the same session, each judged on what came back or what is on disk.
