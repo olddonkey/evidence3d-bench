@@ -1,86 +1,117 @@
-# Evidence3D v1 — round 3 results (without Grok)
+# Evidence3D v1 — round 3 results
 
-State on 2026-10-07. Everything in this document is scored by scorer 1.1.0 on
-the private sets; nothing in the scorer, generator or runner was changed after
-the first test results (`docs/V1-TEST.md`). The Grok Build configurations are
-still running (their account's usage balance ran out on 2026-10-06; the batches
-resume when it is restored) and are reported separately at the end as partial.
+State on 2026-10-20. Everything here is scored by scorer 1.1.0 on the private
+sets; nothing in the scorer or generator was changed after the first test
+results (`docs/V1-TEST.md`). The runner changed four times for toolchain drift
+(§8); none of those changes touches prompts, budgets or scoring.
 
 What this round added, in order: the single-photo and photos-plus-drawings
 variants (`t1`, `t3`) on the test set, so the evidence ladder is complete;
-memory tasks (`m2`, `m3`: named landmarks whose surveyed proportions differ
-from their published figures); a real-building tier (`r2`, `r4`: real
-photographs, truth authored from the building's own measured drawings), now
-two objects; a blind human-agreement study kit (ratings not yet collected); a
-uniform API harness (mock-tested only, no keys); and a Grok Build system.
-Freezes: v1.2 = `bc8490d`, v1.2.1 = `61e22c3`, second real object `8795bbb`.
+memory tasks (`m2`, `m3`); a real-building tier (`r2`, `r4`), two objects; a
+blind human-agreement study kit (14 of 110 ratings so far); a uniform API
+harness (mock-tested only); a Grok Build system; a re-test of Opus nine days
+apart; and the same models at their top reasoning effort, which turned out to
+matter as much as the gaps between models.
 
-Reports: `.local/v1/reports/round3-test`, `round3-mr`, `round3-grok-partial`
-(`summary.md` and `index.html` in each).
+Reports: `.local/v1/reports/test-final` (test set, every batch),
+`mr-final` (memory and real), and the per-pass reports named in the text
+(`summary.md` and `index.html` in each). Decisions taken before the data they
+could bias: `.local/v1/scratch/orchestrator/round3/DECISIONS.md`.
 
-## 1. Test set, the full evidence ladder
+Every configuration is `client / model / effort`. The effort is the reasoning
+level passed to the client; `high` is each client's default and is not the
+same amount of thinking across vendors (Codex: low … max, ultra; Claude Code:
+low … max; Grok: low … xhigh). Haiku ran with no effort flag.
 
-Set `test-2026-10`: 24 objects × 5 variants = 120 tasks, 768 attempts
-(Astra and Opus 3 attempts on t2/t4/c1 and 1 on t1/t3; Luna and Haiku 1 on
-every task). Headline = (shape + detail) / 2, mean over objects, 95 % bootstrap
-interval over objects.
+## 1. Test set
 
-| # | Configuration | Score | t1 one photo | t2 photos + aerial | t3 + drawings | t4 + notes | c1 stale drawings | Shape | Detail |
-|---|---|---|---|---|---|---|---|---|---|
-| 1 | Codex / gpt-6-astra / high | **71.0** [69.2, 72.6] | 52.3 | 59.5 | 82.3 | 82.1 | 78.8 | 86.9 | 54.9 |
-| 2 | Claude Code / claude-opus-5-5 / high | **65.0** [62.9, 66.9] | 46.7 | 51.1 | 78.5 | 78.7 | 69.9 | 81.4 | 48.4 |
-| 3 | Codex / gpt-5.6-luna / high | **39.2** [35.8, 42.5] | 31.2 | 31.2 | 44.5 | 48.6 | 40.5 | 57.4 | 20.9 |
-| 4 | Claude Code / claude-haiku-4-5 | **23.8** [20.7, 26.9] | 23.1 | 22.8 | 23.8 | 29.2 | 20.0 | 35.5 | 12.0 |
+Set `test-2026-10`: 24 objects, 5 variants. Headline = (shape + detail) / 2,
+mean over objects, 95 % bootstrap interval over objects. Two headlines are
+shown because not every configuration ran every variant: the three-variant
+mean (t2/t4/c1, which every configuration ran) and the five-variant mean
+(adds t1 and t3, the hardest and the easiest). Attempts per task: 3 on
+t2/t4/c1 for every configuration above Luna, 1 for Luna, Haiku, gpt-6-sol and
+the normal-mode Grok models; 1 on t1/t3 for everyone who ran them.
 
-All six pairs are separated (both intervals exclude zero, every object won):
-Astra − Opus +6.0 [+4.6, +7.4] (24/24 objects), Opus − Luna +25.8,
-Luna − Haiku +15.4. The 5-variant headline differs from the 3-variant one in
-`V1-TEST.md` (73.4 / 66.5 / 40.1 / 24.0) only because t1 and t3 are now in
-the mean.
+| # | Configuration | 3-variant | 5-variant | t1 one photo | t2 photos + aerial | t3 + drawings | t4 + notes | c1 stale drawings | Shape | Detail |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | Codex / gpt-6-astra / **max** | **79.2** [77.5, 80.9] | — | — | 69.5 | — | 85.4 | 82.7 | 91.4 | 67.0 |
+| 2 | Codex / gpt-6.1-sol / **max** | **77.2** [75.6, 78.8] | — | — | 69.0 | — | 82.9 | 79.6 | 90.9 | 63.4 |
+| 3 | Codex / gpt-6-astra / high | **73.5** | 71.0 [69.2, 72.6] | 52.3 | 59.5 | 82.3 | 82.1 | 78.8 | 86.9 | 54.9 |
+| 4 | Codex / gpt-6.1-sol / high | **72.4** [71.2, 73.7] | — | — | 61.1 | — | 81.4 | 74.8 | 87.5 | 57.4 |
+| 5 | Claude Code / claude-opus-5-5 / **max** | **71.5** [69.4, 73.7] | — | — | 57.2 | — | 83.1 | 74.3 | 86.0 | 57.1 |
+| 6 | Claude Code / claude-opus-5-5 / high | **66.6** | 65.0 [62.9, 66.9] | 46.7 | 51.1 | 78.5 | 78.7 | 69.9 | 81.4 | 48.4 |
+| 7 | Codex / gpt-6-sol / high | **53.2** [50.4, 56.3] | — | — | 37.3 | — | 67.0 | 55.4 | 70.0 | 36.5 |
+| 8 | Grok Build / grok-4.7-build-fast / high | **53.1** | 52.1 [49.5, 54.6] | 34.2 | 36.8 | 67.3 | 67.4 | 55.0 | 70.3 | 34.1 |
+| 9 | Grok Build / grok-4.6 / high | **50.5** | 49.9 † | 35.3 † | 36.1 | 62.7 † | 63.0 | 52.5 | 67.6 | 32.3 |
+| 10 | Grok Build / grok-4.7 / high | **49.6** [44.6, 54.5] | — | — | 36.7 | — | 60.0 | 52.2 | 65.5 | 33.7 |
+| 11 | Codex / gpt-5.6-luna / high | **40.1** | 39.2 [35.8, 42.5] | 31.2 | 31.2 | 44.5 | 48.6 | 40.5 | 57.4 | 20.9 |
+| 12 | Claude Code / claude-haiku-4-5 | **24.0** | 23.8 [20.7, 26.9] | 23.1 | 22.8 | 23.8 | 29.2 | 20.0 | 35.5 | 12.0 |
 
-Noise. Between attempts on one task SD 4.7 (288 df); between objects SD 6.5;
-paired per-object difference Astra − Opus SD 3.5, so a true difference of
-2.1 points would be detected with 80 % power on these 24 objects, and attempt
-noise is 42 % of that pair's variance (it was 19 % with t2/t4/c1 only: the
-single-attempt t1/t3 tasks add noise).
+† grok-4.6's t1/t3 pass stopped at 21 of 48 tasks (§4); its five-variant
+figures are provisional. The first-pass intervals of rows 3 and 6 are in
+`docs/V1-TEST.md` (73.4 [72.0, 74.8] and 66.5 [64.3, 68.8]).
 
-What the evidence buys (paired by object, t-intervals exclude zero unless noted):
+Pairwise, objects paired (bootstrap interval; "separated" = both intervals
+exclude zero):
 
-| Configuration | second photo set + aerial (t2 − t1) | scaled drawings (t3 − t2) | survey notes on top (t4 − t3) | stale drawings (c1 − t3) |
+| A | B | A − B | Won / lost | Verdict |
 |---|---|---|---|---|
-| Astra | +7.2 | **+22.8** | −0.2 (none) | −3.5 |
-| Opus | +4.4 (not separated) | **+27.4** | +0.2 (none) | −8.6 |
-| Luna | 0.0 (none) | +13.4 | +4.1 | −4.1 |
-| Haiku | −0.3 (none) | +1.0 (none) | +5.4 (not separated) | −3.8 (not separated) |
+| Astra max | gpt-6.1-sol max | +2.0 [+0.7, +3.4] | 16 / 8 | separated, barely |
+| Astra max | Astra high | +5.7 [+4.2, +7.1] | 23 / 1 | separated |
+| gpt-6.1-sol max | gpt-6.1-sol high | +4.7 [+3.2, +5.9] | 23 / 1 | separated |
+| gpt-6.1-sol max | Opus max | +5.6 [+3.7, +7.5] | 20 / 4 | separated |
+| Astra high | gpt-6.1-sol high | +1.0 [−0.2, +2.2] | 17 / 7 | not separated |
+| gpt-6.1-sol high | Opus max | +0.9 [−0.7, +2.5] | 15 / 9 | not separated |
+| Astra high | Opus max | +1.9 [+0.2, +3.6] | 14 / 10 | separated, barely |
+| Opus max | Opus high | +5.0 [+3.8, +6.2] | 23 / 1 | separated |
+| Astra high | Opus high | +6.0 [+4.6, +7.4] | 24 / 0 | separated |
+| Opus high | gpt-6-sol high | +13.3 [+10.6, +16.2] | 24 / 0 | separated |
+| Opus high | grok-4.7 fast high | +13.0 [+11.0, +15.2] | 24 / 0 | separated |
+| grok-4.7 fast | grok-4.6 | +3.0 [+0.4, +5.6] | 16 / 8 | separated, barely |
+| Opus high | Luna high | +25.8 [+22.5, +29.2] | 24 / 0 | separated |
+| Luna high | Haiku | +15.4 [+13.1, +17.9] | 24 / 0 | separated |
 
-The scaled drawings carry almost the whole gain for the two strong models;
-the notes add nothing on top of them. Luna still gains from the notes
-(reads numbers better than drawings); Haiku gains little from either.
+Noise: between attempts on one task SD 4.6–5.1 for the three-attempt
+configurations; between objects SD 3.7–5.7; the paired per-object difference
+between two strong configurations SD 3.5–4.4, so a true difference of about
+2–2.5 points is detectable with 80 % power on these 24 objects, and the
+differences inside the top five are at that limit.
 
-By archetype (3 objects each): Astra 67.5–74.3, Opus 59.4–70.4 (lowest on
-towers and civic), Luna 29.5–50.6, Haiku 14.7–34.8. Conflict tasks: the share
-of contested probes closer to the photographed state is Astra 93 %, Opus 77 %,
-Luna 33 %, Haiku 17 %. Frame offset 2.2 / 2.3 / 5.9 / 12.2 % of the diagonal;
-metric scale error 0.3 / 0.6 / 2.0 / 7.7 %.
+What the evidence buys (Astra high / Opus high, paired by object): the
+scaled drawings +22.8 / +27.4; the second photo set and aerial +7.2 / +4.4;
+the survey notes on top of drawings −0.2 / +0.2 (nothing); stale drawings
+−3.5 / −8.6 against current ones. Luna still gains +4.1 from the notes;
+Haiku gains little from anything. Effort buys most where the evidence is
+thinnest: on t2 (photos only) Astra goes 59.5 → 69.5 and gpt-6.1-sol
+61.1 → 69.0 between high and max; on t4 the gains are 3 and 1.5.
+
+Conflict tasks (share of contested probes closer to the photographed state):
+Astra max 95 %, gpt-6.1-sol max 93 %, Astra high 93 %, gpt-6.1-sol high 84 %,
+Opus max 83 %, Opus high 77 %, grok-4.6 44 %, gpt-6-sol 38 %, grok-4.7 38 %,
+grok-4.7 fast 36 %, Luna 33 %, Haiku 17 %. Frame offset 1.7–2.3 % of the
+diagonal for the top six, 12 % for Haiku; metric scale error 0.2–0.6 % for the
+top six, 7.7 % for Haiku.
 
 ## 2. Memory tasks
 
 Set `memory-2026-10`: four named landmarks (triumphal arch, clock tower,
 memorial with colonnade, obelisk), each a seeded twin of the real building
 with proportions changed; `m2` = photographs + aerial, `m3` = + scaled
-drawings. Astra and Opus 3 attempts, Luna and Haiku 1.
+drawings. Astra and Opus 3 attempts, Luna and Haiku 1; grok-4.7 fast ran 16 of
+its 36 attempts before its balance ran out (partial).
 
 | Configuration | Score | m2 | m3 | contested probes closer to the evidence than to the published building |
 |---|---|---|---|---|
-| Astra | **88.1** [85.2, 91.0] | 81.7 | 94.5 | 96 % |
-| Opus | **76.5** [73.9, 79.1] | 60.3 | 92.7 | 82 % |
-| Luna | **52.9** [42.8, 65.1] | 43.3 | 62.4 | 49 % |
+| Astra high | **88.1** [85.2, 91.0] | 81.7 | 94.5 | 96 % |
+| Opus high | **76.5** [73.9, 79.1] | 60.3 | 92.7 | 82 % |
+| grok-4.7 fast high (partial) | 68.7 | 51.6 | 85.8 | 72 % |
+| Luna high | **52.9** [42.8, 65.1] | 43.3 | 62.4 | 49 % |
 | Haiku | **36.1** [27.0, 46.9] | 35.6 | 36.6 | 8 % |
 
-Astra − Opus +11.6 [+6.9, +15.3], 4/4 objects, separated; the gap is almost
-entirely in `m2` (21 points), and closes to 2 once drawings are given. Haiku
-built the remembered building 92 % of the time. Four objects only; the
-intervals are wide.
+Astra − Opus +11.6 [+6.9, +15.3], 4/4 objects; the gap is almost entirely in
+`m2` (21 points) and closes to 2 once drawings are given. Haiku built the
+remembered building 92 % of the time. Four objects only.
 
 ## 3. Real buildings
 
@@ -91,56 +122,112 @@ and a current aerial). `r2` = photographs (+ aerial), `r4` = + survey notes.
 
 | Configuration | Score (2 objects) | restaurant | library |
 |---|---|---|---|
-| Astra | 50.9 | 70.3 | 31.5 |
-| Opus | 47.7 | 64.3 | 31.1 |
-| Luna | 30.4 | 40.9 | 20.0 |
+| Astra high | 50.9 | 70.3 | 31.5 |
+| Opus high | 47.7 | 64.3 | 31.1 |
+| Luna high | 30.4 | 40.9 | 20.0 |
 | Haiku | 27.0 | 41.8 | 12.1 |
 
-Same order as the synthetic set; with two objects no pair is settled. The
-library is much harder: only the front and roof are evidenced, the building
-is large, symmetric and dense in detail. A third candidate (a house with
-planning drawings) was dropped because no sheet of its application draws the
-face the street photographs show (`.local/v1/real-sources/kingsfold-8/NOTES.md`).
+Same order as the synthetic set; with two objects no pair is settled. A third
+candidate (a house with planning drawings) was dropped because no sheet of
+its application draws the face the street photographs show
+(`.local/v1/real-sources/kingsfold-8/NOTES.md`). Grok's real-building
+attempts did not run before the balance ran out.
 
-## 4. Grok Build, partial
+## 4. Grok Build
 
 Grok runs under the same prompt, wall-clock budget and a boundary that passes
 the unchanged isolation preflight (`v1/lib/runner/README.md`, `### grok`).
 The owner asked for the fast model; only grok-4.7 has one
-(`grok-4.7-build-fast`, "2× the price"). State when the balance ran out:
-grok-4.7 normal 72/72 tasks (one pass, 30 of them at the 30-minute limit);
-grok-4.6 69/72; grok-4.7 fast 62/72 first pass and 57/144 of its second and
-third. Means below are over the objects each configuration has; the paired
-columns use only objects both ran.
+(`grok-4.7-build-fast`, "2× the price"). The account's usage balance ran out
+twice (2026-10-06 and 2026-10-12); what finished: grok-4.7 normal, one pass
+(30 of 72 attempts at the 30-minute limit); grok-4.6, one pass on t2/t4/c1 and
+21 of 48 t1/t3 tasks; grok-4.7 fast, three attempts on t2/t4/c1 but for two of
+the 144 extra attempts, t1/t3 complete, and 16 of 36 memory-and-real attempts.
+Grok's batches were also the ones caught by a node upgrade (§8).
 
-| Configuration | Score | objects | Astra − it | Opus − it | median wall | at limit | median cost (Grok's accounting) |
-|---|---|---|---|---|---|---|---|
-| grok-4.7-build-fast | 53.6 [50.1, 56.9] | 20 | +19.1 (20/20) | +12.5 (20/20) | 1105 s | 7 / 113 | $2.31 |
-| grok-4.6 | 50.1 [45.9, 54.0] | 23 | +22.7 (23/23) | +15.5 (23/23) | 1600 s | 12 / 67 | $0.88 |
-| grok-4.7 | 49.6 [44.6, 54.5] | 24 | +23.8 (24/24) | +16.9 (23/24) | 1757 s | 30 / 72 | $1.16 |
+Both Grok models sit between Opus high and Luna, well apart from both. The
+fast model shortens attempts by about a third (median 1105–1350 s against
+1600–1757 s) and halves the time-outs, and is 3.0 [+0.4, +5.6] points ahead of
+grok-4.6 at the same effort; against grok-4.7 normal the fast model's
+advantage is 3.5 points on the same tasks, within noise. Median cost as Grok
+accounts it: $1.16 (4.7), $0.88 (4.6), $2.31–2.44 (fast) per attempt.
 
-Both Grok models sit between Opus and Luna, well apart from both. Contested
-probes closer to the photographed state: 38–48 %. The fast model shortens
-attempts by about a third and halves the time-outs but, on the objects run so
-far, scores about the same as normal mode; the paired comparison waits for the
-complete pass. Still to run: the remaining first-pass tasks, the fast model's
-two extra attempts, `t1`/`t3` and the memory and real tasks for grok-4.6 and
-the fast model.
+## 5. Effort: the same model at high and at max
 
-## 5. Not done
+| Model | high | max | max − high | won / lost |
+|---|---|---|---|---|
+| Codex / gpt-6-astra | 73.5 | 79.2 | +5.7 [+4.2, +7.1] | 23 / 1 |
+| Codex / gpt-6.1-sol | 72.4 | 77.2 | +4.7 [+3.2, +5.9] | 23 / 1 |
+| Claude Code / claude-opus-5-5 | 66.6 | 71.5 | +5.0 [+3.8, +6.2] | 23 / 1 |
 
-- Human agreement: the blind study (110 pairs, `v1/scripts/study.mjs`) has 6
-  ratings. The headline's agreement with a human judge is still unverified.
-- Model-only comparison: the API harness (`api-anthropic`, `api-openai`) is
-  tested on mock servers only; without keys every row above is model + CLI.
+Five points for every model, almost every object, and the gain is largest on
+the photos-only variant. Five points is also the size of the gap between
+Astra high and Opus high, so a ladder that mixes effort levels is not a model
+ladder. Two ladders are therefore reported: at each client's default (`high`),
+Astra > gpt-6.1-sol ≈ Opus max > Opus; at the top level each client was asked
+for, Astra max > gpt-6.1-sol max > Opus max, with the first gap barely
+separated and the second clear. Codex's `ultra` level and Grok's `xhigh` were
+not run.
+
+## 6. gpt-6.1-sol and gpt-6-sol
+
+gpt-6.1-sol at high is statistically tied with Astra high (−1.0, 7 won / 17
+lost but the interval crosses zero) and ahead of Opus high by 5.9; it is the
+best configuration on photos only (t2 61.1) and the weakest of the top four on
+stale drawings (c1 74.8). gpt-6-sol at high scores 53.2, with the Grok models:
+13 points behind Opus high on every object, 38 % on conflict probes. Both ran
+on codex-cli 0.162.1, Astra and Luna on 0.159.2 (the report flags the
+difference; §7 shows it does not matter for Opus and nothing suggests it
+matters for Codex).
+
+## 7. Opus re-test
+
+The owner suspected the model behind the API had changed. Opus high was run
+again on the 72 main tasks nine days after the first run (CLI 2.1.296 instead
+of 2.1.285, one attempt against the original three): paired difference
+new − old = −0.59 points, bootstrap 95 % over objects [−1.87, +0.66], 10 of 24
+objects higher; by variant t2 +1.8, t4 −1.3, c1 −2.3; shape −0.4, detail
+−0.8; median wall 232 s against 249 s. Within the between-attempt noise: no
+evidence of a change. (`reports/retest-opus`, script in DECISIONS.md.)
+
+## 8. Toolchain drift and the runner changes
+
+Between runs the machine's tools moved under the benchmark four times, and
+each time a frozen check failed closed, as designed, with no way to accept a
+reviewed change. That was a design gap and is now handled by small, visible
+allowlists rather than refusals:
+
+- v1.2.2 `1a2dcf3`: Claude Code 2.1.288+ ships a built-in `plugin-authoring`
+  plugin (a skill description, no tools); `CLAUDE_BUILTIN_PLUGINS` lists
+  reviewed built-ins. The pinned CLI 2.1.285 had been auto-removed.
+- v1.2.3 `da2655d`: Homebrew replaced node 26.10 with 26.11, which links
+  `openssl@4`; the sandbox profile now allows every installed
+  `etc/openssl@*`. Grok 1.0.50 dropped `memory_enabled` from its context file;
+  the check now requires every memory flag present to be false. Frozen Grok
+  batches on the old node can never resume; their remaining slots ran as new
+  batches, which the report merges and flags.
+- v1.2.4 `03b0250` and `8cc44c7`: codex-cli 0.162 offers three MCP-resource
+  tools even with MCP off; the tool-list check accepts exactly those names.
+
+The report flags every configuration whose batches differ in CLI version or
+binary, runtime or runner; the Opus re-test (§7) is the measurement of what
+such a difference costs: nothing detectable. Lesson recorded: after any gap,
+expect to re-freeze.
+
+## 9. Not done
+
+- Human agreement: 14 of 110 blind ratings. The headline's agreement with a
+  human judge is still unverified.
+- Model-only comparison: the API harness is tested on mock servers only;
+  every row above is model + client.
 - Real buildings: two objects give an order, not intervals.
+- Grok: the remainders listed in §4, when the balance returns.
+- Effort: Codex `ultra` and Grok `xhigh` not run.
 
 ## Files
 
-- `docs/V1.md` (what v1 is), `docs/V1-PILOT.md`, `docs/V1-TEST.md` (first test
-  results, 3 variants), this document.
+- `docs/V1.md`, `docs/V1-PILOT.md`, `docs/V1-TEST.md` (first test results),
+  this document.
 - `v1/lib/generator/landmarks/`, `v1/real/mcd-homestead/`,
-  `v1/real/green-library/` (truth authoring with PROVENANCE), `v1/lib/study/`,
-  `v1/lib/runner/` (systems codex, claude-code, api-*, grok).
-- Decisions taken before the data they could bias:
-  `.local/v1/scratch/orchestrator/round3/DECISIONS.md`.
+  `v1/real/green-library/`, `v1/lib/study/`, `v1/lib/runner/`.
+- `.local/v1/scratch/orchestrator/round3/DECISIONS.md`.
