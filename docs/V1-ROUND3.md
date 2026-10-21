@@ -1,6 +1,6 @@
 # Evidence3D v1 — round 3 results
 
-State on 2026-10-20. Everything here is scored by scorer 1.1.0 on the private
+State on 2026-10-21. Everything here is scored by scorer 1.1.0 on the private
 sets; nothing in the scorer or generator was changed after the first test
 results (`docs/V1-TEST.md`). The runner changed four times for toolchain drift
 (§8); none of those changes touches prompts, budgets or scoring.
@@ -43,14 +43,14 @@ the normal-mode Grok models; 1 on t1/t3 for everyone who ran them.
 | 6 | Claude Code / claude-opus-5-5 / high | **66.6** | 65.0 [62.9, 66.9] | 46.7 | 51.1 | 78.5 | 78.7 | 69.9 | 81.4 | 48.4 |
 | 7 | Codex / gpt-6-sol / high | **53.2** [50.4, 56.3] | — | — | 37.3 | — | 67.0 | 55.4 | 70.0 | 36.5 |
 | 8 | Grok Build / grok-4.7-build-fast / high | **53.1** | 52.1 [49.5, 54.6] | 34.2 | 36.8 | 67.3 | 67.4 | 55.0 | 70.3 | 34.1 |
-| 9 | Grok Build / grok-4.6 / high | **50.5** | 49.9 † | 35.3 † | 36.1 | 62.7 † | 63.0 | 52.5 | 67.6 | 32.3 |
-| 10 | Grok Build / grok-4.7 / high | **49.6** [44.6, 54.5] | — | — | 36.7 | — | 60.0 | 52.2 | 65.5 | 33.7 |
+| 9 | Grok Build / grok-4.6 / high | **50.5** | 49.9 [46.7, 52.9] | 36.3 | 36.1 | 61.4 | 63.0 | 52.5 | 68.2 | 31.6 |
+| 10 | Grok Build / grok-4.7 / high | **49.6** [44.6, 54.5] | 47.7 [43.5, 51.8] | 31.7 | 36.7 | 58.0 | 60.0 | 52.2 | 64.7 | 30.6 |
 | 11 | Codex / gpt-5.6-luna / high | **40.1** | 39.2 [35.8, 42.5] | 31.2 | 31.2 | 44.5 | 48.6 | 40.5 | 57.4 | 20.9 |
 | 12 | Claude Code / claude-haiku-4-5 | **24.0** | 23.8 [20.7, 26.9] | 23.1 | 22.8 | 23.8 | 29.2 | 20.0 | 35.5 | 12.0 |
 
-† grok-4.6's t1/t3 pass stopped at 21 of 48 tasks (§4); its five-variant
-figures are provisional. The first-pass intervals of rows 3 and 6 are in
-`docs/V1-TEST.md` (73.4 [72.0, 74.8] and 66.5 [64.3, 68.8]).
+The first-pass intervals of rows 3 and 6 are in `docs/V1-TEST.md`
+(73.4 [72.0, 74.8] and 66.5 [64.3, 68.8]). Shape and detail are over the
+variants each configuration ran.
 
 Pairwise, objects paired (bootstrap interval; "separated" = both intervals
 exclude zero):
@@ -68,7 +68,10 @@ exclude zero):
 | Astra high | Opus high | +6.0 [+4.6, +7.4] | 24 / 0 | separated |
 | Opus high | gpt-6-sol high | +13.3 [+10.6, +16.2] | 24 / 0 | separated |
 | Opus high | grok-4.7 fast high | +13.0 [+11.0, +15.2] | 24 / 0 | separated |
-| grok-4.7 fast | grok-4.6 | +3.0 [+0.4, +5.6] | 16 / 8 | separated, barely |
+| grok-4.7 fast | grok-4.6 | +2.3 [+0.5, +4.2] | 16 / 8 | separated, barely |
+| grok-4.7 fast | grok-4.7 | +4.4 [+1.7, +7.5] | 14 / 10 | separated |
+| grok-4.6 | grok-4.7 | +2.2 [−1.1, +5.9] | 10 / 14 | not separated |
+| grok-4.7 | Luna high | +8.5 [+4.4, +12.3] | 20 / 4 | separated |
 | Opus high | Luna high | +25.8 [+22.5, +29.2] | 24 / 0 | separated |
 | Luna high | Haiku | +15.4 [+13.1, +17.9] | 24 / 0 | separated |
 
@@ -98,20 +101,25 @@ top six, 7.7 % for Haiku.
 Set `memory-2026-10`: four named landmarks (triumphal arch, clock tower,
 memorial with colonnade, obelisk), each a seeded twin of the real building
 with proportions changed; `m2` = photographs + aerial, `m3` = + scaled
-drawings. Astra and Opus 3 attempts, Luna and Haiku 1; grok-4.7 fast ran 16 of
-its 36 attempts before its balance ran out (partial).
+drawings. Astra and Opus 3 attempts; Luna, Haiku, grok-4.6 and grok-4.7 1;
+grok-4.7 fast ran 16 of its 36 attempts (partial, not continued: §4).
 
 | Configuration | Score | m2 | m3 | contested probes closer to the evidence than to the published building |
 |---|---|---|---|---|
 | Astra high | **88.1** [85.2, 91.0] | 81.7 | 94.5 | 96 % |
 | Opus high | **76.5** [73.9, 79.1] | 60.3 | 92.7 | 82 % |
+| grok-4.7 high | **71.8** [69.7, 74.1] | 51.5 | 92.0 | 79 % |
 | grok-4.7 fast high (partial) | 68.7 | 51.6 | 85.8 | 72 % |
+| grok-4.6 high | **65.0** [60.7, 69.2] | 49.6 | 80.3 | 64 % |
 | Luna high | **52.9** [42.8, 65.1] | 43.3 | 62.4 | 49 % |
 | Haiku | **36.1** [27.0, 46.9] | 35.6 | 36.6 | 8 % |
 
 Astra − Opus +11.6 [+6.9, +15.3], 4/4 objects; the gap is almost entirely in
-`m2` (21 points) and closes to 2 once drawings are given. Haiku built the
-remembered building 92 % of the time. Four objects only.
+`m2` (21 points) and closes to 2 once drawings are given. Opus − grok-4.7
++4.8 [+3.7, +6.1], 4/4. Haiku built the remembered building 92 % of the time.
+grok-4.7 is the best Grok configuration here and the weakest on the test set;
+its lead over grok-4.6 (+6.8, 3 of 4 objects) is unsettled. Four objects
+only, one attempt for the Grok models.
 
 ## 3. Real buildings
 
@@ -124,14 +132,16 @@ and a current aerial). `r2` = photographs (+ aerial), `r4` = + survey notes.
 |---|---|---|---|
 | Astra high | 50.9 | 70.3 | 31.5 |
 | Opus high | 47.7 | 64.3 | 31.1 |
+| grok-4.6 high | 42.7 | 61.7 | 23.8 |
+| grok-4.7 high | 39.5 | 51.4 | 27.7 |
 | Luna high | 30.4 | 40.9 | 20.0 |
 | Haiku | 27.0 | 41.8 | 12.1 |
 
 Same order as the synthetic set; with two objects no pair is settled. A third
 candidate (a house with planning drawings) was dropped because no sheet of
 its application draws the face the street photographs show
-(`.local/v1/real-sources/kingsfold-8/NOTES.md`). Grok's real-building
-attempts did not run before the balance ran out.
+(`.local/v1/real-sources/kingsfold-8/NOTES.md`). grok-4.6 and grok-4.7 ran
+one attempt per task; the fast model was not run on this tier.
 
 ## 4. Grok Build
 
@@ -139,18 +149,33 @@ Grok runs under the same prompt, wall-clock budget and a boundary that passes
 the unchanged isolation preflight (`v1/lib/runner/README.md`, `### grok`).
 The owner asked for the fast model; only grok-4.7 has one
 (`grok-4.7-build-fast`, "2× the price"). The account's usage balance ran out
-twice (2026-10-06 and 2026-10-12); what finished: grok-4.7 normal, one pass
-(30 of 72 attempts at the 30-minute limit); grok-4.6, one pass on t2/t4/c1 and
-21 of 48 t1/t3 tasks; grok-4.7 fast, three attempts on t2/t4/c1 but for two of
-the 144 extra attempts, t1/t3 complete, and 16 of 36 memory-and-real attempts.
-Grok's batches were also the ones caught by a node upgrade (§8).
+twice (2026-10-06 and 2026-10-12). After it returned, grok-4.6 and grok-4.7
+were completed on 2026-10-19/20 in new batches of the same configurations
+(node 26.12, Grok CLI 1.0.60; the report flags the difference), so both have
+one attempt on every test, memory and real task. At the owner's decision the
+fast model was not continued: three attempts on t2/t4/c1 except two of the
+144 extra attempts, t1/t3 complete, 16 of its 36 memory-and-real attempts
+(all memory, no real building). One stop on 2026-10-20: right after a sleep on battery every new
+grok-4.7 attempt failed with "unknown model id"; a fresh preflight with the
+same id passed and the same batches continued (DECISIONS.md).
 
-Both Grok models sit between Opus high and Luna, well apart from both. The
-fast model shortens attempts by about a third (median 1105–1350 s against
-1600–1757 s) and halves the time-outs, and is 3.0 [+0.4, +5.6] points ahead of
-grok-4.6 at the same effort; against grok-4.7 normal the fast model's
-advantage is 3.5 points on the same tasks, within noise. Median cost as Grok
-accounts it: $1.16 (4.7), $0.88 (4.6), $2.31–2.44 (fast) per attempt.
+All three Grok configurations sit between Opus high and Luna on every tier.
+On the test set the fast model is ahead of both normal models (+2.3
+[+0.5, +4.2] over grok-4.6, +4.4 [+1.7, +7.5] over grok-4.7); grok-4.6 and
+grok-4.7 are not separated. The 30-minute limit explains much of the order: a
+timed-out attempt is scored on what it had written, and the share of test
+attempts that hit the limit is 41 % for grok-4.7, 20 % for grok-4.6 and 11 %
+for the fast model. On memory the order flips (grok-4.7 71.8, fast 68.7
+partial, grok-4.6 65.0), on four objects and one attempt.
+
+| Grok configuration | test attempts | at the time limit | median wall | median cost (Grok's accounting) |
+|---|---|---|---|---|
+| grok-4.6 / high | 120 | 20 % | 1587 s | $0.89 |
+| grok-4.7 / high | 122 | 41 % | 1743 s | $1.12 |
+| grok-4.7-build-fast / high | 262 | 11 % | 1300 s | $2.35 |
+
+The completion on 2026-10-19/20 cost $77.7 as Grok accounts it (99 scored
+attempts).
 
 ## 5. Effort: the same model at high and at max
 
@@ -192,8 +217,8 @@ evidence of a change. (`reports/retest-opus`, script in DECISIONS.md.)
 
 ## 8. Toolchain drift and the runner changes
 
-Between runs the machine's tools moved under the benchmark four times, and
-each time a frozen check failed closed, as designed, with no way to accept a
+Between runs the machine's tools moved under the benchmark five times. The
+first four times a frozen check failed closed, as designed, with no way to accept a
 reviewed change. That was a design gap and is now handled by small, visible
 allowlists rather than refusals:
 
@@ -208,6 +233,9 @@ allowlists rather than refusals:
   batches, which the report merges and flags.
 - v1.2.4 `03b0250` and `8cc44c7`: codex-cli 0.162 offers three MCP-resource
   tools even with MCP off; the tool-list check accepts exactly those names.
+- 2026-10-19: Homebrew moved node to 26.12 and the Grok CLI updated itself
+  to 1.0.60. No runner change was needed; the frozen Grok batches again could
+  not resume, and their remaining slots ran as new batches from `8cc44c7`.
 
 The report flags every configuration whose batches differ in CLI version or
 binary, runtime or runner; the Opus re-test (§7) is the measurement of what
@@ -221,7 +249,9 @@ expect to re-freeze.
 - Model-only comparison: the API harness is tested on mock servers only;
   every row above is model + client.
 - Real buildings: two objects give an order, not intervals.
-- Grok: the remainders listed in §4, when the balance returns.
+- Grok fast: 20 of its 36 memory-and-real attempts (all four real-building
+  tasks among them) and two extra test attempts not run, by the owner's
+  decision.
 - Effort: Codex `ultra` and Grok `xhigh` not run.
 
 ## Files

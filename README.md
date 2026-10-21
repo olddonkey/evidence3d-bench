@@ -1,7 +1,7 @@
 # Evidence3D Bench
 
 > **v1（分支 `v1-hidden-truth`）**：先生成隐藏的真值模型，再把它渲染成照片、图纸和笔记作为题面，评分全自动。说明见 [docs/V1.md](docs/V1.md)，首轮试点结果见 [docs/V1-PILOT.md](docs/V1-PILOT.md)，私有测试集上的首轮结果见 [docs/V1-TEST.md](docs/V1-TEST.md)。下文描述的是 v0（评分器校准与人工评审工具），仍然可用。
-- [docs/V1-ROUND3.md](docs/V1-ROUND3.md): round 3 — the full evidence ladder, memory tasks, two real buildings, Grok (partial).
+- [docs/V1-ROUND3.md](docs/V1-ROUND3.md): round 3 — the full evidence ladder, memory tasks, two real buildings, three Grok configurations.
 
 本地的「资料 → 可编辑 3D」benchmark 原型，当前版本为 v0.3。
 
