@@ -165,6 +165,84 @@ export function parseGrokEvents(events) {
     completed: Boolean(result) && result.is_error !== true && result.subtype === 'success',
   };
 }
+// Antigravity CLI `agy -p --output-format stream-json` (from the headless
+// documentation, 2026-10-22; not yet checked against a live CLI): NDJSON, each
+// line {event, <event>: payload}:
+//   init{cwd, tools[], permission_mode, model?, agent?}
+//   step_update{conversation_id, step_index, state: ACTIVE|DONE, step_type:
+//     user_input|agent_response|tool|checkpoint, tool_name, text_delta,
+//     duration_seconds, usage, tool_info{name, parameters, output, error{type, message}}, subagent_info}
+//   result{conversation_id, status: SUCCESS|ERROR|CANCELED|INTERRUPTED|INVALID, response, error,
+//     duration_seconds, num_turns, usage{input_tokens, output_tokens, thinking_tokens, cache_read_tokens, total_tokens}}
+// A step is reported several times (ACTIVE, then DONE); it is counted once, by
+// its step_index. In the documented example total_tokens = input_tokens +
+// output_tokens and cache_read_tokens < input_tokens, so input_tokens is taken
+// to include the cached part and output_tokens the thinking (inferred).
+// Web, browser and MCP tools cannot be switched off from the command line, only
+// refused by permission rules; a call of one that did not fail breaks the boundary.
+export const AGY_FORBIDDEN_TOOL = /search_web|web_search|read_url|url_content|browser|execute_url|mcp/i;
+export const AGY_SHELL_TOOL = /^run_command$/;
+
+export const agyPayload = event => event && typeof event === 'object' && typeof event.event === 'string' ? event[event.event] ?? null : null;
+
+// The tool steps of a stream, one per step_index, in order: { index, name, parameters, output, error, done }.
+export function agyToolSteps(events) {
+  const steps = new Map();
+  for (const event of events) {
+    if (event?.event !== 'step_update') continue;
+    const step = agyPayload(event);
+    if (!step || step.step_type !== 'tool') continue;
+    const index = Number.isInteger(step.step_index) ? step.step_index : 'n' + steps.size;
+    const info = step.tool_info ?? {}, previous = steps.get(index) ?? {};
+    steps.set(index, { index, name: info.name ?? step.tool_name ?? previous.name ?? null, parameters: info.parameters ?? previous.parameters ?? null,
+      output: info.output ?? previous.output ?? null, error: info.error ?? previous.error ?? null, done: step.state === 'DONE' || Boolean(previous.done) });
+  }
+  return [...steps.values()];
+}
+
+export function parseAntigravityEvents(events) {
+  const tools = {}, errors = [], forbidden = [], responses = new Set();
+  let init = null, result = null, lastText = '', lastIndex;
+  for (const event of events) {
+    const payload = agyPayload(event);
+    if (!payload) continue;
+    if (event.event === 'init') init = payload;
+    else if (event.event === 'result') result = payload;
+    else if (event.event === 'step_update' && payload.step_type === 'agent_response') {
+      if (payload.step_index !== lastIndex) { lastIndex = payload.step_index; lastText = ''; }
+      responses.add(payload.step_index);
+      if (typeof payload.text_delta === 'string') lastText += payload.text_delta;
+    }
+  }
+  let commands = 0;
+  for (const step of agyToolSteps(events)) {
+    const name = step.name ?? 'unknown';
+    tools[name] = (tools[name] ?? 0) + 1;
+    if (AGY_SHELL_TOOL.test(name)) commands++;
+    if (AGY_FORBIDDEN_TOOL.test(name)) forbidden.push({ name, failed: Boolean(step.error) });
+  }
+  let usage = null, usageDetail = null;
+  if (result?.usage && typeof result.usage === 'object') {
+    const u = result.usage, n = key => Number(u[key]) || 0;
+    usage = { input_tokens: n('input_tokens'), cached_input_tokens: n('cache_read_tokens'), output_tokens: n('output_tokens') };
+    usageDetail = { input_tokens: n('input_tokens'), cache_read_tokens: n('cache_read_tokens'), output_tokens: n('output_tokens'),
+      thinking_tokens: n('thinking_tokens'), total_tokens: n('total_tokens') };
+  }
+  if (result && result.status !== 'SUCCESS') errors.push(String(result.error ?? result.status ?? 'error result'));
+  return {
+    harness: 'antigravity', session_id: result?.conversation_id ?? null,
+    turns: Number.isInteger(result?.num_turns) ? result.num_turns : responses.size,
+    commands, usage, usage_detail: usageDetail,
+    // agy reports no price; the subscription's quota is not a charge.
+    cost_usd: null,
+    tools, errors, forbidden_calls: forbidden,
+    final_message: typeof result?.response === 'string' ? result.response : lastText || null,
+    model_reported: init?.model ?? null,
+    init: init ? { tools: init.tools ?? null, permission_mode: init.permission_mode ?? null, model: init.model ?? null, agent: init.agent ?? null, cwd: init.cwd ?? null } : null,
+    completed: Boolean(result) && result.status === 'SUCCESS',
+  };
+}
+
 // Built-in plugins that load even in safe mode; they add no tools (checked via
 // the init event, which lists the tool set after plugins have registered).
 // A newer CLI that ships a new built-in fails `agent:tool-surface` until the
@@ -178,6 +256,11 @@ export const CLAUDE_BUILTIN_PLUGINS = ['cc-plugin-agents-md', 'cc-plugin-telemet
 export function toolSurfaceProblems(system, summary) {
   const problems = [];
   if (/^api-/.test(system)) return apiToolProblems(summary);
+  if (system === 'antigravity') {
+    for (const call of summary.forbidden_calls ?? []) if (!call.failed) problems.push('agy ran ' + call.name + ' without a refusal');
+    if (summary.init?.permission_mode === 'always-proceed') problems.push('agy ran with permission mode always-proceed');
+    return problems;
+  }
   if (system === 'grok') {
     for (const name of Object.keys(summary.tools ?? {})) if (!GROK_TOOLS.includes(name)) problems.push('grok used tool ' + name);
     const init = summary.init;
@@ -212,6 +295,7 @@ export function parseEvents(system, events) {
   if (system === 'codex') return parseCodexEvents(events);
   if (system === 'claude-code') return parseClaudeEvents(events);
   if (system === 'grok') return parseGrokEvents(events);
+  if (system === 'antigravity') return parseAntigravityEvents(events);
   if (/^api-/.test(system)) return parseApiEvents(events);
   throw new Error('Unknown system ' + system);
 }

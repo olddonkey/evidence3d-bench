@@ -3,10 +3,11 @@ import { realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { captureProcess, childEnvironment, BASE_PATH } from './process.mjs';
-import { parseCodexEvents, parseClaudeEvents, parseGrokEvents, CLAUDE_TOOLS, GROK_TOOLS } from './events.mjs';
+import { parseCodexEvents, parseClaudeEvents, parseGrokEvents, parseAntigravityEvents, CLAUDE_TOOLS, GROK_TOOLS } from './events.mjs';
 import { sha256File } from './workspace.mjs';
 import { API_ADAPTERS } from './api/adapter.mjs';
 import { grokDiscovered } from './grok-config.mjs';
+import { agyConfigProblems, agyDiscovered, agySettingsPath } from './antigravity-config.mjs';
 import { sandboxProfile, SANDBOX_EXEC, READ_ONLY_PARTS } from './api/sandbox.mjs';
 
 // Harness adapters. Each one knows how to inspect its CLI (version, login,
@@ -424,8 +425,90 @@ export const grok = {
   parse: parseGrokEvents,
 };
 
+// ---------------------------------------------------------------- antigravity
+//
+// `agy -p` (Google Antigravity CLI). Written from the CLI's documentation
+// (2026-10-22) on a machine without agy: every part below is to be proven by
+// preflight on the machine that runs the batch, and README "### antigravity"
+// lists what is inferred. The CLI process runs unsandboxed, like the other
+// CLIs; what the contestant runs is confined by agy's own mechanisms:
+//   shell       --sandbox: agy runs every command under its own Seatbelt
+//               profile (the workspace read-write, system directories
+//               readable, nothing else mounted, no network), and
+//               toolPermission proceed-in-sandbox lets a sandboxed command run
+//               without the prompt headless mode cannot show; unsandboxed(*)
+//               is denied. The node install is mounted read-only by
+//               read_file allow rules.
+//   file tools  confined to the workspace (allowNonWorkspaceAccess off),
+//               with input/, tools/, node_modules/ and project-configuration
+//               names denied to write_file.
+//   web, MCP    read_url(*), execute_url(*) and mcp(*) denied; agy offers no
+//               switch that removes the tools themselves.
+//   context     the operator's settings file must hold all of this, and no
+//               global rules, hooks, MCP servers, plugins, skills or
+//               subagents may exist under ~/.gemini (antigravity-config.mjs),
+//               checked at prepare, before every launch and in preflight.
+//               HOME stays the user's: the login is in the keychain.
+// agy takes the headless prompt as the argument of -p, so the frozen
+// invocation is a small runner-owned script that reads prompt.txt and execs
+// the frozen binary with the stream on stdout; the prompt the runner pipes to
+// stdin is not passed on.
+export const AGY_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+export const AGY_ENV = { AGY_CLI_DISABLE_AUTO_UPDATE: 'true' };
+// agy's own wait for the turn (--print-timeout, default 5 min) is set well
+// above the runner's wall clock, which decides when a session ends.
+export const AGY_PRINT_MARGIN_SECONDS = 600;
+
+export function agyWrapper({ binary, promptPath }) {
+  return ['#!/bin/sh', '# Evidence3D: agy takes its headless prompt as the argument of -p; the copy on stdin is not passed on.',
+    'exec ' + shellQuote(binary) + ' -p "$(cat ' + shellQuote(promptPath) + ')" "$@" </dev/null', ''].join('\n');
+}
+
+export function agyArgs({ model, effort, wallSeconds }) {
+  const args = ['--output-format', 'stream-json', '--model', model];
+  if (effort) args.push('--effort', effort);
+  return [...args, '--sandbox', '--disable-slash-commands', '--print-timeout', ((wallSeconds ?? 3600) + AGY_PRINT_MARGIN_SECONDS) + 's'];
+}
+
+export const antigravity = {
+  id: 'antigravity',
+  defaultBinary: () => process.env.E3D_AGY_BIN || join(homedir(), '.local', 'bin', 'agy'),
+  async inspect({ binary, model, effort }) {
+    const path = await realpath(binary);
+    const env = childEnvironment(AGY_ENV);
+    const version = await run(path, ['--version'], { env });
+    if (version.exit_code !== 0) throw new Error('agy --version failed: ' + (version.stderr || version.stdout).slice(0, 300));
+    // Model ids may be display names ("Gemini 3.5 Flash"); they go to argv, never to a shell.
+    if (typeof model !== 'string' || !/^[A-Za-z0-9._:()/ -]{1,80}$/.test(model)) throw new Error('Invalid agy model id ' + JSON.stringify(model));
+    if (effort !== undefined && effort !== null && !AGY_EFFORTS.includes(effort)) throw new Error('agy effort must be one of ' + AGY_EFFORTS.join(', '));
+    const node = await nodeRuntime();
+    const problems = await agyConfigProblems({ node });
+    if (problems.length) throw new Error('agy is not configured for a batch:\n  ' + problems.join('\n  ') +
+      '\nnode v1/scripts/run.mjs antigravity-settings prints the settings it needs (--write merges them into ' + agySettingsPath() + ')');
+    // `agy models` lists what the login can use. Its format is not documented:
+    // the model must appear in it, else the session's own refusal ("invalid
+    // model selection") stops preflight.
+    const listing = await run(path, ['models'], { env });
+    const listed = listing.exit_code === 0 ? (listing.stdout + listing.stderr).trim() : null;
+    if (listed !== null && !listed.toLowerCase().includes(model.toLowerCase())) throw new Error('Model ' + model + ' is not among the models agy lists:\n' + listed.slice(0, 1500));
+    return {
+      system: 'antigravity', binary, binary_realpath: path, binary_sha256: await sha256File(path), version: (version.stdout || version.stderr).trim(),
+      release_root: dirname(path), login: null, model, effort: effort ?? null, effort_levels: AGY_EFFORTS,
+      settings_path: agySettingsPath(), discovered: await agyDiscovered(), models_listing: listed === null ? null : listed.slice(0, 4000),
+    };
+  },
+  invocation({ harness, model, effort, workspace, attemptDir, node, wallSeconds }) {
+    const ws = realOr(workspace), wrapperPath = join(attemptDir, 'harness', 'agy-run.sh');
+    const env = childEnvironment({ PATH: node.bin + ':' + BASE_PATH, TMPDIR: join(ws, 'tmp'), ...AGY_ENV });
+    return { command: '/bin/sh', args: [wrapperPath, ...agyArgs({ model, effort, wallSeconds })], cwd: ws, env, stdin: 'prompt',
+      files: { [wrapperPath]: agyWrapper({ binary: harness.binary_realpath, promptPath: join(attemptDir, 'prompt.txt') }) } };
+  },
+  sandboxCommand: null,
+  parse: parseAntigravityEvents,
+};
+
 export { grokDiscovered };
-export const ADAPTERS = { codex, 'claude-code': claudeCode, grok, ...API_ADAPTERS };
+export const ADAPTERS = { codex, 'claude-code': claudeCode, grok, antigravity, ...API_ADAPTERS };
 
 export function adapterFor(system) {
   const adapter = ADAPTERS[system];

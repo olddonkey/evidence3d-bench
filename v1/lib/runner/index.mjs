@@ -5,6 +5,7 @@ import { loadavg, cpus, hostname } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { layout, PROTOCOL, validateTask, validateTruth } from '../contract.mjs';
 import { adapterFor, nodeRuntime, codexGlobalInstructions } from './adapters.mjs';
+import { agyConfigProblems } from './antigravity-config.mjs';
 import { captureProcess, childEnvironment, commandOf, killTree, startTimeOf } from './process.mjs';
 import { toolSurfaceProblems, readJSONLines } from './events.mjs';
 import { buildPrompt, PROMPT_VERSION } from './prompt.mjs';
@@ -304,6 +305,8 @@ export async function liveProblems(manifest, { repoRoot = REPO_ROOT, checkRunner
     const { loaded } = await codexGlobalInstructions(manifest.harness.codex_home);
     if (loaded.length) problems.push('global Codex instructions would be injected into every session: ' + loaded.join(', '));
   }
+  // agy reads the operator's own settings file; the boundary depends on it.
+  if (manifest.system === 'antigravity') problems.push(...await agyConfigProblems({ node: manifest.node }));
   return problems;
 }
 
@@ -959,7 +962,7 @@ async function removeStaleTemporaries(dirs) {
 
 // What a human has to do about a stop-class infrastructure error.
 const STOP_ADVICE = {
-  auth: 'log in again with the harness CLI (codex login / claude / grok login), then run again',
+  auth: 'log in again with the harness CLI (codex login / claude / grok login / an interactive agy session), then run again',
   billing: 'check the plan, credits or spend cap of the login, then run again',
   model_unavailable: 'the model id is unknown or not on this plan; a batch cannot change its model, so prepare a new batch with a valid one',
   request_rejected: 'the API refused the frozen request (model, effort or another parameter); prepare a new batch with settings it accepts',

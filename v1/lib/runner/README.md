@@ -1,22 +1,25 @@
 # Generation runner (module E)
 
 Runs a model-under-test on task packs inside an isolated workspace, records what
-happened, and scores what it left behind. Five systems: three vendor CLIs, `codex` (Codex
+happened, and scores what it left behind. Six systems: four vendor CLIs, `codex` (Codex
 CLI), `claude-code` (Claude Code CLI) and `grok` (Grok Build CLI), checked against
-codex-cli 0.159.2, Claude Code 2.1.285 and grok 1.0.46; and two API systems,
+codex-cli 0.159.2, Claude Code 2.1.285 and grok 1.0.46, and `antigravity` (Google
+Antigravity CLI, written from its documentation and not yet run: see *### antigravity*);
+and two API systems,
 `api-anthropic` (Claude Messages API) and `api-openai` (OpenAI Responses API), which run
 one agent loop of our own with identical tools, prompts and budget, so that a result
 compares models rather than "model + client" (see *The API systems*). All boundaries are
 Seatbelt-based and macOS-only (Darwin 27).
 
 ```sh
-node v1/scripts/run.mjs prepare   --id <batch> --system codex|claude-code|grok|api-anthropic|api-openai --model <id> [--effort <level>] --tasks a,b,c [--attempts 1] [--data <root>]
+node v1/scripts/run.mjs prepare   --id <batch> --system codex|claude-code|grok|antigravity|api-anthropic|api-openai --model <id> [--effort <level>] --tasks a,b,c [--attempts 1] [--data <root>]
                                   [--binary <cli>]                                                       (CLI systems)
                                   [--token-budget 2000000] [--tool-budget 200] [--max-output-tokens 32000]   (API systems)
 node v1/scripts/run.mjs preflight --batch <dir> [--probe-model <id>] [--probe-effort <level>] [--no-wait]
 node v1/scripts/run.mjs run       --batch <dir> [--concurrency 1] [--no-wait] [--resume-now] [--max-reruns 5] [--retry-stall-minutes 10]
 node v1/scripts/run.mjs status    --batch <dir>[,<dir>...] [--json]   # what each batch is doing, and if waiting, why and until when
 node v1/scripts/run.mjs summary   --batch <dir> [--json]              # --json: the whole summary.json
+node v1/scripts/run.mjs antigravity-settings [--write]               # the agy settings an antigravity batch needs
 ```
 
 Exit codes of `run` and `preflight`: 0 done (nothing left that may run), 1 error, 3 stopped
@@ -28,9 +31,9 @@ wait (`--no-wait`; run again after the time printed; also a preflight that gave 
 The same from code: `prepare`, `preflight`, `execute`, `summarize` in
 `v1/lib/runner/index.mjs` (also exported as `preparePilot`, `preflightPilot`,
 `executePilot`). Default data root `.local/v1`; default CLIs
-`~/.local/bin/codex.opencodex-real` (not the `codex` shim), `~/.local/bin/claude` and
-`~/.grok/bin/grok`, overridable with `--binary` or `E3D_CODEX_BIN` / `E3D_CLAUDE_BIN` /
-`E3D_GROK_BIN`. The API systems read
+`~/.local/bin/codex.opencodex-real` (not the `codex` shim), `~/.local/bin/claude`,
+`~/.grok/bin/grok` and `~/.local/bin/agy`, overridable with `--binary` or `E3D_CODEX_BIN` /
+`E3D_CLAUDE_BIN` / `E3D_GROK_BIN` / `E3D_AGY_BIN`. The API systems read
 their key from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in the environment of `preflight`
 and `run` (never from a file; `prepare` records only whether it was set), and their base
 URL from `E3D_ANTHROPIC_BASE_URL` / `E3D_OPENAI_BASE_URL` at `prepare` (default
@@ -619,6 +622,89 @@ Effort levels (from Grok's model catalogue, `~/.grok/models_cache.json`): `grok-
 `grok-4.6` take `low`, `medium`, `high` (the default) and `xhigh`; a model the catalogue
 does not describe gets the canonical list (`none` … `max`), and preflight's session
 checks it. Context window 256k for both, auto-compaction at 80%.
+
+### antigravity
+
+**Unverified: written from the documentation on a machine without agy (2026-10-22).**
+Google Antigravity CLI (`agy`, `~/.local/bin/agy`, `E3D_AGY_BIN`), headless, logged in
+with a Google account (the token is in the macOS keychain). Every statement below
+comes from antigravity.google/docs (CLI reference, headless, settings, permissions,
+sandbox, rules, troubleshooting) and has to be proven by the first preflight on the
+machine that runs a batch; where preflight disagrees, the adapter is wrong, not the
+check. The tests (`v1/test/runner-antigravity.test.mjs`) pin what the runner does with
+the documented shapes; none of their streams was captured from the real CLI.
+
+```
+/bin/sh <attempt>/harness/agy-run.sh --output-format stream-json --model <model> [--effort <e>]
+        --sandbox --disable-slash-commands --print-timeout <wall + 600>s
+agy-run.sh:  exec <agy realpath> -p "$(cat <attempt>/prompt.txt)" "$@" </dev/null
+env: HOME (the user's), USER, LOGNAME, LANG, PATH=<node bin>:/usr/bin:/bin:/usr/sbin:/sbin,
+     TMPDIR=<ws>/tmp, AGY_CLI_DISABLE_AUTO_UPDATE=true
+```
+
+agy takes the headless prompt as the argument of `-p`, so the frozen invocation is a
+runner-owned script that reads `prompt.txt` and execs the frozen binary; the prompt
+the runner pipes to stdin is not passed on. `--print-timeout` (agy's own wait for the
+turn, default 5 min) is set 10 minutes above the wall clock, which decides.
+
+Like the other CLIs, **the CLI process runs unsandboxed and only what the contestant
+runs is confined**, here entirely by agy's own mechanisms, configured through the one
+settings file agy reads (`~/.gemini/antigravity-cli/settings.json`; no flag or variable
+points it elsewhere, and a separate HOME might lose the keychain login):
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| `toolPermission` | `proceed-in-sandbox` | sandboxed commands run without the prompt headless mode cannot show |
+| `enableTerminalSandbox` | `true` (also `--sandbox`) | every command under agy's Seatbelt profile: the workspace read-write, system directories readable, nothing else mounted, no network |
+| `allowNonWorkspaceAccess` | `false` | the file tools stay inside the workspace |
+| `useG1Credits` | `false` | never spend paid AI credits when the plan's quota runs out |
+| `artifactReviewPolicy` | `always-proceed` | a plan artifact must not wait for a review nobody gives |
+| `agentMode` | `default` | not `auto`, which runs commands outside the sandbox when it judges them safe |
+| `modelProvider` | `""` | the Google login, never `GEMINI_API_KEY` |
+| `permissions.allow` | `read_file(<node install roots>)` only | node readable inside the sandbox; nothing else opened |
+| `permissions.deny` | `read_url(*)`, `execute_url(*)`, `mcp(*)`, `unsandboxed(*)`, `write_file(input/ tools/ node_modules/ .agents/ .agent/ AGENTS.md GEMINI.md)` | no web, browser, MCP or unsandboxed command; protected names unwritable by the file tools |
+
+`node v1/scripts/run.mjs antigravity-settings` prints these merged into the current
+file; `--write` writes them (the previous file is kept beside it). Defaults are judged
+as defaults (the CLI saves only non-default values). Nothing under `~/.gemini` may add
+to a session: global rules and context files (`AGENTS.md`, `GEMINI.md`, `config/rules/`,
+`antigravity-cli/rules/`), hooks, MCP servers, plugins, skills, subagents (the last two
+locations are guesses). All of it is checked at prepare, before every launch (a change
+stops the batch, reason `frozen`) and in preflight (`agent:agy-config`).
+
+What preflight proves for agy: the probe script through `run_command` (the standard
+shell probes: canaries, repository, truth, other attempts, home, `~/.gemini`, keychain,
+loopback, Unix socket, internet); the file tools (`view_file` and whatever agy calls
+its list, search, write and edit tools: matched by kind, see `AGY_KINDS`) on the same
+routes as Grok's (absolute paths, `..`, file, directory and dangling symlinks,
+`input/`, `.agents/`); `view_file` showing the control image and refusing the two
+outside ones; the web tools (`search_web`, `read_url_content`) refused or absent; no
+planted `AGENTS.md`/`GEMINI.md` obeyed; and the settings check. Use of a web, URL,
+browser or MCP tool that was not refused makes an attempt an integrity failure.
+
+Known gaps, to be settled live before results count:
+
+- **Tool names.** agy's pages disagree (CLI: `write_to_file`, `replace_file_content`;
+  SDK: `create_file`, `edit_file`, `list_directory`, `search_directory`). The contestant
+  prompt names only `run_command` and `view_file`, on which both agree. Whether
+  `view_file` shows images is not documented; the control-image check decides.
+- **Subagents and image generation** (`start_subagent`, `generate_image`) cannot be
+  switched off; their use is counted in `tools`, not refused. Whether a subagent
+  inherits the sandbox and permissions is not documented.
+- **The shell may create project configuration.** agy's sandbox mounts the whole
+  workspace read-write, so a command could write `.agents/` or `GEMINI.md`; the deny
+  rules cover only the file tools. Whether agy reads such files mid-session (and runs
+  hooks from them outside the sandbox) is unknown; a workspace is never a trusted
+  folder, which by the documentation is what project hooks and MCP servers need.
+- **Workspace trust.** agy asks to trust a folder on first interactive use; what a
+  headless run in an untrusted folder does is not documented.
+- **Usage.** `input_tokens` is taken to include `cache_read_tokens` and
+  `output_tokens` to include `thinking_tokens` (the documented example adds up that
+  way); no cost is reported (`cost_usd` null). Quota messages other than "Individual
+  quota reached" are guesses (`AGY_PATTERNS` in infra.mjs).
+- **Model ids** may be display names (`--model "Gemini 3.7 Flash"`); prepare requires
+  the id to appear in `agy models` when that command exists, and an unknown one ends
+  the session with "invalid model selection" (model_unavailable, stop).
 
 ### api-anthropic, api-openai
 

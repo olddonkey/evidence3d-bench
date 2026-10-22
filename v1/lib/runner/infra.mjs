@@ -84,6 +84,34 @@ export function grokReason(text) {
   return null;
 }
 
+// Antigravity CLI messages, most specific first: the result event's error,
+// else stderr. From the documentation only (2026-10-22): "invalid model
+// selection" (unknown --model, exit 1), "authentication required" (no login),
+// "failed to retrieve token: secret keyring is locked", "Individual quota
+// reached" (a user report). The rest are the usual Google API status words
+// (RESOURCE_EXHAUSTED, UNAVAILABLE, ...), inferred; codes are matched in
+// capitals only, so a sentence that merely says "unavailable" is not one.
+const AGY_NOT_INFRA = /input token count|token limit|context (length|window)|exceeds the maximum/i;
+const AGY_PATTERNS = [
+  ['model_unavailable', /invalid model selection|unknown model|model (is )?not (available|found|supported)|not available (on|for) your plan/i],
+  ['usage_limit', /quota reached|individual quota|quota (has been )?exceeded|usage limit|(weekly|five.hour|5.hour) limit|limit reached|out of quota/i],
+  ['billing', /insufficient credits|out of credits|purchase credits|payment required|billing/i],
+  ['rate_limit', /rate.?limit|too many requests|\b429\b|RESOURCE_EXHAUSTED/i],
+  ['auth', /authentication required|not authenticated|not logged in|login required|sign in again|failed to retrieve token|keyring is locked|UNAUTHENTICATED|PERMISSION_DENIED|\b40[13]\b/i],
+  ['overloaded', /\bUNAVAILABLE\b|\b503\b/],
+  ['overloaded', /overloaded|high demand|at capacity|service unavailable/i],
+  ['server_error', /\bINTERNAL\b|\b50[024]\b/],
+  ['server_error', /internal (server )?error|bad gateway|gateway timeout/i],
+  ['network', /dial tcp|connection (refused|reset)|no such host|TLS handshake|i\/o timeout|network is unreachable|could not connect|failed to connect|unexpected EOF|DEADLINE_EXCEEDED/i],
+];
+
+export function agyReason(text) {
+  text = String(text ?? '');
+  if (AGY_NOT_INFRA.test(text) || NOT_INFRA.some(pattern => pattern.test(text))) return null;
+  for (const [reason, pattern] of AGY_PATTERNS) if (pattern.test(text)) return reason;
+  return null;
+}
+
 // Claude Code's own classification of an API error, carried on the synthetic
 // assistant message (`error`) and on system/api_retry events (live: all of
 // rate_limit, server_error, authentication_failed, billing_error,
@@ -130,6 +158,8 @@ export function isModelActivity(system, event) {
     if (event.type === 'turn.completed') return true;
     return /^item\./.test(event.type ?? '') && event.item && event.item.type !== 'error';
   }
+  // agy: a step the model produced (its reply or a tool call), not the prompt echoed back.
+  if (system === 'antigravity') return event.event === 'step_update' && ['agent_response', 'tool'].includes(event.step_update?.step_type);
   if (event.type === 'assistant') return event.message?.model !== SYNTHETIC_MODEL && !event.is_api_error_message;
   if (event.type === 'user' || event.type === 'tool_progress') return true;
   return event.type === 'system' && event.subtype === 'thinking_tokens';
@@ -372,6 +402,7 @@ export function detectInfra({ system, events = [], eventMs = null, run, summary,
 
   if (isApi(system)) return apiInfra(events, base, stderrTail, run);
   if (system === 'grok') return grokInfra(events, base, stderrTail, run, turns);
+  if (system === 'antigravity') return agyInfra(events, base, stderrTail, run, turns);
   const terminal = system === 'codex' ? codexTerminal(events) : claudeTerminal(events);
   if (terminal) {
     const reason = system === 'codex' ? codexReason(terminal.text) : claudeReason(terminal.category, terminal.text, terminal.status);
@@ -423,6 +454,25 @@ function grokInfra(events, base, stderrTail, run, turns) {
   if (reason) return record(reason, { ...base, message: text || stderrTail, evidence: [text, stderrTail].filter(Boolean) });
   if (turns === 0) {
     return record('cli_crash', { ...base, message: text || 'grok exited (' + (run.signal ?? 'exit ' + run.exit_code) + ') before the model produced anything',
+      evidence: [text, stderrTail, 'exit ' + run.exit_code + (run.signal ? ' ' + run.signal : '')].filter(Boolean), retry_after: null });
+  }
+  return null;
+}
+
+// What ended an agy session: a result whose status is not SUCCESS carries the
+// reason in `error`; a run that printed no result says it on stderr (an
+// unauthenticated run exits with "authentication required"). Matched against
+// AGY_PATTERNS like Grok's text; a session that never reached the model and
+// says nothing recognisable is a CLI crash.
+function agyInfra(events, base, stderrTail, run, turns) {
+  const result = events.findLast(event => event?.event === 'result')?.result ?? null;
+  if (result?.status === 'SUCCESS') return null;
+  const text = [typeof result?.error === 'string' ? result.error : '', result && !result.error ? String(result.status ?? '') : '', !result ? stderrTail ?? '' : '']
+    .filter(Boolean).join(' | ');
+  const reason = agyReason(text) ?? (result ? agyReason(stderrTail) : null);
+  if (reason) return record(reason, { ...base, message: text || stderrTail, evidence: [text, stderrTail].filter(Boolean) });
+  if (turns === 0) {
+    return record('cli_crash', { ...base, message: text || 'agy exited (' + (run.signal ?? 'exit ' + run.exit_code) + ') before the model produced anything',
       evidence: [text, stderrTail, 'exit ' + run.exit_code + (run.signal ? ' ' + run.signal : '')].filter(Boolean), retry_after: null });
   }
   return null;

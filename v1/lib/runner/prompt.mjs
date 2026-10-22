@@ -15,6 +15,11 @@ export const TOOL_DESCRIPTIONS = {
     'Glob; Grep; Edit; Write. Use Read to look at the evidence and at your own previews.',
   grok: 'Your tools: run_terminal_command, whose commands run in this directory (Node.js is on PATH); read_file, which also shows you PNG and JPEG files; ' +
     'search_replace; write; list_dir; grep. Use read_file to look at the evidence and at your own previews.',
+  // agy's file tools are named differently in its documentation (CLI pages:
+  // write_to_file, replace_file_content; SDK: create_file, edit_file), so only
+  // the two names both agree on are given; preflight shows which it offers.
+  antigravity: 'Your tools: run_command, whose commands run in this directory (Node.js is on PATH); view_file, which also shows you PNG and JPEG files; ' +
+    'and the file tools for listing, searching, creating and editing files. Use view_file to look at the evidence and at your own previews.',
   // The two API systems run the same loop with the same tools, so they get the same text.
   'api-anthropic': API_TOOLS_TEXT,
   'api-openai': API_TOOLS_TEXT,
