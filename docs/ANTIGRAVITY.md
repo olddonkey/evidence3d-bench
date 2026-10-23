@@ -81,11 +81,30 @@ node v1/scripts/run.mjs status --batch $D/runs/ag1-<short-name>
 - Time: each attempt has 30 minutes; at concurrency 2 the 72 headline tasks take
   roughly 15 hours.
 
-## Bringing results back
+## Scoring and the report
 
-Copy `$D/runs/<batch>` back into this Mac's `.local/v1/runs/` and build the report with
-the other batches, or build it there with the same command:
+Scoring happens on the machine that runs the batch: the runner scores every attempt
+as soon as its session ends, against the truth in the copied data root, with the
+scorer the batch froze (scorer 1.1.0; its hash is in the manifest and in every
+report). `status` already shows the mean.
+
+To compare with the existing ladder there, copy the earlier batches' results too.
+`e3d-ladder-runs.tgz` (about 0.5 GB, made on the original Mac) holds the 40 batches
+behind the round-3 reports with what a report reads (manifests, summaries,
+preflight verdicts, each attempt's `result.json` and `score/`), without workspaces
+or event logs; a report rebuilt from it matches the round-3 numbers exactly.
 
 ```sh
-node v1/cli.mjs report --batches <batch>[,<more>] --out .local/v1/reports/<name>
+tar -C .local/v1/runs -xzf e3d-ladder-runs.tgz
+node v1/cli.mjs report --data .local/v1 --batches $(cat ladder-test.txt),ag1-<short-name> --out .local/v1/reports/test-with-agy
+```
+
+`ladder-test.txt` lists the 29 test-set batches, `ladder-memory-real.txt` the 11
+memory and real-building batches. The report is `reports/<name>/index.html` with
+`summary.md` and `leaderboard.json` beside it.
+
+To bring results back instead, copy `$D/runs/<batch>` without its workspaces:
+
+```sh
+tar -C .local/v1/runs -czf ag1-results.tgz --exclude='*/workspace/node_modules' --exclude='*/workspace/tmp' --exclude='<batch>/runtime' <batch>
 ```
