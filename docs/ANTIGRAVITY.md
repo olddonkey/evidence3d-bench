@@ -20,7 +20,8 @@ and do not run a batch before preflight passes. What the adapter assumes is list
 1. **The repository.** It is private: `git clone git@github.com:olddonkey/evidence3d-bench.git`
    with an account that has access, or a bundle made here and copied with the data
    (`git bundle create e3d.bundle --all`, then `git clone e3d.bundle evidence3d-bench`
-   there). Use branch `v1-hidden-truth` (or `main`, which is the same).
+   there). Use branch `main`: `v1-hidden-truth` stopped at `64be108` (2026-10-22) and has
+   nothing merged since.
 2. **The data root**, which is not in git and holds the hidden truth: from this Mac's
    `.local/v1`, the folders `sets`, `tasks`, `truth` and `objects` (about 1 GB; `runs`,
    `reports` and `scratch` are not needed).
