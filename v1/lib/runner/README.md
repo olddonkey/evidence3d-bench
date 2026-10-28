@@ -196,8 +196,10 @@ its copy was taken, and the report uses that time, not the tick.
 After the final file is scored, the attempt's snapshots are scored in one worker process
 (`score-worker.mjs` with a `snapshots` job: the task is loaded once, no error maps are
 drawn), one per distinct content; a snapshot with the final file's content takes its
-score. A snapshot the scorer fails on (it throws, or the worker crashes or times out
-before reaching it) is scored again from the same stored file, up to 2 times
+score, unless that report is the scorer's failure. A snapshot the scorer fails on (it
+throws, the worker crashes or times out before reaching it, or the report says
+`scorer_failed: true`: an internal error the scorer caught itself, as opposed to
+`valid: false` alone, an invalid model scored 0) is scored again from the same stored file, up to 2 times
 (`SNAPSHOT_SCORE_RETRIES`; nothing is generated again), each retry in a worker of its
 own, so a file that crashes the scorer every time cannot hold up the others; the failed
 tries' reports are kept as `t0300.try-1.json`, … . **The attempt's score is still the final file's alone.** With concurrency 1 this

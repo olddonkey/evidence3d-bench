@@ -44,7 +44,8 @@ const SCORES = { A: 30, B: 60, C: 90, FLAKY: 40 };
 
 // A scorer that scores by marker, logs every call (and every context load),
 // throws on THROW (always) and FLAKY (its first time only), takes its whole
-// process down on CRASH, judges BAD invalid.
+// process down on CRASH, reports its own failure on OWN (an internal error it
+// caught), judges BAD invalid.
 const fakeScorer = log => `import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 const marker = glb => { try { return JSON.parse(glb.subarray(20).toString('utf8').trim()).e3d; } catch { return null; } };
 export async function loadContext() { appendFileSync(${JSON.stringify(log)}, 'context\\n'); return { loaded: true }; }
@@ -54,6 +55,7 @@ export async function scoreSubmission({ glb, outDir, context }) {
   if (m === 'THROW') throw new Error('scorer exploded');
   if (m === 'CRASH') process.exit(3);
   if (m === 'FLAKY' && !existsSync(${JSON.stringify(log)} + '.flaky')) { writeFileSync(${JSON.stringify(log)} + '.flaky', ''); throw new Error('scorer hiccup'); }
+  if (m === 'OWN') return { schema: 'e3d-report-v1', valid: false, scorer_failed: true, error: 'Scorer error: internal', score: 0 };
   if (m === 'BAD' || m === null) return { schema: 'e3d-report-v1', valid: false, error: 'Invalid GLB', score: 0 };
   return { schema: 'e3d-report-v1', valid: true, error: null, score: ${JSON.stringify(SCORES)}[m] ?? 50 };
 }
@@ -111,7 +113,7 @@ async function snapshotBatch(t, { steps, snapshotSeconds = 2, exit, sleep } = {}
   const dir = await scratch(t), dataRoot = join(dir, 'data');
   await makeDataRoot(dataRoot, TASK);
   await mkdir(join(dir, 'models'));
-  for (const marker of ['A', 'B', 'C', 'THROW', 'BAD', 'FLAKY', 'CRASH']) await writeFile(join(dir, 'models', marker + '.glb'), fakeGLB(marker));
+  for (const marker of ['A', 'B', 'C', 'THROW', 'BAD', 'FLAKY', 'CRASH', 'OWN']) await writeFile(join(dir, 'models', marker + '.glb'), fakeGLB(marker));
   const binary = await fakeShellCLI(dir, steps, { exit, sleep });
   const scorer = join(dir, 'fake-scorer.mjs'), log = join(dir, 'scorer.log');
   await writeFile(scorer, fakeScorer(log));
@@ -364,6 +366,27 @@ test('a snapshot that crashes the scorer every time does not keep the ones after
     'context', 'score CRASH with-context']);
 });
 
+test('a report in which the scorer records its own failure is retried like a throw, not scored 0 like an invalid model', async t => {
+  const batch = await snapshotBatch(t, { steps: [{ after: 1, write: 'OWN' }, { after: 2, write: 'BAD' }, { after: 2, write: 'C' }] });
+  await execute({ batchDir: batch.batchDir, deps: batch.deps });
+  const result = await readJSON(join(batch.attemptDir, 'result.json'));
+  assert.equal(result.score, 90);
+  assert.deepEqual(result.snapshots.map(item => [item.t, item.status, item.score, item.valid, item.tries ?? null]), [[2, 'score_error', null, null, 3], [4, 'scored', 0, false, null]]);
+  assert.match(result.snapshots[0].error, /Scorer error: internal/);
+  assert.deepEqual(await batch.calls(), ['score C maps', 'context', 'score OWN with-context', 'score BAD with-context', 'context', 'score OWN with-context',
+    'context', 'score OWN with-context']);
+  // The failed tries keep the scorer's own report.
+  assert.equal((await readJSON(join(batch.attemptDir, 'snapshots', 'score', 't0002.try-1.json'))).scorer_failed, true);
+});
+
+test('a snapshot identical to a final file the scorer failed on is scored itself, not given the final report', async t => {
+  const batch = await snapshotBatch(t, { steps: [{ after: 0.5, write: 'OWN' }], sleep: 3 });
+  await execute({ batchDir: batch.batchDir, deps: batch.deps });
+  const result = await readJSON(join(batch.attemptDir, 'result.json'));
+  assert.deepEqual(result.snapshots.map(item => [item.t, item.status, item.score, item.score_of ?? null, item.tries ?? null]), [[2, 'score_error', null, null, 3]]);
+  assert.deepEqual(await batch.calls(), ['score OWN maps', 'context', 'score OWN with-context', 'context', 'score OWN with-context', 'context', 'score OWN with-context']);
+});
+
 test('with --snapshot-seconds 0 nothing is taken and result.json has no snapshots', async t => {
   const batch = await snapshotBatch(t, { snapshotSeconds: 0, steps: [{ after: 0.2, write: 'C' }], sleep: 2.5 });
   assert.equal(batch.manifest.snapshots, null);
@@ -382,6 +405,17 @@ test('a broken boundary leaves the snapshots unscored', async t => {
   assert.equal(result.status, 'generation_failed'); assert.equal(result.score, 0);
   assert.deepEqual(result.snapshots.map(item => [item.t, item.status, item.score]), [[2, 'not_scored', null]]);
   assert.deepEqual(await batch.calls(), ['score C maps'], 'the final file is scored for diagnosis, the snapshots are not');
+});
+
+test('a broken boundary keeps the attempt at 0 even when the scorer fails on its file: no retries, no score_error', async t => {
+  const batch = await snapshotBatch(t, { steps: [{ after: 1, write: 'OWN' }, { after: 2, write: 'tamper' }, { after: 0.1, write: 'THROW' }] });
+  await execute({ batchDir: batch.batchDir, deps: batch.deps });
+  const result = await readJSON(join(batch.attemptDir, 'result.json'));
+  assert.equal(result.status, 'generation_failed'); assert.equal(result.score, 0);
+  assert.deepEqual(result.snapshots.map(item => [item.t, item.status, item.score]), [[2, 'not_scored', null]]);
+  assert.deepEqual(await batch.calls(), ['score THROW maps']);
+  // rescore leaves them as they are.
+  assert.equal(await rescoreSnapshots({ attemptDir: batch.attemptDir, batchDir: batch.batchDir, result, finalReport: null, score: async () => { throw new Error('not called'); } }), null);
 });
 
 test('a runner that died after generation scores the snapshots from their index, keeping the partial scoring aside', async t => {
@@ -443,4 +477,10 @@ test('rescore scores every distinct snapshot again and keeps the earlier reports
   assert.deepEqual(failed.map(item => [item.status, item.error]), [['lost', 'snapshot not written: ENOSPC'], ['score_error', 'boom']]);
   const again = await rescoreSnapshots({ attemptDir, batchDir, result: { ...result, snapshots: failed }, finalReport: { valid: true, score: 91 }, score });
   assert.deepEqual(again.map(item => [item.t, item.status, item.score]), [[1200, 'lost', null], [1500, 'scored', 31]]);
+  // A report the scorer marks as its own failure is retried; still failing, a score_error, not 0.
+  // A final report like that is not reused for the snapshot with its bytes.
+  const own = async () => ({ schema: 'e3d-report-v1', valid: false, scorer_failed: true, error: 'Scorer error: internal', score: 0 });
+  const ownOut = await rescoreSnapshots({ attemptDir, batchDir, result, finalReport: await own(), score: own });
+  assert.deepEqual(ownOut.map(item => [item.t, item.status, item.score, item.tries ?? null]), [[300, 'score_error', null, 3], [600, 'score_error', null, 3], [900, 'score_error', null, 3]]);
+  assert.match(ownOut[0].error, /Scorer error: internal/);
 });

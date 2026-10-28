@@ -26,9 +26,16 @@ export const SNAPSHOT_SCHEMA = 'e3d-snapshots-v1';
 // later, a few times, before it is taken as it is.
 export const SETTLE = { tries: 4, ms: 750 };
 
-// A snapshot the scorer fails on (it throws, crashes or times out) is scored
-// again from the same stored file this many times before it is a score_error.
+// A snapshot the scorer fails on (it throws, crashes or times out, or reports
+// its own failure, see scorerFailed) is scored again from the same stored file
+// this many times before it is a score_error.
 export const SNAPSHOT_SCORE_RETRIES = 2;
+
+// A report that records the scorer's failure rather than judging the file:
+// score-worker.mjs writes { scorer_failed: true, error } when the scorer
+// threw, and a scorer that catches its own internal error marks its report
+// the same way (valid: false alone means an invalid model, scored 0).
+export const scorerFailed = report => report?.scorer_failed === true;
 
 export const snapshotName = t => 't' + String(t).padStart(4, '0');
 
@@ -235,7 +242,7 @@ export async function rescoreSnapshots({ attemptDir, batchDir, result, finalRepo
   const records = result.snapshots.map(recordOf);
   if (!records.length) return null;
   const finalSha = typeof result.artifact?.sha256 === 'string' ? result.artifact.sha256 : null;
-  const final = finalReport && finalSha ? { sha256: finalSha, score: scoreOf(finalReport), valid: finalReport.valid !== false,
+  const final = finalReport && finalSha && !scorerFailed(finalReport) ? { sha256: finalSha, score: scoreOf(finalReport), valid: finalReport.valid !== false,
     report: typeof result.report === 'string' ? result.report : null } : null;
   const jobs = snapshotJobs(records, final?.sha256 ?? null), scores = new Map(), scoreDir = join(attemptDir, 'snapshots', 'score');
   if (jobs.length) {
@@ -249,17 +256,19 @@ export async function rescoreSnapshots({ attemptDir, batchDir, result, finalRepo
   for (const job of jobs) {
     const path = join(scoreDir, job.name + '.json');
     for (let tries = 1; ; tries++) {
+      let report = null, failure = null;
       try {
-        const report = await score(await readFile(join(attemptDir, job.file)));
+        report = await score(await readFile(join(attemptDir, job.file)));
+        if (scorerFailed(report)) failure = report.error ?? 'the scorer reported that it failed';
+      } catch (error) { failure = error?.message ?? String(error); }
+      if (!failure) {
         await writeJSON(path, report);
         scores.set(job.sha256, { status: 'scored', score: scoreOf(report), valid: report.valid !== false, ...(report.valid === false && report.error ? { error: report.error } : {}),
           ...(tries > 1 ? { tries } : {}), report: relative(batchDir, path) });
         break;
-      } catch (error) {
-        const message = error?.message ?? String(error);
-        await writeJSON(tries > SNAPSHOT_SCORE_RETRIES ? path : join(scoreDir, job.name + '.try-' + tries + '.json'), { scorer_failed: true, error: message });
-        if (tries > SNAPSHOT_SCORE_RETRIES) { scores.set(job.sha256, { status: 'score_error', score: null, valid: null, tries, error: message }); break; }
       }
+      await writeJSON(tries > SNAPSHOT_SCORE_RETRIES ? path : join(scoreDir, job.name + '.try-' + tries + '.json'), report ?? { scorer_failed: true, error: failure });
+      if (tries > SNAPSHOT_SCORE_RETRIES) { scores.set(job.sha256, { status: 'score_error', score: null, valid: null, tries, error: failure }); break; }
     }
   }
   return scoredSnapshots(records, { scores, final });

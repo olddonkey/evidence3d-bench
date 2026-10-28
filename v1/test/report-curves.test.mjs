@@ -156,3 +156,24 @@ test('collectRuns reads the snapshots from result.json', async t => {
   await writeFile(join(attemptDir, 'result.json'), JSON.stringify({ task_id: 'house-t2', attempt: 1, status: 'completed', score: 70 }));
   assert.equal((await collectRuns({ dataRoot, batches: ['b1'] })).attempts[0].snapshots, null, 'an older result has none');
 });
+
+test('an attempt with integrity problems is 0 on the leaderboard and at every tick, whatever its file and snapshots scored', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'e3d-curves-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataRoot = join(root, 'data'), attemptDir = join(dataRoot, 'runs', 'b1', 'house-t2', 'a1');
+  await mkdir(join(dataRoot, 'truth', 'house-t2'), { recursive: true });
+  await writeFile(join(dataRoot, 'truth', 'house-t2', 'truth.json'), JSON.stringify({ object: 'house', variant: 't2', scale_evidence: 'none' }));
+  await mkdir(join(attemptDir, 'score'), { recursive: true });
+  // The runner scores the file for diagnosis but records 0; a scorer failure on a snapshot does not make the attempt missing.
+  await writeFile(join(attemptDir, 'score', 'report.json'), JSON.stringify({ schema: 'e3d-report-v1', valid: true, score: 70 }));
+  await writeFile(join(attemptDir, 'result.json'), JSON.stringify({ task_id: 'house-t2', attempt: 1, system: 's', model: 'm', status: 'timeout', score: 0,
+    integrity_problems: ['the CLI wrote outside its workspace'], wall_seconds: 1805, wall_limit_seconds: 1800, snapshot_interval_seconds: 300,
+    snapshots: [{ t: 300, status: 'scored', score: 40 }, { t: 600, status: 'score_error', score: null }, { t: 900, status: 'not_scored', score: null }] }));
+  const { attempts, problems } = await collectRuns({ dataRoot, batches: ['b1'] });
+  assert.equal(attempts[0].score, 0); assert.equal(attempts[0].valid, false);
+  assert.match(attempts[0].failure, /integrity/);
+  assert.ok(!problems.some(problem => /differs from report\.score/.test(problem)), 'result.score 0 is not a disagreement with the report');
+  assert.deepEqual([300, 600, 900, 1800].map(tick => scoreAt(attempts[0], tick)), [0, 0, 0, 0]);
+  const curve = timeCurve(attempts, plainMetric(attempts));
+  assert.ok(curve.points.every(point => point.mean === 0 && !point.missing));
+});

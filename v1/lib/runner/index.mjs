@@ -14,7 +14,7 @@ import { classifyStatus, scoreOf, STATUSES, NOT_SAMPLES } from './status.mjs';
 import { detectInfra, modelTurns, retryWatch, INFRA_REASONS } from './infra.mjs';
 import { createGate, holdUntil, HOLD_KIND, SCHEDULE } from './schedule.mjs';
 import { hostSleepCheck, hostSuspension, PMSET } from './hostsleep.mjs';
-import { DEFAULT_SNAPSHOT_SECONDS, SNAPSHOT_SCORE_RETRIES, snapshotClock, readSnapshotIndex, snapshotJobs, scoredSnapshots } from './snapshots.mjs';
+import { DEFAULT_SNAPSHOT_SECONDS, SNAPSHOT_SCORE_RETRIES, scorerFailed, snapshotClock, readSnapshotIndex, snapshotJobs, scoredSnapshots } from './snapshots.mjs';
 import {
   sha256, sha256File, objectHash, readJSON, writeJSON, inventory, inventoryHash, makeReadOnly,
   buildRuntime, buildWorkspace, workspaceHashes, readArtifact, STALE_TEMPORARY, writeJSONSync, writeHarnessFile, readHarnessFile,
@@ -538,11 +538,11 @@ const MAX_TIMER_SECONDS = Math.floor((2 ** 31 - 1) / 1000);
 // Scores an attempt's snapshots, after its final artifact, in one worker
 // process (score-worker.mjs) that loads the task once and draws no error
 // maps. Content already scored (an earlier snapshot, the final artifact) is
-// not scored again. A snapshot the scorer failed on (it threw, or the worker
-// died or timed out before reaching it) is scored again, from the same stored
-// file, each in a worker of its own, up to SNAPSHOT_SCORE_RETRIES times; one
-// that still fails is a score_error, which the report leaves out of that tick
-// as missing.
+// not scored again. A snapshot the scorer failed on (it threw or reported
+// its own failure, or the worker died or timed out before reaching it) is
+// scored again, from the same stored file, each in a worker of its own, up to
+// SNAPSHOT_SCORE_RETRIES times; one that still fails is a score_error, which
+// the report leaves out of that tick as missing.
 // Returns the records as result.json carries them (scoredSnapshots), or
 // { aborted } / { frozen } like scoreArtifact: then nothing is recorded and a
 // later run scores the attempt again.
@@ -572,7 +572,7 @@ async function scoreSnapshots({ manifest, task, dir, batchDir, records, final, d
       for (const item of batch) {
         const path = join(scoreDir, item.name + '.json');
         const report = await readJSON(path).catch(() => null);
-        if (!report || report.scorer_failed) {
+        if (!report || scorerFailed(report)) {
           failed.push(item);
           scores.set(item.sha256, { status: 'score_error', score: null, valid: null, tries: round + 1, error: report?.error ?? failure ?? 'the scorer wrote no report' });
         } else scores.set(item.sha256, { status: 'scored', score: scoreOf(report), valid: report.valid !== false, ...(report.valid === false && report.error ? { error: report.error } : {}),
@@ -886,7 +886,8 @@ async function runAttempt({ batchDir, manifest, task, attempt, adapter, deps, lo
     // Scored only for a run the runner supervised to its end with its
     // boundary intact; otherwise kept, unscored, for diagnosis.
     if (!infra && !integrityProblems.length && snapshotRecords.length) {
-      const final = report && artifact.sha256 ? { sha256: artifact.sha256, score: scoreOf(report), valid: report.valid !== false, report: relative(batchDir, reportPath) } : null;
+      // A final report that is the scorer's failure is not reused for a snapshot with the same bytes.
+      const final = report && artifact.sha256 && !scorerFailed(report) ? { sha256: artifact.sha256, score: scoreOf(report), valid: report.valid !== false, report: relative(batchDir, reportPath) } : null;
       if (snapshotRecords.some(record => record.file && !record.problem && !record.error)) log({ event: 'scoring_snapshots', task_id: task.id, attempt: attempt.n });
       const scored = await scoreSnapshots({ manifest, task, dir, batchDir, records: snapshotRecords, final, deps, control, repoRoot });
       if (scored.aborted) return { result: null, skipped: false, interrupted: true };

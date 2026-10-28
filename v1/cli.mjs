@@ -145,11 +145,13 @@ try {
             const result = await readJSON(resultPath);
             if (result.status !== 'infra_error') {
               const status = result.status === 'score_error' ? (report.valid ? 'completed' : 'invalid_artifact') : result.status;
+              // A broken boundary keeps the attempt at 0, as the runner recorded it.
+              const score = result.integrity_problems?.length ? 0 : report.score;
               const snapshots = await snapshotsOf(result, report);
               const snapshotsChanged = snapshots && JSON.stringify(snapshots) !== JSON.stringify(result.snapshots);
-              if (status !== result.status || result.score !== report.score || snapshotsChanged) {
+              if (status !== result.status || result.score !== score || snapshotsChanged) {
                 await writeJSON(join(batchDir, task, attempt, 'result.previous.json'), result);
-                await writeJSON(resultPath, { ...result, status, score: report.score, report_valid: report.valid, ...(snapshots ? { snapshots } : {}),
+                await writeJSON(resultPath, { ...result, status, score, report_valid: report.valid, ...(snapshots ? { snapshots } : {}),
                   rescored: { at: new Date().toISOString(), scorer: report.scorer ?? null, from_status: result.status, from_score: result.score } });
               }
             }

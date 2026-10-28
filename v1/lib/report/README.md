@@ -42,7 +42,9 @@ Everything else is in `leaderboard.json`.
   are failures of the harness, the machine or the scorer. They are listed with
   the runner's reason (`result.infra.reason`) and are left out of every mean
   and every comparison. Every other attempt without a valid report scores 0
-  (timeouts without a model, invalid GLBs, missing artifacts).
+  (timeouts without a model, invalid GLBs, missing artifacts), and so does an
+  attempt with integrity problems (`result.integrity_problems`, a broken
+  boundary), whatever its file scored.
 - **Configurations** are `system / model / effort` as requested in
   `result.json`. Batches of one configuration merge; when the merged batches
   differ in CLI version or binary, prompt, runner, tool kit, runtime, protocol,
@@ -294,8 +296,9 @@ snapshots*), `curves.mjs` computes per configuration:
   no fault of the model (the scorer failed on it, also on the runner's retries:
   `score_error`; or the runner could not store it: `lost`) is left out of that
   tick's mean and counted in the point's `missing`; `score_errors` counts those
-  snapshots. The point at the limit is therefore `entry.score`. `finished` is
-  the share of attempts that had ended by t.
+  snapshots. An attempt with integrity problems is 0 at every tick. The point
+  at the limit is therefore `entry.score`. `finished` is the share of attempts
+  that had ended by t.
 - `t95`: per attempt with a final score of at least 10 (`T95_MIN_FINAL`), when
   its first snapshot at 95 % (`T95_SHARE`) of its final score was taken, or its
   end when no snapshot got there (the final file is the snapshot at the end);
