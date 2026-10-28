@@ -22,6 +22,10 @@ import { OPENAI } from '../lib/runner/api/openai.mjs';
 // preflight lays it out: canaries outside the workspace, and planted escape
 // routes inside it (file and directory symlinks, a dangling symlink, a hard
 // link, `..`).
+
+// Only macOS has /usr/bin/sandbox-exec; elsewhere the shell tests are skipped.
+const MACOS_ONLY = process.platform !== 'darwin' && 'macOS only: needs Seatbelt (/usr/bin/sandbox-exec)';
+
 const solid = (r, g, b, size = 48) => encodePNG(size, size, new Uint8Array(size * size * 3).map((_, i) => [r, g, b][i % 3]), 3);
 
 async function site(t) {
@@ -93,7 +97,7 @@ test('preflight\'s file-tool evaluation fails on a leak (the check is not vacuou
   assert.equal(checks['read-input'], 'pass'); assert.equal(checks['view-control'], 'pass');
 });
 
-test('the shell runs under the sandbox: the probe script finds no way out, no network, and input/ is read-only', async t => {
+test('the shell runs under the sandbox: the probe script finds no way out, no network, and input/ is read-only', { skip: MACOS_ONLY }, async t => {
   const s = await site(t);
   const listeners = await startListeners();
   t.after(() => listeners.close());
@@ -126,7 +130,7 @@ test('the shell runs under the sandbox: the probe script finds no way out, no ne
   assert.equal(extractProbeOutput(open).results['canary-direct'].outcome, 'allowed');
 });
 
-test('shell output is cut to 20,000 characters keeping both ends, a timeout kills the command, and nothing it started survives', async t => {
+test('shell output is cut to 20,000 characters keeping both ends, a timeout kills the command, and nothing it started survives', { skip: MACOS_ONLY }, async t => {
   const s = await site(t);
   const tools = createTools({ workspace: s.workspace, sandbox: s.sandbox });
   const long = await tools.run('shell', { command: "node -e \"process.stdout.write('A'.repeat(30000) + 'END')\"" });
