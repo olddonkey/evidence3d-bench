@@ -25,21 +25,38 @@ const attempt = (fields = {}) => {
     ...rest };
 };
 
-// metric() as cellEntry passes it, reduced to the plain mean over attempts (one per object here).
-const plainMetric = attempts => (name, valueOf) => ({ mean: mean(attempts.map(valueOf)), ci95: null, objects: attempts.length });
+// metric() as cellEntry passes it, reduced to the plain mean over attempts
+// (one per object here); a missing value leaves its attempt out, as there.
+const plainMetric = attempts => (name, valueOf) => {
+  const values = attempts.map(valueOf).filter(value => Number.isFinite(value));
+  return { mean: mean(values), ci95: null, objects: values.length };
+};
 
 test('an attempt counts its last snapshot while running, 0 before any model, and its final score once ended', () => {
   const a = attempt({ score: 80, wall: 1000, points: [[300, 0, 'absent'], [600, 40], [900, null]] });
   assert.equal(scoreAt(a, 300), 0);
   assert.equal(scoreAt(a, 450), 0, 'between ticks the last snapshot holds');
   assert.equal(scoreAt(a, 600), 40);
-  assert.equal(scoreAt(a, 900), 0, 'a snapshot the scorer failed on counts 0');
+  assert.equal(scoreAt(a, 900), null, 'a snapshot the scorer failed on is missing, not 0');
   assert.equal(scoreAt(a, 1200), 80, 'ended at 1000 s: the final score');
   const timedOut = attempt({ score: 55, wall: 1805, points: [[300, 10], [1500, 50]] });
   assert.equal(scoreAt(timedOut, 1500), 50);
   assert.equal(scoreAt(timedOut, 1800), 55, 'at the wall-clock limit every attempt has its final score');
   const failed = attempt({ score: 0, wall: 1200, points: [[300, 70]] });
   assert.equal(scoreAt(failed, 600), 70); assert.equal(scoreAt(failed, 1500), 0, 'a failure ends at 0 as on the leaderboard');
+});
+
+test('an attempt whose snapshot the scorer failed on is left out of that tick and counted as missing', () => {
+  const attempts = [attempt({ object: 'x', score: 80, wall: 1000, points: [[300, 40], [600, null, 'score_error']] }),
+    attempt({ object: 'y', score: 60, wall: 1000, points: [[300, 20], [600, 50]] }),
+    attempt({ object: 'z', score: 70, wall: 1000, points: [[300, null, 'lost'], [600, 0, 'refused']] })];
+  const curve = timeCurve(attempts, plainMetric(attempts));
+  assert.deepEqual(curve.points.slice(0, 2).map(point => [point.t, point.mean, point.objects, point.missing]), [[300, 30, 2, 1], [600, 25, 2, 1]]);
+  assert.equal(curve.score_errors, 2);
+  const board = buildLeaderboard({ attempts, batches: [], problems: [] }, { now: NOW });
+  const point = board.entries[0].time_curve.points[1];
+  near(point.mean, 25); assert.equal(point.missing, 1); assert.equal(point.objects, 2, 'the object with only a missing attempt is not in that tick');
+  assert.match(timeSection(board.entries), /1 missing/); assert.match(timeMarkdown(board.entries), /25\.0 \(1 missing\)/);
 });
 
 test('a snapshot read late counts from when it was taken, not from its tick', () => {

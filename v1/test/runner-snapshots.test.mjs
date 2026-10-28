@@ -39,17 +39,18 @@ function fakeGLB(marker) {
 }
 const markerOf = bytes => { try { return JSON.parse(bytes.subarray(20).toString('utf8').trim()).e3d; } catch { return null; } };
 
-const SCORES = { A: 30, B: 60, C: 90 };
+const SCORES = { A: 30, B: 60, C: 90, FLAKY: 40 };
 
-// A scorer that scores by marker, logs every call (and every context load), and
-// throws on THROW, judges BAD invalid.
-const fakeScorer = log => `import { appendFileSync } from 'node:fs';
+// A scorer that scores by marker, logs every call (and every context load),
+// throws on THROW (always) and FLAKY (its first time only), judges BAD invalid.
+const fakeScorer = log => `import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 const marker = glb => { try { return JSON.parse(glb.subarray(20).toString('utf8').trim()).e3d; } catch { return null; } };
 export async function loadContext() { appendFileSync(${JSON.stringify(log)}, 'context\\n'); return { loaded: true }; }
 export async function scoreSubmission({ glb, outDir, context }) {
   const m = marker(glb);
   appendFileSync(${JSON.stringify(log)}, 'score ' + m + (context?.loaded ? ' with-context' : '') + (outDir ? ' maps' : '') + '\\n');
   if (m === 'THROW') throw new Error('scorer exploded');
+  if (m === 'FLAKY' && !existsSync(${JSON.stringify(log)} + '.flaky')) { writeFileSync(${JSON.stringify(log)} + '.flaky', ''); throw new Error('scorer hiccup'); }
   if (m === 'BAD' || m === null) return { schema: 'e3d-report-v1', valid: false, error: 'Invalid GLB', score: 0 };
   return { schema: 'e3d-report-v1', valid: true, error: null, score: ${JSON.stringify(SCORES)}[m] ?? 50 };
 }
@@ -107,7 +108,7 @@ async function snapshotBatch(t, { steps, snapshotSeconds = 2, exit, sleep } = {}
   const dir = await scratch(t), dataRoot = join(dir, 'data');
   await makeDataRoot(dataRoot, TASK);
   await mkdir(join(dir, 'models'));
-  for (const marker of ['A', 'B', 'C', 'THROW', 'BAD']) await writeFile(join(dir, 'models', marker + '.glb'), fakeGLB(marker));
+  for (const marker of ['A', 'B', 'C', 'THROW', 'BAD', 'FLAKY']) await writeFile(join(dir, 'models', marker + '.glb'), fakeGLB(marker));
   const binary = await fakeShellCLI(dir, steps, { exit, sleep });
   const scorer = join(dir, 'fake-scorer.mjs'), log = join(dir, 'scorer.log');
   await writeFile(scorer, fakeScorer(log));
@@ -318,13 +319,19 @@ test('a snapshot identical to the final file reuses its score, and no snapshot s
   assert.deepEqual(await batch.calls(), ['score C maps']);
 });
 
-test('a snapshot the scorer fails on is a score_error of the snapshot only; one it judges invalid scores 0', async t => {
-  const batch = await snapshotBatch(t, { steps: [{ after: 1, write: 'THROW' }, { after: 2, write: 'BAD' }, { after: 2, write: 'C' }] });
+test('a snapshot the scorer fails on is scored again, twice at most, then a score_error of the snapshot only; one it judges invalid scores 0', async t => {
+  const batch = await snapshotBatch(t, { steps: [{ after: 1, write: 'THROW' }, { after: 2, write: 'BAD' }, { after: 2, write: 'FLAKY' }, { after: 2, write: 'C' }] });
   await execute({ batchDir: batch.batchDir, deps: batch.deps });
   const result = await readJSON(join(batch.attemptDir, 'result.json'));
   assert.equal(result.status, 'completed'); assert.equal(result.score, 90);
-  assert.deepEqual(result.snapshots.map(item => [item.t, item.status, item.score, item.valid]), [[2, 'score_error', null, null], [4, 'scored', 0, false]]);
+  assert.deepEqual(result.snapshots.map(item => [item.t, item.status, item.score, item.valid, item.tries ?? null]),
+    [[2, 'score_error', null, null, 3], [4, 'scored', 0, false, null], [6, 'scored', 40, true, 2]]);
   assert.match(result.snapshots[0].error, /scorer exploded/);
+  assert.deepEqual(await batch.calls(), ['score C maps', 'context', 'score THROW with-context', 'score BAD with-context', 'score FLAKY with-context',
+    'context', 'score THROW with-context', 'score FLAKY with-context', 'context', 'score THROW with-context'], 'only the failed ones again, from the stored files');
+  const scoreDir = join(batch.attemptDir, 'snapshots', 'score');
+  assert.deepEqual((await readdir(scoreDir)).filter(name => name.startsWith('t0002')).sort(), ['t0002.json', 't0002.try-1.json', 't0002.try-2.json']);
+  assert.equal((await readJSON(join(scoreDir, 't0006.json'))).score, 40);
 });
 
 test('with --snapshot-seconds 0 nothing is taken and result.json has no snapshots', async t => {
@@ -387,11 +394,13 @@ test('rescore scores every distinct snapshot again and keeps the earlier reports
     { t: 900, name: 't0900', present: true, sha256: sha(fakeGLB('C')), file: 'snapshots/t0900.glb', complete: true }];
   await writeFile(join(attemptDir, 'snapshots', 'index.json'), JSON.stringify({ snapshots: records }));
   const scored = [];
-  const score = async bytes => { scored.push(markerOf(bytes)); return { schema: 'e3d-report-v1', valid: true, score: SCORES[markerOf(bytes)] + 1 }; };
+  // The first call throws: the snapshot is scored again.
+  const score = async bytes => { scored.push(markerOf(bytes)); if (scored.length === 1) throw new Error('hiccup'); return { schema: 'e3d-report-v1', valid: true, score: SCORES[markerOf(bytes)] + 1 }; };
   const result = { status: 'completed', snapshots: [], artifact: { sha256: sha(fakeGLB('C')) }, report: TASK + '/a1/score/report.json', integrity_problems: [] };
   const out = await rescoreSnapshots({ attemptDir, batchDir, result, finalReport: { valid: true, score: 91 }, score });
-  assert.deepEqual(scored, ['A'], 'one call per distinct content, none for the final file');
+  assert.deepEqual(scored, ['A', 'A'], 'one content, scored again after a throw; none for the final file');
   assert.deepEqual(out.map(item => [item.t, item.score, item.score_of ?? null]), [[300, 31, null], [600, 31, 't0300'], [900, 91, 'final']]);
+  assert.equal(out[0].tries, 2); assert.ok(await exists(join(attemptDir, 'snapshots', 'score', 't0300.try-1.json')));
   assert.ok(await exists(join(attemptDir, 'snapshots', 'score.previous-1', 't0300.json')));
   assert.equal(await rescoreSnapshots({ attemptDir, batchDir, result: { ...result, status: 'infra_error' }, finalReport: null, score }), null);
   assert.equal(await rescoreSnapshots({ attemptDir, batchDir, result: { status: 'completed' }, finalReport: null, score }), null, 'no snapshots recorded');

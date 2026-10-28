@@ -196,7 +196,10 @@ its copy was taken, and the report uses that time, not the tick.
 After the final file is scored, the attempt's snapshots are scored in one worker process
 (`score-worker.mjs` with a `snapshots` job: the task is loaded once, no error maps are
 drawn), one per distinct content; a snapshot with the final file's content takes its
-score. **The attempt's score is still the final file's alone.** With concurrency 1 this
+score. A snapshot the scorer fails on (it throws, or the worker crashes or times out
+before reaching it) is scored again from the same stored file in a fresh worker, up to
+2 times (`SNAPSHOT_SCORE_RETRIES`; nothing is generated again), the failed tries' reports
+kept as `t0300.try-1.json`, … . **The attempt's score is still the final file's alone.** With concurrency 1 this
 happens before the next attempt launches, so it never overlaps a contestant; it costs
 about one scoring (25–100 s) per distinct snapshot, at most 5 for a 30-minute attempt
 (the worker's time limit is the scoring limit per snapshot, for all of them).
@@ -214,8 +217,10 @@ from the spawn), present, bytes, sha256, complete
 (a whole GLB), file, same_as, status, score, valid, score_of, report, problem, error }`.
 `status` is `absent` (no `model.glb` yet: score 0), `refused` (score 0, with `problem`),
 `scored` (the scorer's score, 0 for an invalid model; `score_of` names the snapshot,
-or `final`, whose scoring it shares), `score_error` (the scorer failed on it: score
-null), `lost` (read but not stored: score null) or `not_scored`. The report turns them
+or `final`, whose scoring it shares), `score_error` (the scorer failed on it, and on its
+retries: score null, `tries` in all), `lost` (read but not stored: score null) or
+`not_scored`. The report counts a `score_error` or `lost` snapshot as missing, not as 0:
+a scorer failure is not the model's performance. The report turns them
 into a score-over-time curve and the median time to 95 % of the final score
 (`v1/lib/report/README.md`).
 

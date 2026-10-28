@@ -10,8 +10,13 @@ import { finite, median, quantile } from './stats.mjs';
 //   - before that, the score of its last snapshot taken at or before T (taken:
 //     when the runner had read it, which can be after the tick it was due at
 //     on a busy runner): 0 when there was no output/model.glb yet, or one the
-//     runner refused, or one the scorer judged invalid; a snapshot the scorer
-//     failed on also counts 0 (and is counted in score_errors);
+//     runner refused, or one the scorer judged invalid;
+//   - missing (null) when that snapshot has no score through no fault of the
+//     model: the scorer failed on it, also on the runner's retries
+//     (score_error), or the runner could not store it (lost). The attempt is
+//     left out of that tick's mean, and the tick reports it in `missing`; a
+//     scorer failure is not the model's performance, as on the leaderboard,
+//     where a final file's score_error is left out and re-scored;
 //   - 0 before its first snapshot (output/ starts empty).
 // At each tick the attempts are averaged exactly as the leaderboard score is
 // (attempts within a task, tasks within an object, then objects), so the
@@ -30,10 +35,12 @@ export const T95_MIN_FINAL = 10;
 const takenAt = point => finite(point.at) ? point.at : point.t;
 const ended = (attempt, t) => (finite(attempt.wall_limit_seconds) && t >= attempt.wall_limit_seconds) || (finite(attempt.wall_seconds) && attempt.wall_seconds <= t);
 
+const MISSING = new Set(['score_error', 'lost']);
+
 export function scoreAt(attempt, t) {
   if (ended(attempt, t) || !attempt.snapshots) return attempt.score;
   let value = 0;
-  for (const point of attempt.snapshots.points) if (takenAt(point) <= t) value = finite(point.score) ? point.score : 0;
+  for (const point of attempt.snapshots.points) if (takenAt(point) <= t) value = finite(point.score) ? point.score : MISSING.has(point.status) ? null : 0;
   return value;
 }
 
@@ -70,7 +77,7 @@ export function timeCurve(attempts, metric) {
   }
   const ticks = curveTicks(attempts);
   const points = ticks.map(t => ({ t, ...metric('time/' + t, attempt => scoreAt(attempt, t), 'score at ' + t + ' s: the last snapshot before the attempt ended, its final score after; same averaging as the score'),
-    finished: attempts.filter(attempt => ended(attempt, t)).length / attempts.length }));
+    finished: attempts.filter(attempt => ended(attempt, t)).length / attempts.length, missing: attempts.filter(attempt => scoreAt(attempt, t) === null).length }));
   const times = attempts.map(attempt => timeToShare(attempt)).filter(finite).sort((a, b) => a - b);
   const intervals = [...new Set(attempts.map(attempt => attempt.snapshots.interval_seconds))].sort((a, b) => a - b);
   const snapshots = attempts.flatMap(attempt => attempt.snapshots.points);

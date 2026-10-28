@@ -143,10 +143,13 @@ snapshots*), `curves.mjs` computes per configuration:
   score once it has ended (`wall_seconds <= t`, or t at its
   `wall_limit_seconds`) and, before that, the score of its last snapshot taken
   at or before t (taken: the end of its read, `read_seconds`, which a busy runner
-  can put after the tick it was due at): 0 with no `model.glb` yet, a refused file, an invalid model,
-  or a snapshot the scorer failed on (`score_errors` counts those). The point
-  at the limit is therefore `entry.score`. `finished` is the share of attempts
-  that had ended by t.
+  can put after the tick it was due at): 0 with no `model.glb` yet, a refused
+  file or an invalid model. An attempt whose snapshot there has no score through
+  no fault of the model (the scorer failed on it, also on the runner's retries:
+  `score_error`; or the runner could not store it: `lost`) is left out of that
+  tick's mean and counted in the point's `missing`; `score_errors` counts those
+  snapshots. The point at the limit is therefore `entry.score`. `finished` is
+  the share of attempts that had ended by t.
 - `t95`: per attempt with a final score of at least 10 (`T95_MIN_FINAL`), when
   its first snapshot at 95 % (`T95_SHARE`) of its final score was taken, or its
   end when no snapshot got there (the final file is the snapshot at the end);

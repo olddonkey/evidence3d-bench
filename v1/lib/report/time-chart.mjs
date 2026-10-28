@@ -44,7 +44,7 @@ function chart(entries, colour) {
     const path = [[0, 0], ...points.map(point => [point.t, point.mean])].map(([t, value]) => x(t).toFixed(1) + ',' + y(value).toFixed(1)).join(' ');
     const marks = points.map(point => '<circle class="mark" cx="' + x(point.t).toFixed(1) + '" cy="' + y(point.mean).toFixed(1) + '" r="4" style="fill: var(--series-' + slot + ')">' +
       '<title>' + esc(entry.key + ' at ' + minuteLabel(point.t) + ' min: ' + point.mean.toFixed(1) + (point.ci95 ? ' [' + point.ci95[0].toFixed(1) + ', ' + point.ci95[1].toFixed(1) + ']' : '') +
-        '; ' + Math.round(100 * point.finished) + '% of attempts finished') + '</title></circle>').join('');
+        '; ' + Math.round(100 * point.finished) + '% of attempts finished' + (point.missing ? '; ' + point.missing + ' missing' : '')) + '</title></circle>').join('');
     return '<g><polyline class="series" points="' + path + '" style="stroke: var(--series-' + slot + ')"/>' + marks + '</g>';
   }).join('');
   let labels = '';
@@ -76,18 +76,20 @@ export function timeSection(entries) {
         const point = byTick.get(t);
         if (!point || !isNumber(point.mean)) return '<td class="num">' + NOT_EVALUATED + '</td>';
         return '<td class="num">' + num(point.mean) + '<small>' + (point.ci95 ? '[' + num(point.ci95[0]) + ', ' + num(point.ci95[1]) + ']' : 'no interval') + '</small><small>' +
-          Math.round(100 * point.finished) + '% finished</small></td>';
+          Math.round(100 * point.finished) + '% finished</small>' + (point.missing ? '<small>' + point.missing + ' missing</small>' : '') + '</td>';
       }).join('') +
         '<td class="num">' + (isNumber(curve.t95.median_seconds) ? num(minutes(curve.t95.median_seconds), 1, { suffix: ' min' }) + '<small>IQR ' + minuteLabel(curve.t95.q1_seconds) + '–' +
           minuteLabel(curve.t95.q3_seconds) + '</small>' : NOT_EVALUATED) + '<small>n = ' + curve.t95.attempts + (curve.t95.low_final ? ', ' + curve.t95.low_final + ' below ' + curve.t95.min_final : '') + '</small></td>' +
-        '<td class="num">' + curve.snapshots + (curve.score_errors ? '<small class="bad">' + curve.score_errors + ' not scored (scorer failed)</small>' : '') +
+        '<td class="num">' + curve.snapshots + (curve.score_errors ? '<small class="bad">' + curve.score_errors + ' not scored (scorer failed or not stored)</small>' : '') +
           (curve.not_scored ? '<small>' + curve.not_scored + ' not scored</small>' : '') + '</td></tr>';
     }).join('\n') + '</tbody></table></div>';
   const over = withCurve.length > SERIES_SLOTS ? '<p class="legend">The chart shows ' + SERIES_SLOTS + ' configurations (by name); the table has all ' + withCurve.length + '.</p>' : '';
   const interval = [...new Set(withCurve.map(entry => entry.time_curve.interval_seconds).flat())].map(minuteLabel).join(', ');
   return chart(withCurve, colour) + over + table + missing +
     '<p class="legend">While an attempt runs, the runner copies its <code>output/model.glb</code> every ' + interval + ' min (outside the sandbox) and scores the copies afterwards; the leaderboard still scores only the final file. ' +
-    'At each tick an attempt counts its final score once it has ended, before that its last snapshot&rsquo;s score (0 while it had no valid model); attempts, tasks and objects are averaged as for the score, ' +
+    'At each tick an attempt counts its final score once it has ended, before that its last snapshot&rsquo;s score (0 while it had no valid model); ' +
+    'an attempt whose last snapshot has no score because the scorer failed on it (also when the runner scored it again) or the runner could not store it is left out of that tick and counted as <em>missing</em>. ' +
+    'Attempts, tasks and objects are averaged as for the score, ' +
     'so the last column of the curve is the leaderboard score. <strong>95% of final</strong>: per attempt with a final score of at least 10, the minutes to its first snapshot at 95% of that score ' +
     '(its end if no snapshot got there); median and interquartile range over attempts.</p>';
 }
@@ -100,10 +102,12 @@ export function timeMarkdown(entries) {
   const head = ['Configuration', ...ticks.map(t => minuteLabel(t) + ' min'), '95% of final (median)'];
   const rows = withCurve.map(entry => {
     const byTick = new Map(entry.time_curve.points.map(point => [point.t, point]));
-    return [entry.key, ...ticks.map(t => isNumber(byTick.get(t)?.mean) ? byTick.get(t).mean.toFixed(1) : 'n/a'), t95Text(entry.time_curve.t95)];
+    return [entry.key, ...ticks.map(t => isNumber(byTick.get(t)?.mean) ? byTick.get(t).mean.toFixed(1) + (byTick.get(t).missing ? ' (' + byTick.get(t).missing + ' missing)' : '') : 'n/a'),
+      t95Text(entry.time_curve.t95)];
   });
   return ['### Score over time', '',
     '| ' + head.map(cell).join(' | ') + ' |', '|' + head.map((_, i) => i ? ' ---: |' : ' --- |').join(''), ...rows.map(row => '| ' + row.map(cell).join(' | ') + ' |'), '',
-    'Mean score at each tick (minutes after the CLI started), from snapshots of output/model.glb: an attempt counts its final score once ended, before that its last snapshot\'s score; ' +
+    'Mean score at each tick (minutes after the CLI started), from snapshots of output/model.glb: an attempt counts its final score once ended, before that its last snapshot\'s score ' +
+      '(left out as missing when the scorer failed on that snapshot); ' +
       'averaged like the score, so the last column is the leaderboard score. 95% of final: median minutes to the first snapshot at 95% of an attempt\'s final score (final ≥ 10).', ''].join('\n');
 }

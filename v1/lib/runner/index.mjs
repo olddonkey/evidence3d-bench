@@ -14,7 +14,7 @@ import { classifyStatus, scoreOf, STATUSES, NOT_SAMPLES } from './status.mjs';
 import { detectInfra, modelTurns, retryWatch, INFRA_REASONS } from './infra.mjs';
 import { createGate, holdUntil, HOLD_KIND, SCHEDULE } from './schedule.mjs';
 import { hostSleepCheck, hostSuspension, PMSET } from './hostsleep.mjs';
-import { DEFAULT_SNAPSHOT_SECONDS, snapshotClock, readSnapshotIndex, snapshotJobs, scoredSnapshots } from './snapshots.mjs';
+import { DEFAULT_SNAPSHOT_SECONDS, SNAPSHOT_SCORE_RETRIES, snapshotClock, readSnapshotIndex, snapshotJobs, scoredSnapshots } from './snapshots.mjs';
 import {
   sha256, sha256File, objectHash, readJSON, writeJSON, inventory, inventoryHash, makeReadOnly,
   buildRuntime, buildWorkspace, workspaceHashes, readArtifact, STALE_TEMPORARY, writeJSONSync, writeHarnessFile, readHarnessFile,
@@ -538,9 +538,13 @@ const MAX_TIMER_SECONDS = Math.floor((2 ** 31 - 1) / 1000);
 // Scores an attempt's snapshots, after its final artifact, in one worker
 // process (score-worker.mjs) that loads the task once and draws no error
 // maps. Content already scored (an earlier snapshot, the final artifact) is
-// not scored again. Returns the records as result.json carries them
-// (scoredSnapshots), or { aborted } / { frozen } like scoreArtifact: then
-// nothing is recorded and a later run scores the attempt again.
+// not scored again. A snapshot the scorer failed on (it threw, or the worker
+// died or timed out before reaching it) is scored again, from the same stored
+// file, in a fresh worker, up to SNAPSHOT_SCORE_RETRIES times; one that still
+// fails is a score_error, which the report leaves out of that tick as missing.
+// Returns the records as result.json carries them (scoredSnapshots), or
+// { aborted } / { frozen } like scoreArtifact: then nothing is recorded and a
+// later run scores the attempt again.
 async function scoreSnapshots({ manifest, task, dir, batchDir, records, final, deps, control, repoRoot }) {
   const jobs = snapshotJobs(records, final?.sha256 ?? null), scores = new Map();
   if (jobs.length) {
@@ -548,25 +552,34 @@ async function scoreSnapshots({ manifest, task, dir, batchDir, records, final, d
     if (drift.length) return { frozen: drift };
     const paths = layout(manifest.data_root), scoreDir = join(dir, 'snapshots', 'score');
     await freshScoreDir(scoreDir);
-    const job = join(scoreDir, 'job.json');
-    await writeJSON(job, { module: scorerModulePath(deps), taskDir: paths.task(task.id), truthDir: paths.truth(task.id), dataRoot: manifest.data_root,
-      snapshots: jobs.map(item => ({ name: item.name, glb: join(dir, item.file), out: join(scoreDir, item.name + '.json') })) });
-    // The scorer's allowance per snapshot, for all of them; within what a timer can hold.
-    const seconds = Math.min((deps.scoreSeconds ?? 1800) * jobs.length, MAX_TIMER_SECONDS);
-    const run = await captureProcess(process.execPath, [join(HERE, 'score-worker.mjs'), job], { cwd: scoreDir, seconds,
-      env: childEnvironment(), stdoutPath: join(scoreDir, 'worker.stdout.log'), stderrPath: join(scoreDir, 'worker.stderr.log'), signal: control.signal,
-      onSpawn: pid => { control.pids.set(scoreDir, pid); writeJSONSync(join(scoreDir, 'worker.json'), { pid, started: startTimeOf(pid) }); } });
-    control.pids.delete(scoreDir);
-    if (run.aborted) return { aborted: true };
-    // A worker that died part way leaves the snapshots it had not reached as
-    // score errors; whatever it finished counts.
-    const failure = run.exit_code !== 0 ? 'snapshot scorer failed (exit ' + run.exit_code + (run.timed_out ? ', timed out' : '') + '): ' + run.stderr.trim().split('\n').slice(-3).join(' | ') : null;
-    for (const item of jobs) {
-      const path = join(scoreDir, item.name + '.json');
-      const report = await readJSON(path).catch(() => null);
-      if (!report || report.scorer_failed) scores.set(item.sha256, { status: 'score_error', score: null, valid: null, error: report?.error ?? failure ?? 'the scorer wrote no report' });
-      else scores.set(item.sha256, { status: 'scored', score: scoreOf(report), valid: report.valid !== false, ...(report.valid === false && report.error ? { error: report.error } : {}),
-        report: relative(batchDir, path) });
+    let pending = jobs;
+    for (let round = 0; pending.length && round <= SNAPSHOT_SCORE_RETRIES; round++) {
+      const suffix = round ? '.retry-' + round : '', job = join(scoreDir, 'job' + suffix + '.json');
+      // The failed try's report is kept beside the next one (t0300.try-1.json, ...).
+      if (round) for (const item of pending) await rename(join(scoreDir, item.name + '.json'), join(scoreDir, item.name + '.try-' + round + '.json')).catch(() => {});
+      await writeJSON(job, { module: scorerModulePath(deps), taskDir: paths.task(task.id), truthDir: paths.truth(task.id), dataRoot: manifest.data_root,
+        snapshots: pending.map(item => ({ name: item.name, glb: join(dir, item.file), out: join(scoreDir, item.name + '.json') })) });
+      // The scorer's allowance per snapshot, for all of them; within what a timer can hold.
+      const seconds = Math.min((deps.scoreSeconds ?? 1800) * pending.length, MAX_TIMER_SECONDS);
+      const run = await captureProcess(process.execPath, [join(HERE, 'score-worker.mjs'), job], { cwd: scoreDir, seconds,
+        env: childEnvironment(), stdoutPath: join(scoreDir, 'worker' + suffix + '.stdout.log'), stderrPath: join(scoreDir, 'worker' + suffix + '.stderr.log'), signal: control.signal,
+        onSpawn: pid => { control.pids.set(scoreDir, pid); writeJSONSync(join(scoreDir, 'worker.json'), { pid, started: startTimeOf(pid) }); } });
+      control.pids.delete(scoreDir);
+      if (run.aborted) return { aborted: true };
+      // A worker that died part way leaves the snapshots it had not reached
+      // unscored; whatever it finished counts.
+      const failure = run.exit_code !== 0 ? 'snapshot scorer failed (exit ' + run.exit_code + (run.timed_out ? ', timed out' : '') + '): ' + run.stderr.trim().split('\n').slice(-3).join(' | ') : null;
+      const failed = [];
+      for (const item of pending) {
+        const path = join(scoreDir, item.name + '.json');
+        const report = await readJSON(path).catch(() => null);
+        if (!report || report.scorer_failed) {
+          failed.push(item);
+          scores.set(item.sha256, { status: 'score_error', score: null, valid: null, tries: round + 1, error: report?.error ?? failure ?? 'the scorer wrote no report' });
+        } else scores.set(item.sha256, { status: 'scored', score: scoreOf(report), valid: report.valid !== false, ...(report.valid === false && report.error ? { error: report.error } : {}),
+          ...(round ? { tries: round + 1 } : {}), report: relative(batchDir, path) });
+      }
+      pending = failed;
     }
   }
   return { records: scoredSnapshots(records, { scores, final }) };
