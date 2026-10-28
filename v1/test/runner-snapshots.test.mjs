@@ -483,4 +483,10 @@ test('rescore scores every distinct snapshot again and keeps the earlier reports
   const ownOut = await rescoreSnapshots({ attemptDir, batchDir, result, finalReport: await own(), score: own });
   assert.deepEqual(ownOut.map(item => [item.t, item.status, item.score, item.tries ?? null]), [[300, 'score_error', null, 3], [600, 'score_error', null, 3], [900, 'score_error', null, 3]]);
   assert.match(ownOut[0].error, /Scorer error: internal/);
+  // A failure with no message is still a failure: an empty Error, or a flagged report with an empty error.
+  for (const failing of [async () => { throw new Error(); }, async () => ({ schema: 'e3d-report-v1', valid: false, scorer_failed: true, error: '', score: 0 })]) {
+    const silent = await rescoreSnapshots({ attemptDir, batchDir, result, finalReport: { valid: true, score: 91 }, score: failing });
+    assert.deepEqual(silent.map(item => [item.t, item.status, item.score, item.tries ?? null]), [[300, 'score_error', null, 3], [600, 'score_error', null, 3], [900, 'scored', 91, null]]);
+    assert.ok(silent[0].error, 'a failure is described even without a message');
+  }
 });

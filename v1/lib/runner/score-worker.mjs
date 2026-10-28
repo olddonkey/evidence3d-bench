@@ -27,7 +27,7 @@ if (Array.isArray(job.snapshots)) {
       const report = await scoreSubmission({ glb: await readFile(snapshot.glb), taskDir: job.taskDir, truthDir: job.truthDir, dataRoot: job.dataRoot, context });
       if (!report || typeof report !== 'object') throw new Error('scoreSubmission returned no report');
       written = report;
-    } catch (error) { written = { scorer_failed: true, error: error?.message ?? String(error) }; }
+    } catch (error) { written = { scorer_failed: true, error: error?.message || String(error) }; }
     await mkdir(dirname(snapshot.out), { recursive: true });
     await writeFile(snapshot.out, JSON.stringify(written, null, 2) + '\n');
     console.log(JSON.stringify({ snapshot: snapshot.name, valid: written.valid ?? null, score: written.score ?? null, error: written.error ?? null }));

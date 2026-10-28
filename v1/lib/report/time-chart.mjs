@@ -41,11 +41,20 @@ function chart(entries, colour) {
     '<text class="axis" x="' + ((left + W - right) / 2) + '" y="' + (H - 6) + '" text-anchor="middle">minutes after the CLI started</text>';
   const lines = shown.map(entry => {
     const slot = colour.get(entry.key), points = entry.time_curve.points.filter(point => isNumber(point.mean));
-    const path = [[0, 0], ...points.map(point => [point.t, point.mean])].map(([t, value]) => x(t).toFixed(1) + ',' + y(value).toFixed(1)).join(' ');
+    // Runs of consecutive ticks with a mean, from the origin (no model at 0):
+    // a tick where every counted attempt is missing breaks the line, so no
+    // progress is drawn across it.
+    const runs = [[[0, 0]]];
+    for (const point of [...entry.time_curve.points].sort((a, b) => a.t - b.t)) {
+      if (isNumber(point.mean)) runs.at(-1).push([point.t, point.mean]);
+      else if (runs.at(-1).length) runs.push([]);
+    }
+    const path = runs.filter(run => run.length > 1).map(run => '<polyline class="series" points="' +
+      run.map(([t, value]) => x(t).toFixed(1) + ',' + y(value).toFixed(1)).join(' ') + '" style="stroke: var(--series-' + slot + ')"/>').join('');
     const marks = points.map(point => '<circle class="mark" cx="' + x(point.t).toFixed(1) + '" cy="' + y(point.mean).toFixed(1) + '" r="4" style="fill: var(--series-' + slot + ')">' +
       '<title>' + esc(entry.key + ' at ' + minuteLabel(point.t) + ' min: ' + point.mean.toFixed(1) + (point.ci95 ? ' [' + point.ci95[0].toFixed(1) + ', ' + point.ci95[1].toFixed(1) + ']' : '') +
         '; ' + Math.round(100 * point.finished) + '% of attempts finished' + (point.missing ? '; ' + point.missing + ' missing' : '')) + '</title></circle>').join('');
-    return '<g><polyline class="series" points="' + path + '" style="stroke: var(--series-' + slot + ')"/>' + marks + '</g>';
+    return '<g>' + path + marks + '</g>';
   }).join('');
   let labels = '';
   if (direct) {

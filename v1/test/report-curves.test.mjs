@@ -59,6 +59,20 @@ test('an attempt whose snapshot the scorer failed on is left out of that tick an
   assert.match(timeSection(board.entries), /1 missing/); assert.match(timeMarkdown(board.entries), /25\.0 \(1 missing\)/);
 });
 
+test('the chart breaks its line at a tick where every attempt is missing instead of drawing across it', () => {
+  const attempts = [attempt({ object: 'x', score: 80, wall: 1000, points: [[300, 40], [600, null, 'score_error'], [900, 70]] })];
+  const board = buildLeaderboard({ attempts, batches: [], problems: [] }, { now: NOW });
+  assert.deepEqual(board.entries[0].time_curve.points.slice(0, 3).map(point => [point.t, point.mean, point.missing]), [[300, 40, 0], [600, null, 1], [900, 70, 0]]);
+  const html = timeSection(board.entries);
+  const lines = [...html.matchAll(/<polyline class="series" points="([^"]*)"/g)].map(match => match[1].split(' ').map(pair => pair.split(',').map(Number)));
+  assert.equal(lines.length, 2, 'one run up to 5 min, one from 15 min');
+  const xs = lines.map(line => line.map(([x]) => x));
+  assert.equal(xs[0].length, 2); assert.ok(Math.max(...xs[0]) < Math.min(...xs[1]), 'nothing is drawn between 5 and 15 min');
+  assert.equal((html.match(/<circle /g) ?? []).length, board.entries[0].time_curve.points.length - 1, 'no mark at the missing tick');
+  assert.match(html, /<th class="num">10 min<\/th>/);
+  assert.match(timeMarkdown(board.entries), /\| 40\.0 \| n\/a \| 70\.0 \|/);
+});
+
 test('a snapshot read late counts from when it was taken, not from its tick', () => {
   // The t = 300 tick was read at 650 s (a busy runner): its model is not the attempt's state at 300 or 600 s.
   const late = attempt({ score: 80, wall: 1700, points: [[300, 78, 'scored', 650], [600, 78, 'scored', 660]] });

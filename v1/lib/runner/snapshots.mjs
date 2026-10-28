@@ -256,12 +256,14 @@ export async function rescoreSnapshots({ attemptDir, batchDir, result, finalRepo
   for (const job of jobs) {
     const path = join(scoreDir, job.name + '.json');
     for (let tries = 1; ; tries++) {
-      let report = null, failure = null;
+      // Whether the scorer failed, apart from what it said (a message may be empty).
+      let report = null, failed = false, failure = '';
       try {
         report = await score(await readFile(join(attemptDir, job.file)));
-        if (scorerFailed(report)) failure = report.error ?? 'the scorer reported that it failed';
-      } catch (error) { failure = error?.message ?? String(error); }
-      if (!failure) {
+        if (!report || typeof report !== 'object') { failed = true; failure = 'the scorer returned no report'; report = null; }
+        else if (scorerFailed(report)) { failed = true; failure = report.error || 'the scorer reported that it failed'; }
+      } catch (error) { failed = true; failure = error?.message || String(error) || 'the scorer threw'; }
+      if (!failed) {
         await writeJSON(path, report);
         scores.set(job.sha256, { status: 'scored', score: scoreOf(report), valid: report.valid !== false, ...(report.valid === false && report.error ? { error: report.error } : {}),
           ...(tries > 1 ? { tries } : {}), report: relative(batchDir, path) });

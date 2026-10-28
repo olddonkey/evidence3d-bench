@@ -574,7 +574,7 @@ async function scoreSnapshots({ manifest, task, dir, batchDir, records, final, d
         const report = await readJSON(path).catch(() => null);
         if (!report || scorerFailed(report)) {
           failed.push(item);
-          scores.set(item.sha256, { status: 'score_error', score: null, valid: null, tries: round + 1, error: report?.error ?? failure ?? 'the scorer wrote no report' });
+          scores.set(item.sha256, { status: 'score_error', score: null, valid: null, tries: round + 1, error: report?.error || failure || (report ? 'the scorer reported that it failed' : 'the scorer wrote no report') });
         } else scores.set(item.sha256, { status: 'scored', score: scoreOf(report), valid: report.valid !== false, ...(report.valid === false && report.error ? { error: report.error } : {}),
           ...(round ? { tries: round + 1 } : {}), report: relative(batchDir, path) });
       }
