@@ -123,6 +123,7 @@
 | 文档 | 内容 |
 |---|---|
 | [docs/V1-ROUND3.md](docs/V1-ROUND3.md) | **最新结果**：Round 3 的全部数字、两张榜、记忆题、真实建筑、Grok、工具链漂移（英文） |
+| [docs/V1-ROUND4-PLAN.md](docs/V1-ROUND4-PLAN.md) | Round 4 的计划与事先决定（规则先于数据）：两张系统榜、题集与次数、Holm 校正、人眼校准、同模型跨客户端对照、运行栈冻结。草案，负责人合并即签署 |
 | [docs/V1-TEST.md](docs/V1-TEST.md) | 第一份测试成绩（4 个系统），以及主机睡眠规则的由来 |
 | [docs/V1-PILOT.md](docs/V1-PILOT.md) | v1 试点：分数能不能拉开、和肉眼看到的是否一致 |
 | [docs/V1.md](docs/V1.md) | v1 的设计：题目、评分、评分器校准、运行条件、已知限制 |
