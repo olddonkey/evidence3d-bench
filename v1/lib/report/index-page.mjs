@@ -2,6 +2,7 @@ import { VARIANTS } from '../contract.mjs';
 import { UNNAMED_SET, UNKNOWN_SET } from './collect.mjs';
 import { intervalText, attemptShareText, VARIANT_ORDER, CONFLICT_KINDS } from './aggregate.mjs';
 import { esc, num, percent, statCell, sdCell, slug, fractionLabel, page, NOT_EVALUATED } from './html.mjs';
+import { timeSection } from './time-chart.mjs';
 
 // index.html: per task set the leaderboard, the pairwise comparison, where the
 // noise is, the breakdowns and the task index; then provenance, excluded
@@ -326,6 +327,8 @@ ${diagnosticsTable(entries, set)}
     ? '\n<strong>Memory</strong>: on m2 / m3 tasks (a named landmark whose surveyed proportions differ from its published figures), the share of contested probes closer to the surveyed object the evidence shows than to the structure as published; low means the model built what it remembered.' : ''}
 Frame and scale errors use valid attempts only; scale error is |fitted scale &minus; 1| on metric tasks.
 Tokens are input (including cached reads) + output as recorded in result.json; cost is whatever the harness reported (Claude Code: its list-price estimate) and stays n/a when not reported.</p>
+<h3>Score over time</h3>
+${timeSection(entries)}
 <h3>Tasks</h3>
 ${taskIndexTable(entries, tasks)}
 </section>`;

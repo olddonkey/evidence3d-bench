@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Evidence3D v1 generation runner.
 //   node v1/scripts/run.mjs prepare   --id <batch> --system codex|claude-code|grok|antigravity|api-anthropic|api-openai --model <id> [--effort <level>]
-//                                     --tasks a,b,c [--attempts 1] [--data <root>] [--binary <cli path>]
+//                                     --tasks a,b,c [--attempts 1] [--data <root>] [--binary <cli path>] [--snapshot-seconds 300]
 //                                     [--token-budget 2000000] [--tool-budget 200] [--max-output-tokens 32000]   (API systems)
 //   node v1/scripts/run.mjs preflight --batch <dir> [--probe-model <id>] [--probe-effort <level>] [--no-wait]
 //   node v1/scripts/run.mjs run       --batch <dir> [--concurrency 1] [--no-wait] [--resume-now] [--max-reruns 5] [--retry-stall-minutes 10]
@@ -28,10 +28,12 @@ import { readFile, writeFile, copyFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { prepare, preflight, execute, summarize, batchStatus, describeState, DEFAULT_DATA_ROOT, DEFAULT_MAX_RERUNS, DEFAULT_RETRY_STALL_SECONDS } from '../lib/runner/index.mjs';
 import { nodeRuntime } from '../lib/runner/adapters.mjs';
+import { DEFAULT_SNAPSHOT_SECONDS } from '../lib/runner/snapshots.mjs';
 import { agySettingsPath, readAgySettings, agyMergedSettings, agyConfigProblems } from '../lib/runner/antigravity-config.mjs';
 
 const USAGE = `Usage:
   node v1/scripts/run.mjs prepare   --id <batch> --system codex|claude-code|grok|antigravity|api-anthropic|api-openai --model <id> [--effort <level>] --tasks a,b,c [--attempts 1] [--data <root>]
+                                    [--snapshot-seconds ${DEFAULT_SNAPSHOT_SECONDS}] (score-over-time snapshots; 0: none)
                                     [--binary <path>] (CLI systems) [--token-budget 2000000] [--tool-budget 200] [--max-output-tokens 32000] (API systems)
   node v1/scripts/run.mjs preflight --batch <dir> [--probe-model <id>] [--probe-effort <level>] [--no-wait]
   node v1/scripts/run.mjs run       --batch <dir> [--concurrency 1] [--no-wait] [--resume-now] [--max-reruns ${DEFAULT_MAX_RERUNS}] [--retry-stall-minutes ${DEFAULT_RETRY_STALL_SECONDS / 60}]
@@ -45,7 +47,7 @@ const EXIT = { done: 0, error: 1, stopped: 3, wait: 75, interrupted: 130 };
 const OPTIONS = {
   id: { type: 'string' }, system: { type: 'string' }, model: { type: 'string' }, effort: { type: 'string' }, tasks: { type: 'string' },
   attempts: { type: 'string' }, data: { type: 'string' }, binary: { type: 'string' }, batch: { type: 'string' },
-  'token-budget': { type: 'string' }, 'tool-budget': { type: 'string' }, 'max-output-tokens': { type: 'string' },
+  'token-budget': { type: 'string' }, 'tool-budget': { type: 'string' }, 'max-output-tokens': { type: 'string' }, 'snapshot-seconds': { type: 'string' },
   concurrency: { type: 'string' }, 'probe-model': { type: 'string' }, 'probe-effort': { type: 'string' }, json: { type: 'boolean' },
   'no-wait': { type: 'boolean' }, 'resume-now': { type: 'boolean' }, write: { type: 'boolean' }, 'max-reruns': { type: 'string' }, 'retry-stall-minutes': { type: 'string' },
   help: { type: 'boolean', short: 'h' },
@@ -106,8 +108,9 @@ async function main(argv) {
       attempts: integer(values.attempts, 'attempts', 1), dataRoot: resolve(values.data ?? DEFAULT_DATA_ROOT), binary: values.binary, log: print,
       tokenBudget: integer(values['token-budget'], 'token-budget', undefined), toolBudget: integer(values['tool-budget'], 'tool-budget', undefined),
       maxOutputTokens: integer(values['max-output-tokens'], 'max-output-tokens', undefined),
+      snapshotSeconds: integer(values['snapshot-seconds'], 'snapshot-seconds', DEFAULT_SNAPSHOT_SECONDS),
     });
-    print({ event: 'ready', batch: batchDir, system: manifest.system, model: manifest.model, effort: manifest.effort,
+    print({ event: 'ready', batch: batchDir, system: manifest.system, model: manifest.model, effort: manifest.effort, snapshot_seconds: manifest.snapshots?.interval_seconds ?? 0,
       ...(manifest.harness.key_variable ? { key_variable: manifest.harness.key_variable, key_present: manifest.harness.key_present, base_url: manifest.harness.base_url, budget: manifest.harness.budget } : {}),
       next: 'node v1/scripts/run.mjs preflight --batch ' + batchDir });
     return EXIT.done;

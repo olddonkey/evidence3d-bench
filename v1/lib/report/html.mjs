@@ -49,11 +49,15 @@ export const STYLE = `:root {
   color-scheme: light dark;
   --bg: #fbfaf7; --panel: #ffffff; --fg: #1c1e21; --muted: #5d636a; --line: #dedad2; --head: #f1efe9;
   --accent: #245a8c; --low: #8a6412; --bad: #a3352a; --good: #276a3b;
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+  --series-5: #e87ba4; --series-6: #008300; --series-7: #6250d6; --series-8: #e34948;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #15171a; --panel: #1c1f23; --fg: #e7e5e0; --muted: #a3a9b0; --line: #343940; --head: #22262b;
     --accent: #8fbbe6; --low: #e0bd62; --bad: #ef8f80; --good: #8fd3a2;
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+    --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
   }
 }
 * { box-sizing: border-box; }
@@ -120,6 +124,17 @@ td.differs { background: color-mix(in srgb, var(--bad) 14%, transparent); }
 .map-row img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 4px; }
 th .col-head { display: inline-block; max-width: 13em; white-space: normal; overflow-wrap: anywhere; }
 details.more { margin: 10px 0; }
+figure.time-chart { max-width: 760px; margin: 0 0 12px; }
+figure.time-chart svg { display: block; width: 100%; height: auto; }
+.time-chart .grid { stroke: var(--line); stroke-width: 1; }
+.time-chart .axis { fill: var(--muted); font-size: 11px; }
+.time-chart .label { fill: var(--fg); font-size: 12px; }
+.time-chart .series { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.time-chart .mark { stroke: var(--panel); stroke-width: 2; }
+ul.series-legend { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 16px; }
+ul.series-legend li { font-size: 0.85em; }
+ul.series-legend small { color: var(--muted); }
+.swatch { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
 details.more > summary { margin-bottom: 6px; }
 @media (max-width: 720px) {
   .render-row { grid-template-columns: repeat(var(--views), minmax(140px, 1fr)); }

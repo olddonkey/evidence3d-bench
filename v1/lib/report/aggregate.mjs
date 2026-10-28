@@ -4,6 +4,7 @@ import { layout, VARIANTS, CONFLICT_VARIANTS, PROTOCOL } from '../contract.mjs';
 import { collectRuns, DEFAULT_EXCLUDED_STATUSES, UNNAMED_SET, UNKNOWN_SET, UNKNOWN_ARCHETYPE, scorerIdentity } from './collect.mjs';
 import { finite, mean, median, sampleSD, summarise, pairedBootstrap, tInterval, pooledSD, sdRange, detectableDifference, BOOTSTRAP_SAMPLES,
   PAIRWISE_SAMPLES, LOW_EVIDENCE_OBJECTS, SMALL_SAMPLE_OBJECTS, TIE_TOLERANCE } from './stats.mjs';
+import { timeCurve, T95_SHARE, T95_MIN_FINAL } from './curves.mjs';
 
 export const LEADERBOARD_SCHEMA = 'e3d-leaderboard-v2';
 export const VARIANT_ORDER = Object.keys(VARIANTS);
@@ -246,6 +247,7 @@ function cellEntry(key, set, attempts, seed, { deltaPairs = [], archetypes = [] 
       basis: 'as recorded in result.json; total = input (cached reads included) + output',
     },
     cost_usd: { mean: mean(costs), total: costs.length ? costs.reduce((sum, value) => sum + value, 0) : null, attempts_reporting: costs.length },
+    time_curve: timeCurve(attempts, (name, valueOf, basis) => metric(name, valueOf, undefined, basis)),
   };
 }
 
@@ -705,6 +707,11 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
       conflict: 'c1 tasks: share of contested probes whose measurement is closer to the as-photographed state',
       memory: 'm2 / m3 tasks (named landmarks whose surveyed form differs from the published one): share of contested probes whose measurement is ' +
         'closer to the surveyed object the evidence shows than to the structure as published',
+      time_curve: 'score over time from the runner\'s snapshots of output/model.glb (every interval seconds after the CLI started, scored after the attempt): ' +
+        'at each tick an attempt counts its final score once it has ended, else its last snapshot\'s score (0 with no or an invalid model, or a scorer failure); ' +
+        'same averaging and bootstrap as the score, so the point at the wall-clock limit is the score. Time to ' + T95_SHARE * 100 + '%: per attempt with a final score of at least ' +
+        T95_MIN_FINAL + ', the first snapshot at ' + T95_SHARE * 100 + '% of its final score, else its end; median over attempts. ' +
+        'Only for configurations whose every counted attempt has snapshots',
       excluded_statuses: excludeStatuses,
     },
     tolerances,

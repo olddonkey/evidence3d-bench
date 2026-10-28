@@ -220,6 +220,14 @@ async function findModel(result, attemptDir, problems) {
   return { path: null, sha256: null };
 }
 
+// The score-over-time snapshots the runner recorded (runner/snapshots.mjs),
+// reduced to tick, score and status; null when the batch took none.
+function snapshotSeries(result) {
+  if (!Array.isArray(result.snapshots) || !finite(result.snapshot_interval_seconds) || result.snapshot_interval_seconds <= 0) return null;
+  return { interval_seconds: result.snapshot_interval_seconds,
+    points: result.snapshots.filter(item => finite(item?.t)).map(item => ({ t: item.t, score: finite(item.score) ? item.score : null, status: text(item.status) })).sort((a, b) => a.t - b.t) };
+}
+
 function setOf(truth, taskId, problems) {
   if (!truth) return UNKNOWN_SET;
   if (truth.set === undefined || truth.set === null) return UNNAMED_SET;
@@ -304,6 +312,8 @@ export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT
           score: valid ? report.score : 0,
           failure: valid ? null : (report?.error ?? (report ? 'invalid submission' : 'no score report (status ' + status + ')')),
           wall_seconds: finite(result.wall_seconds) ? result.wall_seconds : null,
+          wall_limit_seconds: finite(result.wall_limit_seconds) ? result.wall_limit_seconds : null,
+          snapshots: snapshotSeries(result),
           started_at: text(result.started_at), finished_at: text(result.finished_at),
           usage: normaliseUsage(result.usage),
           cost_usd: finite(result.cost_usd) ? result.cost_usd : null,

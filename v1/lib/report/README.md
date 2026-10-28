@@ -3,7 +3,7 @@
 Reads run batches, aggregates them into a leaderboard (`e3d-leaderboard-v2`)
 and writes a static site that opens from disk: `index.html` (per task set:
 what the set is, leaderboard, pairwise comparison, where the noise is,
-evidence deltas, archetypes, frame and cost, task index; then provenance,
+evidence deltas, archetypes, frame and cost, score over time, task index; then provenance,
 excluded attempts, data problems), `summary.md` (the same numbers in Markdown,
 to paste into a document), one page per task under `tasks/`, renders and
 copied evidence under `assets/`, and the full leaderboard as
@@ -129,6 +129,35 @@ All on `report.score`, failures as 0, excluded attempts left out.
   drawings and remembered figures, so they are never pooled. The index page,
   `summary.md` and the task pages label each for what it means; the Memory
   column appears only in a set that has memory tasks.
+
+## Score over time (`entry.time_curve`)
+
+From the snapshots the runner takes while an attempt runs (copies of
+`output/model.glb` every `snapshot_interval_seconds` after the CLI started,
+scored after the attempt; `v1/lib/runner/README.md`, *Score-over-time
+snapshots*), `curves.mjs` computes per configuration:
+
+- `points[]`: at every tick (each multiple of the interval up to the
+  wall-clock limit, and the limit itself) the mean score with the same
+  averaging and bootstrap as `entry.score`, where an attempt counts its final
+  score once it has ended (`wall_seconds <= t`, or t at its
+  `wall_limit_seconds`) and, before that, the score of its last snapshot taken
+  at or before t: 0 with no `model.glb` yet, a refused file, an invalid model,
+  or a snapshot the scorer failed on (`score_errors` counts those). The point
+  at the limit is therefore `entry.score`. `finished` is the share of attempts
+  that had ended by t.
+- `t95`: per attempt with a final score of at least 10 (`T95_MIN_FINAL`), the
+  time of its first snapshot at 95 % (`T95_SHARE`) of its final score, or its
+  end when no snapshot got there (the final file is the snapshot at the end);
+  `median_seconds`, `q1_seconds`, `q3_seconds` over those attempts (not
+  weighted by object), `attempts`, and `low_final`, the attempts left out.
+
+A configuration with no snapshots has `time_curve: null`; one where only some
+counted attempts have them gets `{ available: false, reason }` and no curve,
+since a curve over a subset would not end at its score. The page draws an
+inline SVG (one line per configuration, at most 8, coloured by name; hover
+text from SVG titles, no scripts) above a table with every point, its
+interval and the share finished; `summary.md` has the table.
 
 ## Scale
 

@@ -14,6 +14,7 @@ import { classifyStatus, scoreOf, STATUSES, NOT_SAMPLES } from './status.mjs';
 import { detectInfra, modelTurns, retryWatch, INFRA_REASONS } from './infra.mjs';
 import { createGate, holdUntil, HOLD_KIND, SCHEDULE } from './schedule.mjs';
 import { hostSleepCheck, hostSuspension, PMSET } from './hostsleep.mjs';
+import { DEFAULT_SNAPSHOT_SECONDS, snapshotClock, readSnapshotIndex, snapshotJobs, scoredSnapshots } from './snapshots.mjs';
 import {
   sha256, sha256File, objectHash, readJSON, writeJSON, inventory, inventoryHash, makeReadOnly,
   buildRuntime, buildWorkspace, workspaceHashes, readArtifact, STALE_TEMPORARY, writeJSONSync, writeHarnessFile, readHarnessFile,
@@ -27,6 +28,7 @@ import {
 //   manifest.json  preflight.json  summary.json  progress.log  run.lock  runner-state.json  runtime/  tools/  preflight/<time>/
 //   <task>/a<n>/ workspace/ prompt.txt invocation.json harness/ events.jsonl stderr.log rerun.json
 //                started.json child.json process.json result.json score/{submission.glb, report.json, ...}
+//                snapshots/{index.json, t0300.glb, ..., score/t0300.json, ...}   (snapshots.mjs)
 //   <task>/a<n>.infra-<k>/   an earlier try of a<n> that ended in an infrastructure error (kept, never deleted)
 export const RUNNER_VERSION = 'e3d-runner-v1';
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -168,12 +170,14 @@ const attemptDir = (batchDir, taskId, n) => join(batchDir, taskId, 'a' + n);
 // tokenBudget, toolBudget, maxOutputTokens: API systems only (frozen into the
 // harness record; see api/adapter.mjs). deps.env: where an API system looks up
 // its key and base URL (default process.env); only whether the key is set is
-// recorded.
+// recorded. snapshotSeconds: the interval of the score-over-time snapshots
+// (snapshots.mjs), frozen into the manifest; 0 takes none.
 export async function prepare({ id, system, model, effort, tasks, attempts = 1, dataRoot = DEFAULT_DATA_ROOT, binary, tokenBudget, toolBudget, maxOutputTokens,
-  repoRoot = REPO_ROOT, deps = {}, log = () => {} }) {
+  snapshotSeconds = DEFAULT_SNAPSHOT_SECONDS, repoRoot = REPO_ROOT, deps = {}, log = () => {} }) {
   if (!ID.test(id ?? '')) throw new Error('Invalid batch id ' + id);
   if (!Array.isArray(tasks) || !tasks.length || new Set(tasks).size !== tasks.length || !tasks.every(task => ID.test(task))) throw new Error('Tasks must be a non-empty list of unique task ids');
   if (!Number.isInteger(attempts) || attempts < 1 || attempts > 20) throw new Error('attempts must be an integer from 1 to 20');
+  if (!Number.isInteger(snapshotSeconds) || snapshotSeconds < 0 || snapshotSeconds > 86400) throw new Error('snapshotSeconds must be an integer from 0 (none) to 86400');
   const adapter = adapterFor(system);
   if (!adapter.api && [tokenBudget, toolBudget, maxOutputTokens].some(value => value !== undefined)) {
     throw new Error('--token-budget, --tool-budget and --max-output-tokens apply to the API systems only');
@@ -214,7 +218,7 @@ export async function prepare({ id, system, model, effort, tasks, attempts = 1, 
     throw new Error('Batch ' + id + ' already exists; a frozen batch is never rewritten, use a new id');
   }
   log({ event: 'prepare', batch: batchDir, system, model: harness.model, effort: harness.effort });
-  try { return await freezeBatch({ batchDir, id, system, attempts, dataRoot, paths, adapter, harness, node, installTools, taskRecords, repoRoot, log }); }
+  try { return await freezeBatch({ batchDir, id, system, attempts, dataRoot, paths, adapter, harness, node, installTools, taskRecords, snapshotSeconds, repoRoot, log }); }
   catch (error) {
     // A half-built batch would block its id and could be mistaken for a real one.
     await rm(batchDir, { recursive: true, force: true });
@@ -235,7 +239,7 @@ export function attemptInvocation({ adapter, harness, task, workspace, attemptDi
   return { invocation, files };
 }
 
-async function freezeBatch({ batchDir, id, system, attempts, dataRoot, paths, adapter, harness, node, installTools, taskRecords, repoRoot, log }) {
+async function freezeBatch({ batchDir, id, system, attempts, dataRoot, paths, adapter, harness, node, installTools, taskRecords, snapshotSeconds, repoRoot, log }) {
   const runtime = await buildRuntime({ repoRoot, runtimeDir: join(batchDir, 'runtime') });
   const toolsDir = join(batchDir, 'tools');
   const installed = await installTools(toolsDir);
@@ -257,6 +261,9 @@ async function freezeBatch({ batchDir, id, system, attempts, dataRoot, paths, ad
     // retries: an attempt is never run again once it is a sample; one that the
     // harness could not run (an infrastructure error) is archived and re-run.
     rules: { evaluator_feedback_during_generation: false, retries: false, infra_reruns: true, human_intervention: false, api_keys: Boolean(adapter.usesApiKey) },
+    // Copies of output/model.glb taken outside the sandbox while an attempt
+    // runs, scored after it (snapshots.mjs); null: none are taken.
+    snapshots: snapshotSeconds ? { interval_seconds: snapshotSeconds, source: 'output/model.glb' } : null,
     tasks: [],
   };
   for (const { task, taskBytes, truthSha, identity } of taskRecords) {
@@ -472,20 +479,22 @@ function leftover(record, command) {
   return (commandOf(record.pid) ?? '').includes(command);
 }
 
-async function scoreArtifact({ manifest, task, dir, artifact, deps, control, repoRoot }) {
-  // The scorer and what it reads must be what the batch froze; if not, this
-  // attempt is left unscored (it is scored by a later run once they are back)
-  // and the batch stops.
+// The scorer and what it reads must be what the batch froze; if not, an
+// attempt is left unscored (it is scored by a later run once they are back)
+// and the batch stops.
+async function scoringDrift({ manifest, task, deps, repoRoot }) {
   const paths = layout(manifest.data_root), drift = [];
   try { if (sha256(await readFile(join(paths.truth(task.id), 'truth.json'))) !== task.truth_sha256) drift.push('truth record of ' + task.id + ' changed since the batch was frozen'); }
   catch { drift.push('truth record of ' + task.id + ' is missing'); }
   drift.push(...await objectProblems(manifest.data_root, task));
   if (manifest.scorer_source && !deps.skipScorerCheck && (await scorerHash(repoRoot)).sha256 !== manifest.scorer_source.sha256) drift.push('scorer source changed since the batch was frozen');
-  if (drift.length) return { frozen: drift };
-  const scoreDir = join(dir, 'score');
-  // A scorer interrupted by a dying runner may have left a worker and partial
-  // files behind: the worker is stopped and the directory kept aside, so the
-  // new scoring starts clean and the old one stays readable.
+  return drift;
+}
+
+// A scorer interrupted by a dying runner may have left a worker and partial
+// files behind: the worker is stopped and the directory kept aside, so the
+// new scoring starts clean and the old one stays readable.
+async function freshScoreDir(scoreDir) {
   try {
     const worker = await readJSON(join(scoreDir, 'worker.json'));
     if (leftover(worker, 'score-worker.mjs')) killTree(worker.pid, 'SIGKILL');
@@ -496,6 +505,13 @@ async function scoreArtifact({ manifest, task, dir, artifact, deps, control, rep
     await rename(scoreDir, scoreDir + '.interrupted-' + n);
   }
   await mkdir(scoreDir, { recursive: true });
+}
+
+async function scoreArtifact({ manifest, task, dir, artifact, deps, control, repoRoot }) {
+  const paths = layout(manifest.data_root), drift = await scoringDrift({ manifest, task, deps, repoRoot });
+  if (drift.length) return { frozen: drift };
+  const scoreDir = join(dir, 'score');
+  await freshScoreDir(scoreDir);
   const submission = join(scoreDir, 'submission.glb');
   await writeFile(submission, artifact.data);
   const job = join(scoreDir, 'job.json');
@@ -509,6 +525,41 @@ async function scoreArtifact({ manifest, task, dir, artifact, deps, control, rep
   if (run.exit_code !== 0) return { error: 'scorer failed (exit ' + run.exit_code + (run.timed_out ? ', timed out' : '') + '): ' + run.stderr.trim().split('\n').slice(-3).join(' | ') };
   try { return { report: await readJSON(join(scoreDir, 'report.json')), path: join(scoreDir, 'report.json') }; }
   catch (error) { return { error: 'scorer wrote no report: ' + error.message }; }
+}
+
+// Scores an attempt's snapshots, after its final artifact, in one worker
+// process (score-worker.mjs) that loads the task once and draws no error
+// maps. Content already scored (an earlier snapshot, the final artifact) is
+// not scored again. Returns the records as result.json carries them
+// (scoredSnapshots), or { aborted } / { frozen } like scoreArtifact: then
+// nothing is recorded and a later run scores the attempt again.
+async function scoreSnapshots({ manifest, task, dir, batchDir, records, final, deps, control, repoRoot }) {
+  const jobs = snapshotJobs(records, final?.sha256 ?? null), scores = new Map();
+  if (jobs.length) {
+    const drift = await scoringDrift({ manifest, task, deps, repoRoot });
+    if (drift.length) return { frozen: drift };
+    const paths = layout(manifest.data_root), scoreDir = join(dir, 'snapshots', 'score');
+    await freshScoreDir(scoreDir);
+    const job = join(scoreDir, 'job.json');
+    await writeJSON(job, { module: scorerModulePath(deps), taskDir: paths.task(task.id), truthDir: paths.truth(task.id), dataRoot: manifest.data_root,
+      snapshots: jobs.map(item => ({ name: item.name, glb: join(dir, item.file), out: join(scoreDir, item.name + '.json') })) });
+    const run = await captureProcess(process.execPath, [join(HERE, 'score-worker.mjs'), job], { cwd: scoreDir, seconds: (deps.scoreSeconds ?? 1800) * jobs.length,
+      env: childEnvironment(), stdoutPath: join(scoreDir, 'worker.stdout.log'), stderrPath: join(scoreDir, 'worker.stderr.log'), signal: control.signal,
+      onSpawn: pid => { control.pids.set(scoreDir, pid); writeJSONSync(join(scoreDir, 'worker.json'), { pid, started: startTimeOf(pid) }); } });
+    control.pids.delete(scoreDir);
+    if (run.aborted) return { aborted: true };
+    // A worker that died part way leaves the snapshots it had not reached as
+    // score errors; whatever it finished counts.
+    const failure = run.exit_code !== 0 ? 'snapshot scorer failed (exit ' + run.exit_code + (run.timed_out ? ', timed out' : '') + '): ' + run.stderr.trim().split('\n').slice(-3).join(' | ') : null;
+    for (const item of jobs) {
+      const path = join(scoreDir, item.name + '.json');
+      const report = await readJSON(path).catch(() => null);
+      if (!report || report.scorer_failed) scores.set(item.sha256, { status: 'score_error', score: null, valid: null, error: report?.error ?? failure ?? 'the scorer wrote no report' });
+      else scores.set(item.sha256, { status: 'scored', score: scoreOf(report), valid: report.valid !== false, ...(report.valid === false && report.error ? { error: report.error } : {}),
+        report: relative(batchDir, path) });
+    }
+  }
+  return { records: scoredSnapshots(records, { scores, final }) };
 }
 
 // A report for an artifact the runner refused before scoring, in the scorer's
@@ -626,7 +677,9 @@ async function runAttempt({ batchDir, manifest, task, attempt, adapter, deps, lo
     return { result, skipped: false };
   };
   const started = await exists(join(dir, 'started.json'));
-  let run = null, summary = null, events = [], integrityProblems = [], recovered = null, load = null, retryLost = null;
+  // Snapshots, if the batch takes them (snapshots.mjs).
+  const snapshotSeconds = manifest.snapshots?.interval_seconds ?? 0;
+  let run = null, summary = null, events = [], integrityProblems = [], recovered = null, load = null, retryLost = null, snapshotRecords = null;
   if (started) {
     // The runner stopped during this attempt and is now restarted.
     try { recovered = await readJSON(join(dir, 'process.json')); } catch {}
@@ -658,6 +711,7 @@ async function runAttempt({ batchDir, manifest, task, attempt, adapter, deps, lo
     events = readJSONLines(await readFile(join(dir, 'events.jsonl'), 'utf8').catch(() => ''));
     summary = adapter.parse(events);
     retryLost = recovered.service_retry_seconds ?? null;
+    if (snapshotSeconds) snapshotRecords = await readSnapshotIndex(dir);
     integrityProblems.push(...await workspaceProblems(workspace, task, manifest), ...toolSurfaceProblems(manifest.system, summary));
   } else {
     if (control.signal.aborted) return { result: null, skipped: false, interrupted: true };
@@ -671,6 +725,9 @@ async function runAttempt({ batchDir, manifest, task, attempt, adapter, deps, lo
     // before launch gets it now (grok: an empty HOME, its shell wrapper made
     // executable; harness files are copied for a re-run without their modes).
     if (adapter.stage) await adapter.stage({ attemptDir: dir, workspace, invocation });
+    const snapshots = snapshotSeconds ? snapshotClock({ attemptDir: dir, workspace, intervalSeconds: snapshotSeconds, wallSeconds: invocation.wall_seconds,
+      maxBytes: task.budget.max_artifact_bytes, settle: deps.snapshotSettle, log: event => log({ ...event, task_id: task.id, attempt: attempt.n }) }) : null;
+    await snapshots?.prepare();
     // The checks above take a moment (a workspace is hashed); a hold that
     // began meanwhile (another attempt met a limit) means this one must not
     // launch into it. Nothing has been recorded yet, so it simply goes back.
@@ -707,9 +764,12 @@ async function runAttempt({ batchDir, manifest, task, attempt, adapter, deps, lo
         cwd: invocation.cwd, env: invocation.env, stdin: adapter.stdin ? adapter.stdin(prompt, deps.env ?? process.env) : prompt, seconds: invocation.wall_seconds, graceSeconds: deps.graceSeconds ?? 5,
         stdoutPath: join(dir, 'events.jsonl'), stderrPath: join(dir, 'stderr.log'), signal: AbortSignal.any([control.signal, own.signal]),
         onEvent: (event, ms) => { events.push(event); watch.onEvent(event, ms); },
-        onSpawn: pid => { spawnClock = performance.now(); control.pids.set(attempt.dir, pid); writeJSONSync(join(dir, 'child.json'), { pid, command: invocation.command, started: startTimeOf(pid) }); },
+        onSpawn: pid => { spawnClock = performance.now(); snapshots?.begin(spawnClock); control.pids.set(attempt.dir, pid); writeJSONSync(join(dir, 'child.json'), { pid, command: invocation.command, started: startTimeOf(pid) }); },
       });
-    } finally { clearInterval(tick); control.running.delete(attempt.dir); control.pids.delete(attempt.dir); load = stopLoad(); }
+    } finally {
+      clearInterval(tick); control.running.delete(attempt.dir); control.pids.delete(attempt.dir); load = stopLoad();
+      if (snapshots) snapshotRecords = await snapshots.stop();
+    }
     if (dog && !control.signal.aborted) { run.watchdog = dog; run.aborted = false; }
     retryLost = Math.round(watch.lostMs() / 100) / 10;
     summary = adapter.parse(events);
@@ -738,7 +798,8 @@ async function runAttempt({ batchDir, manifest, task, attempt, adapter, deps, lo
     const infra = { reason: 'runner_interrupted', action: INFRA_REASONS.runner_interrupted, during: 'session', model_turns: diagnostics.model_turns,
       message: 'the runner was stopped (' + (control.signal.reason ?? 'abort') + ') while this attempt was generating', evidence: ['CLI tree killed by the runner on ' + (control.signal.reason ?? 'abort')],
       retry_after: null, retry_after_source: null, retry_after_text: null };
-    const outcome = await finish({ status: 'infra_error', score: null, ...common, extra: { ...diagnostics, infra } });
+    const outcome = await finish({ status: 'infra_error', score: null, ...common, extra: { ...diagnostics, infra,
+      ...(snapshotSeconds ? { snapshot_interval_seconds: snapshotSeconds, snapshots: scoredSnapshots(snapshotRecords ?? [], { scored: false }) } : {}) } });
     log({ event: 'finished', task_id: task.id, attempt: attempt.n, status: 'infra_error', reason: infra.reason, score: null });
     return outcome;
   }
@@ -762,7 +823,7 @@ async function runAttempt({ batchDir, manifest, task, attempt, adapter, deps, lo
   // A broken boundary is never excused: the infrastructure finding is kept
   // for diagnosis, but the attempt stays a failure.
   const infra = integrityProblems.length ? null : infraFound;
-  let report = null, reportPath = null, scoreError = null;
+  let report = null, reportPath = null, scoreError = null, snapshotResults = null;
   if (!infra) {
     if (artifact.present && artifact.problem) {
       report = refusalReport(task, manifest, artifact.problem);
@@ -779,6 +840,18 @@ async function runAttempt({ batchDir, manifest, task, attempt, adapter, deps, lo
       if (scored.error) scoreError = scored.error; else { report = scored.report; reportPath = scored.path; }
     }
   }
+  if (snapshotRecords) {
+    // Scored only for a run the runner supervised to its end with its
+    // boundary intact; otherwise kept, unscored, for diagnosis.
+    if (!infra && !integrityProblems.length && snapshotRecords.length) {
+      const final = report && artifact.sha256 ? { sha256: artifact.sha256, score: scoreOf(report), valid: report.valid !== false, report: relative(batchDir, reportPath) } : null;
+      if (snapshotRecords.some(record => record.file && !record.problem && !record.error)) log({ event: 'scoring_snapshots', task_id: task.id, attempt: attempt.n });
+      const scored = await scoreSnapshots({ manifest, task, dir, batchDir, records: snapshotRecords, final, deps, control, repoRoot });
+      if (scored.aborted) return { result: null, skipped: false, interrupted: true };
+      if (scored.frozen) return { result: null, skipped: false, interrupted: true, frozen: scored.frozen };
+      snapshotResults = scored.records;
+    } else snapshotResults = scoredSnapshots(snapshotRecords, { scored: false });
+  }
   const status = classifyStatus({ run, summary, integrityProblems, infra, artifact, report, scoreError });
   // A broken boundary, or a run the runner could not supervise to the end,
   // voids the attempt whatever it produced; the report is kept for diagnosis.
@@ -786,7 +859,8 @@ async function runAttempt({ batchDir, manifest, task, attempt, adapter, deps, lo
   const outcome = await finish({
     status, ...common, score, report: reportPath ? relative(batchDir, reportPath) : null,
     extra: { ...diagnostics, infra, infra_ignored: infraFound && !infra ? infraFound : undefined,
-      report_valid: report ? report.valid !== false : null, score_error: scoreError },
+      report_valid: report ? report.valid !== false : null, score_error: scoreError,
+      ...(snapshotSeconds ? { snapshot_interval_seconds: snapshotSeconds, snapshots: snapshotResults ?? [] } : {}) },
   });
   log({ event: 'finished', task_id: task.id, attempt: attempt.n, status, reason: infra?.reason, score: outcome.result.score, wall_seconds: outcome.result.wall_seconds });
   return outcome;

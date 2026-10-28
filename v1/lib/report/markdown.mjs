@@ -1,6 +1,7 @@
 import { VARIANTS } from '../contract.mjs';
 import { intervalText, signedText, attemptShareText, VARIANT_ORDER, CONFLICT_KINDS } from './aggregate.mjs';
 import { fractionLabel } from './html.mjs';
+import { timeMarkdown } from './time-chart.mjs';
 
 // summary.md: the same numbers as index.html in plain Markdown, to paste into
 // a document. Tables use GitHub pipe syntax; nothing links back to the site.
@@ -91,6 +92,8 @@ function setMarkdown(board, set) {
     lines.push('Memory: on m2 / m3 tasks (a named landmark whose surveyed proportions differ from its published figures), the share of contested probes closer to the ' +
       'surveyed object the evidence shows than to the structure as published; low means the model built what it remembered.', '');
   }
+  const time = timeMarkdown(entries);
+  if (time) lines.push(time);
   return lines.join('\n');
 }
 
