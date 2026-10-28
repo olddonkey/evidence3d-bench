@@ -12,7 +12,7 @@
 
 **最新结果是 Round 3**（[docs/V1-ROUND3.md](docs/V1-ROUND3.md)）：私有测试集 `test-2026-10` 的 24 个对象，12 个系统，评分器 1.1.0；10-21 跑完，10-28 按两张榜加 Holm 校正重出了报告。默认档（high）上 Codex 的 gpt-6-astra 和 gpt-6.1-sol 并列第一，Claude Code 的 Opus 5.5 第三；最高档（max）上这三个依次分开，79.2 > 77.2 > 71.5。同一个模型从 high 调到 max 涨 5 分左右，和模型之间的差距一样大。
 
-**正在做 Round 4 的准备**：路线图第一阶段 10 项，5 项已合并，2 项在等负责人拍板（[#4](https://github.com/olddonkey/evidence3d-bench/pull/4) 题面里的评分说明、[#2](https://github.com/olddonkey/evidence3d-bench/pull/2) Round 4 计划），3 项在负责人手上（Antigravity 实机预检、真实建筑候选、盲评）。明细见下面的 [Round 4 准备进度](#round-4-准备进度)。
+**正在做 Round 4 的准备**：路线图第一阶段 10 项，6 项已合并，1 项在等负责人拍板（[#2](https://github.com/olddonkey/evidence3d-bench/pull/2) Round 4 计划），3 项在负责人手上（Antigravity 实机预检、真实建筑候选、盲评）。明细见下面的 [Round 4 准备进度](#round-4-准备进度)。
 
 **Round 4 要回答的**：在评分器冻结之后才生成的新私有题集（72 个对象）上排两张系统榜，并说清每个分差是否可信：校正多重比较后还分不分得开、人眼看不看得出、有多少来自客户端（同一模型换客户端的对照）。真实建筑扩到 10–12 个（至少 8 个才给区间）。计划还是草案（[#2](https://github.com/olddonkey/evidence3d-bench/pull/2)），负责人合并它就是签署。
 
@@ -83,7 +83,7 @@
 | ✅ | T1 GitHub Actions：每次推到 main 和每个 PR 都在 Linux 上跑测试 | [#5](https://github.com/olddonkey/evidence3d-bench/pull/5) |
 | ✅ | T2 盲评支持多位评审者（每票带评审者、合并投票文件、κ） | [#3](https://github.com/olddonkey/evidence3d-bench/pull/3) |
 | ✅ | T3 报告的诊断列：具名尺寸、细节类别、坐标与尺度误差 | [#1](https://github.com/olddonkey/evidence3d-bench/pull/1) |
-| 🔄 | T4 题面写清评分器 1.1.0 怎么评分（只用于今后新建的题集） | [#4](https://github.com/olddonkey/evidence3d-bench/pull/4)：审查已通过，等负责人定措辞 |
+| ✅ | T4 题面写清评分器 1.1.0 怎么评分（只用于今后新建的题集） | [#4](https://github.com/olddonkey/evidence3d-bench/pull/4) |
 | ✅ | T5 两张系统榜、名单文件、Holm 校正 | [#7](https://github.com/olddonkey/evidence3d-bench/pull/7) |
 | ✅ | T6 作答过程中每 5 分钟存一次模型，画分数-时间曲线 | [#6](https://github.com/olddonkey/evidence3d-bench/pull/6) |
 | ⏳ | T7 在装了 agy 的 Mac 上查 `agy models`，跑 Antigravity 第一次实机预检和 3–5 题试跑 | 适配器是照文档写的，还没在真机上跑过 |
