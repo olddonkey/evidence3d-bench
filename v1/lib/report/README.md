@@ -3,8 +3,9 @@
 Reads run batches, aggregates them into a leaderboard (`e3d-leaderboard-v2`)
 and writes a static site that opens from disk: `index.html` (per task set:
 what the set is, leaderboard, pairwise comparison, where the noise is,
-evidence deltas, archetypes, frame and cost, task index; then provenance,
-excluded attempts, data problems), `summary.md` (the same numbers in Markdown,
+evidence deltas, archetypes, detail by category, named dimensions, frame and
+scale, evidence use and cost, task index; then provenance, excluded attempts,
+data problems), `summary.md` (the same numbers in Markdown,
 to paste into a document), one page per task under `tasks/`, renders and
 copied evidence under `assets/`, and the full leaderboard as
 `leaderboard.json`.
@@ -130,6 +131,39 @@ All on `report.score`, failures as 0, excluded attempts left out.
   `summary.md` and the task pages label each for what it means; the Memory
   column appears only in a set that has memory tasks.
 
+## Diagnostics
+
+Where a delivered model loses its score, per configuration. Valid attempts
+only: a failure has no model to diagnose and is counted in `success` (the
+Detail column, which counts failures as 0, therefore runs lower than the
+categories). Same averaging as the score: attempts within a task, tasks within
+an object.
+
+- `entry.detail_categories[c]`: for every category of `report.detail.categories`
+  present in the set (`set.detail_categories`, each with the number of objects
+  that have a scored group of it; `DETAIL_CATEGORIES` gives the DESIGN.md order,
+  other categories follow by name), 100 × the category's mean group F. A
+  report's `detail.score` is the mean of these over its categories. Which
+  categories a task scores depends on the evidence, not on the contestant.
+  Mean over objects with the bootstrap interval, like the leaderboard.
+- `entry.probe_error` (`probeErrors`): the named dimensions, counted as the
+  scorer's `probe_summary` counts them (probes the evidence shows whose ray
+  hits the truth). Per attempt, the median absolute error of the probes whose
+  ray hit the submission, in centimetres (`cm`) and as a percentage of the
+  truth diagonal (`diagonal_pct`); `missed`, the share of probes whose ray hit
+  nothing on the submission; `probes`, the counts behind them.
+- `entry.frame_error` (offset as a fraction of the diagonal, offset in metres,
+  absolute yaw) and `entry.scale_error_pct` (|`shape.scale` − 1| on metric
+  tasks) as before.
+
+`probe_error.cm`, `probe_error.diagonal_pct`, `frame_error.*` and
+`scale_error_pct` also carry `median` and `iqr`: the median and interquartile
+range (`spread`, linear-interpolated quartiles) of the per-object values. These
+errors are skewed (one model turned round adds 180° to its object), so the page
+and `summary.md` show the median with the IQR under it, a description of the
+spread and not an interval; the mean and its bootstrap interval stay in the JSON
+(same seeds as before) and in each cell's tooltip.
+
 ## Scale
 
 Work is bounded per attempt. On a task page only each configuration's best,
@@ -179,4 +213,7 @@ made up and labelled synthetic: `SAMPLE_ATTEMPTS` (small) and
 configurations at three attempts per task, one split over two batch
 directories, one at one attempt, an `infra_error` and a timeout). A spec with
 `contested` on a conflict variant gets an alternate in its truth and report:
-`before-canopy` on c1, `remembered` on m2 / m3. Never mix it with real results.
+`before-canopy` on c1, `remembered` on m2 / m3. Probe errors differ per probe
+(`PROBE_ERROR_STEPS` × 10 cm), so a report's median probe error is not its
+mean; with groups dropped, the last probe's ray misses. Never mix it with real
+results.
