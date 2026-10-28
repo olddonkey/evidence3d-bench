@@ -290,9 +290,14 @@ snapshots*), `curves.mjs` computes per configuration:
   averaging and bootstrap as `entry.score`, where an attempt counts its final
   score once it has ended (`wall_seconds <= t`, or t at its
   `wall_limit_seconds`) and, before that, the score of its last snapshot taken
-  at or before t (taken: the end of its read, `read_seconds`, which a busy runner
-  can put after the tick it was due at): 0 with no `model.glb` yet, a refused
-  file or an invalid model. An attempt whose snapshot there has no score through
+  at or before t (of those, the one read last, so an older snapshot read late
+  never replaces a newer one): 0 with no `model.glb` yet, a refused file or an
+  invalid model.
+  A snapshot counts from its tick when the runner's read of it ended
+  (`read_seconds`) at most 10 s after the tick (`ON_TIME_SECONDS`: the read and
+  the wait for a model caught mid-write); one read later, on a busy runner,
+  counts from `read_seconds`, so from the next tick after it, and is counted in
+  the curve's `late`. An attempt whose snapshot there has no score through
   no fault of the model (the scorer failed on it, also on the runner's retries:
   `score_error`; or the runner could not store it: `lost`) is left out of that
   tick's mean and counted in the point's `missing`; `score_errors` counts those
@@ -300,8 +305,9 @@ snapshots*), `curves.mjs` computes per configuration:
   at the limit is therefore `entry.score`. `finished` is the share of attempts
   that had ended by t.
 - `t95`: per attempt with a final score of at least 10 (`T95_MIN_FINAL`), when
-  its first snapshot at 95 % (`T95_SHARE`) of its final score was taken, or its
-  end when no snapshot got there (the final file is the snapshot at the end);
+  its first snapshot at 95 % (`T95_SHARE`) of its final score counts from (its
+  tick, or `read_seconds` when read late), or its end (`wall_seconds`) when no
+  snapshot got there (the final file is the snapshot at the end);
   `median_seconds`, `q1_seconds`, `q3_seconds` over those attempts (not
   weighted by object), `attempts`, and `low_final`, the attempts left out.
 

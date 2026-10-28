@@ -5,7 +5,7 @@ import { collectRuns, DEFAULT_EXCLUDED_STATUSES, UNNAMED_SET, UNKNOWN_SET, UNKNO
 import { finite, mean, median, spread, sampleSD, summarise, pairedBootstrap, tInterval, tTestP, holmAdjust, pooledSD, sdRange, detectableDifference,
   BOOTSTRAP_SAMPLES, PAIRWISE_SAMPLES, LOW_EVIDENCE_OBJECTS, SMALL_SAMPLE_OBJECTS, TIE_TOLERANCE, FAMILY_ALPHA } from './stats.mjs';
 import { LADDERS, LADDER_RULE, inferLadders, parseRoster, rosterProvenance } from './roster.mjs';
-import { timeCurve, T95_SHARE, T95_MIN_FINAL } from './curves.mjs';
+import { timeCurve, T95_SHARE, T95_MIN_FINAL, ON_TIME_SECONDS } from './curves.mjs';
 
 // v3: ladders, Holm-corrected verdicts, reference rows (rank null) when a roster is given.
 export const LEADERBOARD_SCHEMA = 'e3d-leaderboard-v3';
@@ -927,9 +927,10 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
         'closer to the surveyed object the evidence shows than to the structure as published',
       time_curve: 'score over time from the runner\'s snapshots of output/model.glb (every interval seconds after the CLI started, scored after the attempt): ' +
         'at each tick an attempt counts its final score once it has ended, else the score of the last snapshot it had taken by then (0 with no or an invalid model, and at every tick with integrity problems; ' +
+        'a snapshot counts from its tick when read within ' + ON_TIME_SECONDS + ' s of it, else from the end of its read, and is counted as late; ' +
         'left out of the tick and counted as missing when the scorer failed on that snapshot, also on the runner\'s retries, or the runner could not store it); ' +
         'same averaging and bootstrap as the score, so the point at the wall-clock limit is the score. Time to ' + T95_SHARE * 100 + '%: per attempt with a final score of at least ' +
-        T95_MIN_FINAL + ', when its first snapshot at ' + T95_SHARE * 100 + '% of its final score was taken, else its end; median over attempts. ' +
+        T95_MIN_FINAL + ', when its first snapshot at ' + T95_SHARE * 100 + '% of its final score counts from (as above), else its end; median over attempts. ' +
         'Only for configurations whose every counted attempt has snapshots',
       excluded_statuses: excludeStatuses,
     },

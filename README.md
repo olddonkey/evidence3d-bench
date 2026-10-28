@@ -85,7 +85,7 @@
 | ✅ | T3 报告的诊断列：具名尺寸、细节类别、坐标与尺度误差 | [#1](https://github.com/olddonkey/evidence3d-bench/pull/1) |
 | 🔄 | T4 题面写清评分器 1.1.0 怎么评分（只用于今后新建的题集） | [#4](https://github.com/olddonkey/evidence3d-bench/pull/4)：审查已通过，等负责人定措辞 |
 | ✅ | T5 两张系统榜、名单文件、Holm 校正 | [#7](https://github.com/olddonkey/evidence3d-bench/pull/7) |
-| ✅ | T6 作答过程中每 5 分钟存一次模型，画分数-时间曲线 | [#6](https://github.com/olddonkey/evidence3d-bench/pull/6) |
+| ✅ | T6 作答过程中每 5 分钟存一次模型，画分数-时间曲线 | [#6](https://github.com/olddonkey/evidence3d-bench/pull/6)；后续 [#9](https://github.com/olddonkey/evidence3d-bench/pull/9)：整点后 10 秒内读到的快照算在该整点上 |
 | ⏳ | T7 在装了 agy 的 Mac 上查 `agy models`，跑 Antigravity 第一次实机预检和 3–5 题试跑 | 适配器是照文档写的，还没在真机上跑过 |
 | ⏳ | T8 真实建筑候选：有平面和至少两个立面、街上拍得到、不是名建筑 | 现有 2 个，Round 4 目标 10–12 个 |
 | ⏳ | T9 负责人评完自己那份 110 对盲评，再找 2 位评审者 | 已评 14 / 110 |

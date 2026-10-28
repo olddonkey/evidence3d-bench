@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildLeaderboard, collectRuns, summaryMarkdown } from '../lib/report/index.mjs';
-import { scoreAt, timeToShare, curveTicks, timeCurve, T95_MIN_FINAL } from '../lib/report/curves.mjs';
+import { scoreAt, timeToShare, curveTicks, timeCurve, snapshotAt, T95_MIN_FINAL, ON_TIME_SECONDS } from '../lib/report/curves.mjs';
 import { timeSection, timeMarkdown } from '../lib/report/time-chart.mjs';
 import { indexPage } from '../lib/report/index-page.mjs';
 import { mean } from '../lib/report/stats.mjs';
@@ -15,12 +15,13 @@ import { mean } from '../lib/report/stats.mjs';
 const near = (actual, expected, tolerance = 1e-9) => assert.ok(Math.abs(actual - expected) <= tolerance, actual + ' is not within ' + tolerance + ' of ' + expected);
 const NOW = new Date('2026-10-28T12:00:00Z');
 
-// One attempt as collectRuns normalises it. points: [[t, score, status?, taken at?], ...].
+// One attempt as collectRuns normalises it. points: [[t, score, status?, counts from?], ...].
 const attempt = (fields = {}) => {
   const { object = 'x', variant = 't2', score = 80, wall = 1000, limit = 1800, points = [], interval = 300, system = 's', model = 'm', ...rest } = fields;
   return { batch: 'b', task_id: object + '-' + variant, attempt: 1, system, model, effort: null, status: 'completed', excluded: false, valid: score > 0, score,
     object, variant, scale_evidence: 'none', usage: null, wall_seconds: wall, wall_limit_seconds: limit, cost_usd: null,
-    snapshots: points === null ? null : { interval_seconds: interval, points: points.map(([t, value, status = value === null ? 'score_error' : 'scored', at = t]) => ({ t, at, score: value, status })) },
+    snapshots: points === null ? null : { interval_seconds: interval,
+      points: points.map(([t, value, status = value === null ? 'score_error' : 'scored', at = t]) => ({ t, at, score: value, status, ...(at !== t ? { late: true } : {}) })) },
     report: score > 0 ? { valid: true, score, shape_score: score, detail: { score }, alignment: { frame_error: { offset_fraction: 0, offset_m: 0, yaw_deg: 0 } }, shape: { scale: 1 } } : null,
     ...rest };
 };
@@ -73,11 +74,31 @@ test('the chart breaks its line at a tick where every attempt is missing instead
   assert.match(timeMarkdown(board.entries), /\| 40\.0 \| n\/a \| 70\.0 \|/);
 });
 
-test('a snapshot read late counts from when it was taken, not from its tick', () => {
-  // The t = 300 tick was read at 650 s (a busy runner): its model is not the attempt's state at 300 or 600 s.
-  const late = attempt({ score: 80, wall: 1700, points: [[300, 78, 'scored', 650], [600, 78, 'scored', 660]] });
-  assert.equal(scoreAt(late, 300), 0); assert.equal(scoreAt(late, 600), 0); assert.equal(scoreAt(late, 900), 78);
-  assert.equal(timeToShare(late), 650);
+test('a snapshot read on time counts at its tick; one read late counts from the next tick after its read', () => {
+  assert.equal(ON_TIME_SECONDS, 10);
+  assert.equal(snapshotAt(300, 302.9), 300, 'the read and a settle wait'); assert.equal(snapshotAt(300, 310), 300);
+  assert.equal(snapshotAt(300, 310.5), 310.5); assert.equal(snapshotAt(300, undefined), 300, 'older records: the tick');
+  // t300 read on time (301 s); t600 read late (650 s, a busy runner): its model is not the attempt's state at 600 s.
+  const points = [[300, 40, 301], [600, 78, 650], [900, 78, 902]].map(([t, value, read]) => [t, value, 'scored', snapshotAt(t, read)]);
+  const a = attempt({ score: 80, wall: 1700, points });
+  assert.deepEqual([300, 600, 900].map(t => scoreAt(a, t)), [40, 40, 78], 'on time at 300; the late one from 900 on');
+  assert.equal(timeToShare(a), 650, 'the late snapshot is the first at 95%: when its read ended');
+  assert.equal(timeToShare(attempt({ score: 80, wall: 1700, points: [[300, 77, 'scored', snapshotAt(300, 303)]] })), 300, 'on time: its tick');
+  // The curve counts the late ones; a series of on-time reads has none.
+  const curve = timeCurve([a], plainMetric([a]));
+  assert.deepEqual(curve.points.slice(0, 3).map(point => point.mean), [40, 40, 78]);
+  assert.equal(curve.late, 1);
+  const board = buildLeaderboard({ attempts: [a], batches: [], problems: [] }, { now: NOW });
+  assert.match(timeSection(board.entries), /1 read late/); assert.match(timeMarkdown(board.entries), /read late: s \/ m \/ - 1/);
+  assert.match(board.method.time_curve, /within 10 s/);
+});
+
+test('an older snapshot read late never replaces a newer one already counted', () => {
+  // Every 10 s: t10 read late (21 s, counts from 21), t20 read on time (21.1 s, counts from 20), t30 read late (45 s).
+  const points = [[30, 85, 45], [10, 40, 21], [20, 80, 21.1]].map(([t, value, read]) => [t, value, 'scored', snapshotAt(t, read)]);
+  const a = attempt({ score: 84, wall: 100, limit: 120, interval: 10, points });
+  assert.deepEqual([10, 20, 21, 30, 40, 50].map(t => scoreAt(a, t)), [0, 80, 80, 80, 80, 85], 't10 is never the state: t20 was read after it');
+  assert.equal(timeToShare(a), 20, '80 >= 0.95 x 84 from 20 s; the older 40 read at 21 s does not undo it');
 });
 
 test('time to 95%: the first snapshot at 95% of the final score, else the end; low finals are left out', () => {
@@ -165,8 +186,8 @@ test('collectRuns reads the snapshots from result.json', async t => {
       { t: 900, at_seconds: 1150.5, read_seconds: 1151, status: 'score_error', score: null }] }));
   const { attempts } = await collectRuns({ dataRoot, batches: ['b1'] });
   assert.equal(attempts[0].wall_limit_seconds, 1800);
-  assert.deepEqual(attempts[0].snapshots, { interval_seconds: 300, points: [{ t: 300, at: 300, score: 0, status: 'absent' }, { t: 600, at: 600.2, score: 50, status: 'scored' },
-    { t: 900, at: 1151, score: null, status: 'score_error' }] }, 'taken at the end of the read; the tick for a record without times');
+  assert.deepEqual(attempts[0].snapshots, { interval_seconds: 300, points: [{ t: 300, at: 300, score: 0, status: 'absent' }, { t: 600, at: 600, score: 50, status: 'scored' },
+    { t: 900, at: 1151, score: null, status: 'score_error', late: true }] }, 'read on time: its tick; read late: the end of its read; no times: the tick');
   await writeFile(join(attemptDir, 'result.json'), JSON.stringify({ task_id: 'house-t2', attempt: 1, status: 'completed', score: 70 }));
   assert.equal((await collectRuns({ dataRoot, batches: ['b1'] })).attempts[0].snapshots, null, 'an older result has none');
 });

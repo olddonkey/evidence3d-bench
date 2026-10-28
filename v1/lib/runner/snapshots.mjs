@@ -102,7 +102,8 @@ const round = (value, digits = 3) => Math.round(value * 10 ** digits) / 10 ** di
 // Each record has its tick `t` and when the copy was taken: at_seconds, when
 // the read that was kept began, and read_seconds, when it ended (both after
 // the CLI's spawn). A tick reached late (a busy runner, a file still being
-// written) is read late; the report places the snapshot at read_seconds.
+// written) is read late; the report counts a snapshot at its tick when it was
+// read within ON_TIME_SECONDS of it, else from read_seconds (report/curves.mjs).
 export function snapshotClock({ attemptDir, workspace, intervalSeconds, wallSeconds, maxBytes, settle = SETTLE, log = () => {} }) {
   const ticks = snapshotTicks(intervalSeconds, wallSeconds), records = [], dir = join(attemptDir, 'snapshots');
   let output = null, clock = null, timer = null, current = Promise.resolve(), stopped = false, indexed = true;

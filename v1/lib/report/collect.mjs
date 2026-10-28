@@ -3,6 +3,7 @@ import { join, resolve, isAbsolute, relative, sep, dirname } from 'node:path';
 import { objectHash } from '../../../lib/io.mjs';
 import { layout, VARIANTS, REPORT_SCHEMA } from '../contract.mjs';
 import { finite } from './stats.mjs';
+import { snapshotAt } from './curves.mjs';
 
 // Reads run batches into one flat list of normalised attempts.
 //
@@ -221,16 +222,20 @@ async function findModel(result, attemptDir, problems) {
 }
 
 // The score-over-time snapshots the runner recorded (runner/snapshots.mjs),
-// reduced to tick, when the copy was taken (`at`: the end of its read, the
-// tick for a record that has none), score and status, in the order taken;
-// null when the batch took none. With integrity problems every point is 0.
+// reduced to tick, when the copy counts from (`at`: its tick, or the end of
+// its read when that came more than ON_TIME_SECONDS after the tick, then
+// marked `late`; curves.mjs, snapshotAt), score and status, in tick order
+// (the order they were read in); null when the batch took none. With
+// integrity problems every point is 0.
 function snapshotSeries(result, { integrity = false } = {}) {
   if (!Array.isArray(result.snapshots) || !finite(result.snapshot_interval_seconds) || result.snapshot_interval_seconds <= 0) return null;
-  const takenAt = item => [item.read_seconds, item.at_seconds, item.t].find(finite);
   const scoreOf = item => integrity ? 0 : finite(item.score) ? item.score : null;
+  const point = item => {
+    const at = snapshotAt(item.t, [item.read_seconds, item.at_seconds].find(finite));
+    return { t: item.t, at, score: scoreOf(item), status: text(item.status), ...(at !== item.t ? { late: true } : {}) };
+  };
   return { interval_seconds: result.snapshot_interval_seconds,
-    points: result.snapshots.filter(item => finite(item?.t)).map(item => ({ t: item.t, at: takenAt(item), score: scoreOf(item), status: text(item.status) }))
-      .sort((a, b) => a.at - b.at || a.t - b.t) };
+    points: result.snapshots.filter(item => finite(item?.t)).map(point).sort((a, b) => a.t - b.t) };
 }
 
 function setOf(truth, taskId, problems) {
