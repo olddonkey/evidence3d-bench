@@ -139,7 +139,8 @@ const inside = (box, frame) => {
 
 // ------------------------------------------------------------------ writer
 
-export async function writeReport({ dataRoot, batches, outDir, views = REPORT_VIEWS, size = 360, seed, now, excludeStatuses = DEFAULT_EXCLUDED_STATUSES, plannedObjects } = {}) {
+export async function writeReport({ dataRoot, batches, outDir, views = REPORT_VIEWS, size = 360, seed, now, excludeStatuses = DEFAULT_EXCLUDED_STATUSES, plannedObjects,
+  roster } = {}) {
   if (typeof dataRoot !== 'string' || !dataRoot) throw new Error('writeReport needs dataRoot');
   const clock = performance.now(), timing = { collect_s: 0, aggregate_s: 0, parse_s: 0, render_s: 0, pages_s: 0, total_s: 0 };
   const lap = (key, since) => { timing[key] += (performance.now() - since) / 1000; };
@@ -149,7 +150,7 @@ export async function writeReport({ dataRoot, batches, outDir, views = REPORT_VI
   const collected = await collectRuns({ dataRoot: root, batches, excludeStatuses });
   lap('collect_s', since);
   since = performance.now();
-  const board = buildLeaderboard(collected, { seed, now, excludeStatuses, plannedObjects });
+  const board = buildLeaderboard(collected, { seed, now, excludeStatuses, plannedObjects, roster });
   lap('aggregate_s', since);
   // Renders and pages of an earlier report in the same directory would be
   // stale and unlinked. They are removed only when the directory holds a
@@ -327,9 +328,12 @@ export async function writeReport({ dataRoot, batches, outDir, views = REPORT_VI
     tasks: board.tasks.length, attempts: collected.attempts.length, attempts_drawn: drawn, images, problems: board.problems.length,
     sets: board.sets.map(set => ({
       id: set.id, kind: set.description?.kind ?? null, development: set.description?.development ?? false, objects: set.objects, tasks: set.tasks, counted: set.counted,
-      ranking: board.entries.filter(entry => entry.set === set.id).map(entry => ({ rank: entry.rank, key: entry.key, score: round(entry.score.mean), ci95: entry.score.ci95?.map(round) ?? null })),
+      ranking: board.entries.filter(entry => entry.set === set.id).map(entry => ({ rank: entry.rank, key: entry.key, score: round(entry.score.mean), ci95: entry.score.ci95?.map(round) ?? null,
+        ...(entry.reference ? { reference: true } : {}) })),
+      ladders: set.ladders.map(ladder => ({ id: ladder.id, ranking: ladder.entries.map(item => ({ rank: item.rank, key: item.key })),
+        separated: ladder.pairwise.correction.separated + ' of ' + ladder.pairwise.correction.comparisons + ' pairs after Holm' })),
       pairs: set.pairwise.pairs.map(pair => ({ a: pair.a, b: pair.b, difference: round(pair.mean_difference), ci95: pair.ci95?.map(round) ?? null,
-        t_ci95: pair.t_ci95?.map(round) ?? null, verdict: pair.verdict })),
+        t_ci95: pair.t_ci95?.map(round) ?? null, verdict: pair.verdict, holm: pair.holm?.verdict ?? null })),
     })),
     timing,
   };

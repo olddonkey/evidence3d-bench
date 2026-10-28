@@ -134,7 +134,7 @@ test('aggregate writes deterministic JSON and survives bad files', async () => {
     const first = await aggregate({ dataRoot, batches: ['demo-codex', 'demo-claude'], now: NOW });
     const path = join(dataRoot, 'reports', 'demo-codex+demo-claude', 'leaderboard.json');
     const written = JSON.parse(await readFile(path, 'utf8'));
-    assert.equal(written.schema, 'e3d-leaderboard-v2');
+    assert.equal(written.schema, 'e3d-leaderboard-v3');
     assert.deepEqual(written, JSON.parse(JSON.stringify(first)));
     const again = await aggregate({ dataRoot, batches: ['demo-codex', 'demo-claude'], outFile: null, now: NOW });
     assert.deepEqual(JSON.parse(JSON.stringify(again)), written);

@@ -156,6 +156,39 @@ export function tInterval(values, level = 0.95) {
   return [centre - half, centre + half];
 }
 
+// Two-sided p-value of the one-sample t test of mean = 0 (on paired
+// differences, the paired t test): the t interval at level 1 - p just touches
+// zero. Identical nonzero values give 0, all zeros 1; null below two values.
+export function tTestP(values) {
+  const list = values.filter(finite);
+  if (list.length < 2) return null;
+  const centre = mean(list), sd = sampleSD(list);
+  if (!(sd > 0)) return Math.abs(centre) > 0 ? 0 : 1;
+  const t = centre / (sd / Math.sqrt(list.length));
+  return Math.min(1, 2 * (1 - studentCDF(Math.abs(t), list.length - 1)));
+}
+
+// ------------------------------------------------------ multiple comparisons
+
+// Family-wise error rate the corrected verdicts hold.
+export const FAMILY_ALPHA = 0.05;
+
+// Holm's step-down adjustment of a family of p-values, returned in input
+// order: sorted ascending, p_(k) becomes max over j <= k of (m - j + 1) p_(j),
+// capped at 1. Rejecting every adjusted p below alpha is Holm's procedure at
+// family-wise level alpha. Entries that are not numbers stay null and are not
+// counted in m: an untestable comparison makes no claim.
+export function holmAdjust(pValues) {
+  const order = pValues.map((p, index) => [p, index]).filter(([p]) => finite(p)).sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+  const m = order.length, adjusted = pValues.map(() => null);
+  let running = 0;
+  order.forEach(([p, index], k) => {
+    running = Math.max(running, Math.min(1, (m - k) * p));
+    adjusted[index] = running;
+  });
+  return adjusted;
+}
+
 // ------------------------------------------------------- variance components
 
 // Regularised lower incomplete gamma P(a, x): series below a + 1, continued

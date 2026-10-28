@@ -1,28 +1,30 @@
 # Results report (module G)
 
-Reads run batches, aggregates them into a leaderboard (`e3d-leaderboard-v2`)
+Reads run batches, aggregates them into a leaderboard (`e3d-leaderboard-v3`)
 and writes a static site that opens from disk: `index.html` (per task set:
-what the set is, leaderboard, pairwise comparison, where the noise is,
-evidence deltas, archetypes, frame and cost, task index; then provenance,
+what the set is, the two ladders, leaderboard, pairwise comparison, where the
+noise is, evidence deltas, archetypes, frame and cost, task index; then provenance,
 excluded attempts, data problems), `summary.md` (the same numbers in Markdown,
 to paste into a document), one page per task under `tasks/`, renders and
 copied evidence under `assets/`, and the full leaderboard as
 `leaderboard.json`.
 
 ```sh
-node v1/cli.mjs report --batches A,B,C --out .local/v1/reports/NAME
+node v1/cli.mjs report --batches A,B,C --out .local/v1/reports/NAME [--roster v1/rounds/round4.roster.json]
 ```
 
 ```js
 import { aggregate, writeReport, comparePair } from './index.mjs';
-await aggregate({ dataRoot, batches, outFile });        // -> leaderboard object (JSON written unless outFile: null)
-await writeReport({ dataRoot, batches, outDir });       // -> compact summary, see below
+await aggregate({ dataRoot, batches, outFile, roster });        // -> leaderboard object (JSON written unless outFile: null)
+await writeReport({ dataRoot, batches, outDir, roster });       // -> compact summary, see below
+const roster = await readRoster('v1/rounds/round3.roster.json'); // optional: formal configurations and ladders
 ```
 
 `writeReport` returns only what a terminal should show (the CLI prints it):
 `{ outDir, index, summary, leaderboard, tasks, attempts, attempts_drawn,
 images, problems, sets: [{ id, kind, objects, tasks, counted, ranking: [{ rank,
-key, score, ci95 }], pairs: [{ a, b, difference, ci95, t_ci95, verdict }] }],
+key, score, ci95, reference? }], ladders: [{ id, ranking: [{ rank, key }],
+separated }], pairs: [{ a, b, difference, ci95, t_ci95, verdict, holm }] }],
 timing: { collect_s, aggregate_s, parse_s, render_s, pages_s, total_s } }`.
 Everything else is in `leaderboard.json`.
 
@@ -70,13 +72,116 @@ Everything else is in `leaderboard.json`.
   and objects won / tied / lost. Verdict: `a_higher` / `b_higher` when both
   intervals exclude zero, `not_separated` when both include it, `unsettled`
   when they disagree, `not_evaluated` below two objects. The page says this in
-  words per pair and notes that intervals are not corrected for multiple
-  comparisons.
+  words per pair. These intervals and this verdict are uncorrected; the
+  corrected verdict next to them is described under *Multiple comparisons*.
 - Why both intervals: on a synthetic design (object effect, configuration ×
   object interaction, attempt noise, 3 vs 1 attempts per task) the percentile
   bootstrap covered the true difference 84 % of the time with 5 objects, 92 %
   with 10 and 93 % with 24, and separated two equal configurations 16 %, 10 %
   and 6 % of the time; the t interval stayed at 94–96 % and 5–6 %.
+
+## Ladders and the roster
+
+Effort moves a model about as much as the gap between models (Round 3: about
+five points for each of Astra, gpt-6.1-sol and Opus between high and max), so
+a table that mixes effort levels is not a model ladder. Every row is a
+**system**: client + model + effort. Per set the report gives two ladders
+(`set.ladders`):
+
+- `default`: each client at the effort it uses when none is asked for;
+- `top`: each client at the highest effort the round asked it for.
+
+and `set.effort`, top minus default effort for every client and model on both
+ladders (oriented that way even when the default scored higher).
+
+Which configurations are on which ladder comes from a **roster file**, decided
+before the data like the round's DECISIONS.md:
+
+```sh
+node v1/cli.mjs report --batches A,B,C --out .local/v1/reports/NAME --roster v1/rounds/round4.roster.json
+```
+
+```json
+{
+  "schema": "e3d-roster-v1",
+  "round": "round4",
+  "decided_at": "2026-11-03",
+  "decisions": "docs/V1-ROUND4-PLAN.md",
+  "configurations": [
+    { "system": "codex", "model": "gpt-6-astra", "effort": "high", "ladder": "default" },
+    { "system": "codex", "model": "gpt-6-astra", "effort": "max", "ladder": "top" },
+    { "system": "claude-code", "model": "claude-haiku-4-5", "effort": null, "ladder": "default" }
+  ]
+}
+```
+
+- `effort: null` is a run without an effort flag (the client's default). The
+  key is `system / model / effort` exactly as `result.json` records it.
+- `ladder` is `"default"`, `"top"`, a list of both (a model with one effort
+  level), or absent (a formal configuration on no ladder). A client and model
+  may appear on a ladder once.
+- A roster with any problem is refused as a whole. A listed configuration
+  that no attempt ran is a data problem (usually a misspelt id); one missing
+  from a set is listed under that set's ladder (`ladders[].missing`).
+- Configurations not in the roster are **reference rows**
+  (`entry.reference: true`, `entry.rank: null`, `set.reference_configurations`):
+  listed after the ranked rows, never ranked, in no corrected family. Their
+  pairs keep their uncorrected numbers (folded on the page).
+- The leaderboard records the roster (`board.roster`: file relative to the
+  working directory, sha256, round, decided_at, configurations).
+- `v1/rounds/round3.roster.json` reproduces the ladders of
+  `docs/V1-ROUND3.md` §5 (default: high, Haiku without a flag; top: max for
+  Astra, gpt-6.1-sol and Opus). It was written after that round's data, to
+  re-report it; it is not a pre-registered decision.
+
+Without a roster every configuration is formal and the ladders are inferred
+(`inferLadders`, notes in `set.ladder_notes`): `default` is a run without an
+effort flag or at the client's documented default (`CLIENT_DEFAULT_EFFORT`:
+codex, claude-code and grok `high`); `top` is, per client and model, the
+highest effort above that default that the set ran (`EFFORT_ORDER`: none <
+minimal < low < medium < high < xhigh < max < ultra). Anything else (below the
+default, between default and top, an unknown effort name, a client whose
+default the report does not know, two runs that both count as the default) is
+on no ladder, with a note. Round 3 inferred gives the same ladders as its
+roster file.
+
+A ladder ranks its configurations by the leaderboard's score; its pairs are
+the leaderboard's pairs (same numbers, same orientation), corrected over the
+ladder alone.
+
+## Multiple comparisons (Holm)
+
+Round 3 had 12 configurations, so 66 pairs: at 95 % each, if no configuration
+differed at all, at least one pair would still be "separated" most of the
+time. Every pairwise table therefore carries a corrected verdict next to the
+uncorrected intervals, which stay as they were.
+
+- **p-value**: the two-sided paired t test of the per-object differences
+  (`pair.p_t`, `tTestP`). The 95 % t interval excludes zero exactly when
+  `p_t < 0.05`.
+- **Families**, each corrected on its own: all pairs of formal
+  configurations in a set (`set.pairwise`, `holm.family: 'all'`); the pairs of
+  one ladder (`ladders[].pairwise`, `'default'` / `'top'`); the effort pairs
+  (`set.effort`, `'effort'`). m counts the pairs with at least two objects;
+  untestable pairs and pairs with a reference row are in no family.
+- **Holm's step-down method** (`holmAdjust`) at family-wise 5 %
+  (`FAMILY_ALPHA`): sort the m p-values; the k-th smallest becomes
+  (m − k + 1) · p, never below the one before, capped at 1.
+- **Separated after correction** (`pair.holm.verdict`): Holm-adjusted
+  p < 0.05 **and** separated uncorrected (bootstrap and Student-t 95 %
+  intervals both exclude zero). So correction only removes separations; an
+  unsettled pair stays unseparated whatever its p.
+- `pair.holm` = `{ family, comparisons, p_adjusted, verdict }`;
+  `*.correction` = `{ family, method, alpha, test, comparisons,
+  separated_uncorrected, separated }`. The page prints the Holm column with
+  m in its header; each pair's sentence says whether it is still separated.
+- A pair can be separated on a ladder and not in the table of every
+  configuration: the larger table makes more claims and corrects harder.
+  Each table states its own m.
+- On synthetic data with ten equal configurations (45 pairs, 10 objects),
+  the uncorrected table showed at least one false separation in 75 % of 40
+  trials, the Holm column in none (`report-ladders.test.mjs` checks a smaller
+  version).
 
 ## Where the noise is (`set.variance`)
 
