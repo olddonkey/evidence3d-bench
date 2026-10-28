@@ -123,16 +123,18 @@ async function vote(choice) {
   const pair = state.pairs[state.current];
   if (!pair || state.busy || state.zoom || state.asking || !state.rater) return;
   if (document.querySelector('.cell img.loading')) { setStatus('图片还在加载，请稍候再选。'); return; }
-  const now = performance.now();
+  const now = performance.now(), rater = state.rater;
   const hidden = state.hiddenMs + (state.hiddenSince === null ? 0 : now - state.hiddenSince);
+  // busy also keeps 更换 off until the vote is saved, so the vote and its result stay this rater's.
   state.busy = true;
   updateControls();
   setStatus('正在保存……');
   try {
     const response = await fetch('vote', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rater: state.rater, pair: pair.id, choice, ...elapsed(state.shownAt, now, hidden) }) });
+      body: JSON.stringify({ rater, pair: pair.id, choice, ...elapsed(state.shownAt, now, hidden) }) });
     const answer = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(answer.error || 'HTTP ' + response.status);
+    if (state.rater !== rater) { state.busy = false; return; }
     state.latest.set(pair.id, choice);
     state.trail = state.trail.filter(item => item !== state.current);
     state.trail.push(state.current);
@@ -228,12 +230,24 @@ function askRater({ current = '', cancellable = false } = {}) {
   });
 }
 
-// Reads this rater's votes and shows their first unrated pair.
+// Reads this rater's votes, then makes them the rater and shows their first
+// unrated pair. Nothing votes until then (busy): during a change of rater the
+// pair on screen still belongs to the previous one. On failure the previous
+// rater stays.
 async function useRater(id) {
-  const response = await fetch('votes?rater=' + encodeURIComponent(id), { cache: 'no-store' });
-  if (!response.ok) throw new Error('已有选择 HTTP ' + response.status);
-  const { votes } = await response.json();
+  state.busy = true;
+  updateControls();
+  let votes;
+  try {
+    const response = await fetch('votes?rater=' + encodeURIComponent(id), { cache: 'no-store' });
+    if (!response.ok) throw new Error('已有选择 HTTP ' + response.status);
+    ({ votes } = await response.json());
+  } finally {
+    state.busy = false;
+    updateControls();
+  }
   const known = new Set(state.pairs.map(pair => pair.id));
+  storeRater(id);
   state.rater = id;
   state.latest = latestChoices(votes.filter(item => known.has(item.pair)));
   state.trail = votedTrail(state.pairs, votes);
@@ -247,8 +261,7 @@ async function changeRater() {
   if (state.busy || state.asking) return;
   const id = await askRater({ current: state.rater ?? '', cancellable: true });
   if (!id || id === state.rater) return;
-  storeRater(id);
-  try { await useRater(id); } catch (error) { setStatus('无法读取已有选择：' + error.message, true); }
+  try { await useRater(id); } catch (error) { setStatus('没能换成评审者 ' + id + '（' + error.message + '），仍是评审者 ' + state.rater + '。', true); }
 }
 
 document.addEventListener('keydown', event => {
@@ -286,7 +299,6 @@ async function start() {
     if (!id) {
       setStatus('');
       id = await askRater();
-      storeRater(id);
     }
     await useRater(id);
   } catch (error) {

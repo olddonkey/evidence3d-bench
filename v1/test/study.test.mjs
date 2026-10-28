@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -208,8 +208,11 @@ test('the page source names no score, batch, model, system or private file', asy
   for (const label of ['A 更接近', '分不出', 'B 更接近', '上一对', '请输入你的名字', '更换']) assert.ok(html.includes(label), label);
   // Every vote names its rater; the votes read back are only that rater's.
   const app = await readFile(join(PAGE, 'app.js'), 'utf8');
-  assert.match(app, /rater: state\.rater, pair: pair\.id/);
+  assert.match(app, /const now = performance\.now\(\), rater = state\.rater;/);
+  assert.match(app, /JSON\.stringify\(\{ rater, pair: pair\.id, choice,/);
   assert.match(app, /'votes\?rater=' \+ encodeURIComponent\(id\)/);
+  // Nothing votes while another rater's votes load (the pair on screen is still the previous rater's).
+  assert.match(app, /async function useRater\(id\) \{\n  state\.busy = true;/);
 });
 
 test('page logic: keys, last vote per pair, resume at the first unrated pair, trail for "上一对"', () => {
@@ -519,14 +522,32 @@ test('readVoteFiles merges votes.jsonl and votes-<rater>.jsonl in the order cast
     assert.deepEqual(read.ignored, ['votes-.jsonl', 'votes-Bob.jsonl', 'votes-a-b.jsonl', 'votes-r0.jsonl']);
     assert.deepEqual(read.files.map(file => [file.file, file.lines, file.valid_lines, file.malformed_lines, file.unnamed_lines, file.raters]), [
       ['votes.jsonl', 3, 2, 1, 1, ['lls', 'r0']], ['votes-ann.jsonl', 3, 3, 0, 1, ['ann']], ['votes-copy.jsonl', 1, 1, 0, 0, ['ann']]]);
-    // In the order cast (the server's time), whatever file a vote came from.
-    assert.deepEqual(read.votes.map(vote => [vote.rater, vote.pair, vote.choice]), [['r0', 'P1', 'a'], ['ann', 'P1', 'tie'], ['ann', 'P3', 'a'], ['ann', 'P2', 'b'], ['lls', 'P1', 'b']]);
+    // Each file in its line order (ann's P3 stays last although its clock says earlier), files interleaved by time.
+    assert.deepEqual(read.votes.map(vote => [vote.rater, vote.pair, vote.choice]), [['r0', 'P1', 'a'], ['ann', 'P1', 'tie'], ['ann', 'P2', 'b'], ['ann', 'P3', 'a'], ['lls', 'P1', 'b']]);
     // The owner's votes from before raters had names are theirs when they say so.
     const owned = await readVoteFiles(dir, { legacyRater: 'lls' });
     assert.deepEqual(owned.votes.filter(vote => vote.rater === 'lls').map(vote => [vote.pair, vote.choice]), [['P1', 'a'], ['P1', 'b']]);
     assert.equal(owned.legacy_rater, 'lls');
     await assert.rejects(readVoteFiles(dir, { legacyRater: 'LLS' }), /legacy rater/);
     assert.deepEqual(await readVoteFiles(join(dir, 'missing')), { votes: [], malformed: 0, duplicates: 0, files: [], ignored: [], legacy_rater: 'r0' });
+  });
+});
+
+test('a revision counts even when the server clock stepped back, or the line has no time', async () => {
+  await withTemp(async dir => {
+    const line = value => JSON.stringify(value);
+    await writeFile(join(dir, 'votes.jsonl'), [line({ rater: 'ann', pair: 'P1', choice: 'a', ms: 1, at: '2026-10-05T12:01:00.000Z' }),
+      line({ rater: 'ann', pair: 'P1', choice: 'b', ms: 1, at: '2026-10-05T12:00:00.000Z' }),
+      line({ rater: 'ann', pair: 'P2', choice: 'a', ms: 1, at: '2026-10-05T12:02:00.000Z' }), line({ rater: 'ann', pair: 'P2', choice: 'tie', ms: 1 })].join('\n') + '\n');
+    await writeFile(join(dir, 'votes-bob.jsonl'), line({ rater: 'bob', pair: 'P1', choice: 'a', ms: 1, at: '2026-10-05T12:00:30.000Z' }) + '\n');
+    const { votes } = await readVoteFiles(dir);
+    const latest = latestChoices(votes.filter(vote => vote.rater === 'ann'));
+    assert.deepEqual([latest.get('P1'), latest.get('P2')], ['b', 'tie']);
+    const analysis = analyzeStudy({ key: handKey(), votes });
+    const ann = analysis.raters.find(item => item.rater === 'ann');
+    assert.equal(ann.votes.revisions, 2);
+    // P1: ann's revision b is what is compared with bob's a.
+    assert.deepEqual(analysis.between_raters.pairwise.map(row => [row.raters.join('-'), row.both_rated, row.same_choice.k]), [['ann-bob', 1, 0]]);
   });
 });
 
@@ -749,7 +770,7 @@ test('analyze writes analysis.md and analysis.json from votes.jsonl and key.json
   });
 });
 
-test('export copies pairs.json and the images it names for a rater, nothing private', async () => {
+test('export copies pairs.json and the images it names for a rater, nothing private', async t => {
   await withTemp(async root => {
     const dataRoot = join(root, 'data'), dir = studyDir(dataRoot, 'srv');
     await mkdir(dir, { recursive: true });
@@ -780,7 +801,16 @@ test('export copies pairs.json and the images it names for a rater, nothing priv
     // Never over an existing directory, never into the repository outside .local/.
     await assert.rejects(exportStudy({ dataRoot, name: 'srv', out }), /already exists/);
     const repo = fileURLToPath(new URL('../../', import.meta.url));
+    // Should the guard ever fail, what it let through is removed again.
+    t.after(() => Promise.all([rm(join(repo, 'exported-study'), { recursive: true, force: true }), rm(join(repo, 'v1', 'new'), { recursive: true, force: true })]));
     await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: join(repo, 'exported-study') }), /inside the repository/);
     await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: repo }), /inside the repository/);
+    // Nor through a symlinked alias of the repository (e.g. macOS /tmp for /private/tmp), or a symlink to a missing path.
+    await symlink(repo, join(root, 'alias'));
+    await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: join(root, 'alias', 'exported-study') }), /inside the repository/);
+    await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: join(root, 'alias', 'v1', 'new', 'deeper') }), /inside the repository/);
+    await symlink(join(root, 'nowhere'), join(root, 'dangling'));
+    await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: join(root, 'dangling', 'sub') }), /symlink to a missing path/);
+    await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: join(root, 'dangling') }), /symlink to a missing path|already exists/);
   });
 });

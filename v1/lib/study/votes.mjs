@@ -58,15 +58,32 @@ export async function voteFiles(studyDir) {
 const compareText = (p, q) => p < q ? -1 : p > q ? 1 : 0;
 const identity = vote => JSON.stringify([vote.rater, vote.pair, vote.choice, vote.ms, vote.hidden_ms, vote.at]);
 
-// Every vote of a study directory, in the order they were cast: by the
-// server's time stamp, file and line order breaking ties (a rater's votes come
-// from one server, so this is the order of their lines). A line that appears in
-// two files (the same vote copied twice) counts once.
+// Merges the files' votes into one list. A file's lines keep their order: they
+// were appended in the order cast, whatever the clock said (it can step back),
+// so a revision stays after the vote it revises. Between files the next vote is
+// the earliest file head by the server's time stamp (a missing one counts as
+// earliest; the earlier file on a tie).
+function mergeFiles(lists) {
+  const next = lists.map(() => 0), merged = [];
+  for (;;) {
+    let pick = -1;
+    for (let i = 0; i < lists.length; i++) {
+      if (next[i] >= lists[i].length) continue;
+      if (pick < 0 || compareText(lists[i][next[i]].at ?? '', lists[pick][next[pick]].at ?? '') < 0) pick = i;
+    }
+    if (pick < 0) return merged;
+    merged.push(lists[pick][next[pick]++]);
+  }
+}
+
+// Every vote of a study directory, each file in its own line order, files
+// interleaved by time (see mergeFiles). A line that appears in two files (the
+// same vote copied twice) counts once, where it first appears.
 //   legacyRater: whose the votes in votes.jsonl without a rater are (default r0).
 export async function readVoteFiles(studyDir, { legacyRater = LEGACY_RATER } = {}) {
   if (legacyRater !== LEGACY_RATER && !isRater(legacyRater)) throw new Error('legacy rater must be letters and digits (not r0): ' + JSON.stringify(legacyRater));
   const { files, ignored } = await voteFiles(studyDir);
-  const all = [], summaries = [], seen = new Set();
+  const lists = [], summaries = [], seen = new Set();
   let malformed = 0, duplicates = 0;
   for (const { file, rater } of files) {
     let text;
@@ -78,15 +95,14 @@ export async function readVoteFiles(studyDir, { legacyRater = LEGACY_RATER } = {
     malformed += parsed.malformed;
     summaries.push({ file, lines: parsed.votes.length + parsed.malformed, valid_lines: parsed.votes.length, malformed_lines: parsed.malformed, unnamed_lines: parsed.unnamed,
       raters: [...new Set(parsed.votes.map(vote => vote.rater))].sort() });
+    const list = [];
     for (const vote of parsed.votes) {
       const id = identity(vote);
       if (seen.has(id)) { duplicates++; continue; }
       seen.add(id);
-      all.push(vote);
+      list.push(vote);
     }
+    lists.push(list);
   }
-  const votes = all.map((vote, index) => ({ vote, index }))
-    .sort((p, q) => compareText(p.vote.at ?? '', q.vote.at ?? '') || p.index - q.index)
-    .map(item => item.vote);
-  return { votes, malformed, duplicates, files: summaries, ignored, legacy_rater: legacyRater };
+  return { votes: mergeFiles(lists), malformed, duplicates, files: summaries, ignored, legacy_rater: legacyRater };
 }

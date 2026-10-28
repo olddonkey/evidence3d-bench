@@ -1,5 +1,5 @@
-import { readFile, stat, rm, mkdir, copyFile, writeFile } from 'node:fs/promises';
-import { join, resolve, relative, isAbsolute, sep } from 'node:path';
+import { readFile, stat, lstat, realpath, rm, mkdir, copyFile, writeFile } from 'node:fs/promises';
+import { join, resolve, relative, isAbsolute, sep, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writeJSON } from '../../../lib/io.mjs';
 import { collectSubmissions, selectPairs, publicPairs, privateKey, DEFAULT_PAIRS, DEFAULT_REPEAT_SHARE, PER_TASK } from './select.mjs';
@@ -90,6 +90,23 @@ export async function readStudy(dir) {
   return { pairs: await read('pairs.json'), key: await read('key.json') };
 }
 
+// The real path of `path`, which need not exist yet: its nearest existing
+// ancestor resolved through symlinks, then the rest as given. A symlink to a
+// missing path on the way is refused: where it would lead cannot be checked.
+async function realTarget(path) {
+  let head = resolve(path);
+  const rest = [];
+  for (;;) {
+    try { return join(await realpath(head), ...rest); } catch (error) {
+      const parent = dirname(head);
+      if (error.code !== 'ENOENT' || parent === head) throw error;
+      if (await lstat(head).then(() => true, () => false)) throw new Error(head + ' is a symlink to a missing path');
+      rest.unshift(basename(head));
+      head = parent;
+    }
+  }
+}
+
 // What a rater on another machine needs, and nothing else: pairs.json and the
 // images it names, copied to <out>/study/<name>/, with a README.txt (in
 // Chinese, like the page) at <out>. No key.json, no votes, no analysis. `out`
@@ -98,12 +115,13 @@ export async function readStudy(dir) {
 export async function exportStudy({ dataRoot = DEFAULT_DATA_ROOT, name, out }) {
   if (typeof out !== 'string' || !out) throw new Error('export needs an output directory');
   const source = studyDir(dataRoot, name), target = resolve(out);
-  const inRepo = relative(resolve(REPO_ROOT), target);
+  // Compared as real paths, so a symlinked alias of the repository (e.g. macOS /tmp for /private/tmp) is caught.
+  const inRepo = relative(await realpath(REPO_ROOT), await realTarget(target));
   const outside = inRepo === '..' || inRepo.startsWith('..' + sep) || isAbsolute(inRepo);
   if (!outside && !(inRepo === '.local' || inRepo.startsWith('.local' + sep))) {
     throw new Error(target + ' is inside the repository; export outside it (or under .local/), the renders show the hidden truth');
   }
-  if (await fileSize(target) !== null) throw new Error(target + ' already exists; export into a new directory');
+  if (await lstat(target).then(() => true, () => false)) throw new Error(target + ' already exists; export into a new directory');
   const pairsBytes = await readFile(join(source, 'pairs.json'));
   const pairs = JSON.parse(pairsBytes.toString('utf8'));
   const images = [...new Set(pairs.pairs.flatMap(pair => Object.values(pair.images).flatMap(byRole => Object.values(byRole))))].sort();
