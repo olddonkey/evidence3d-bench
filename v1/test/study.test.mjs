@@ -575,6 +575,15 @@ test('copies of a log, whole or in part, keep each file\'s order around the shar
     await writeFile(join(dir, 'votes-copy.jsonl'), line(b) + line(a));
     assert.equal(await latest(), 'a');
     assert.equal((await readVoteFiles(dir)).votes.length, 2);
+    // ... and only among the votes on the contradiction: a newer revision elsewhere still comes last.
+    const c = { rater: 'ann', pair: 'P1', choice: 'tie', ms: 1, at: '2026-10-05T12:03:00.000Z' };
+    await writeFile(join(dir, 'votes.jsonl'), line(c));
+    assert.equal(await latest(), 'tie');
+    assert.deepEqual((await readVoteFiles(dir)).votes.map(vote => vote.choice), ['b', 'a', 'tie']);
+    // An order that does not contradict anything is kept around the contradiction: d after c in one file stays last.
+    const d = { rater: 'ann', pair: 'P1', choice: 'a', ms: 2, at: '2026-10-05T11:00:00.000Z' };
+    await writeFile(join(dir, 'votes.jsonl'), line(c) + line(d));
+    assert.deepEqual((await readVoteFiles(dir)).votes.map(vote => [vote.choice, vote.ms]), [['b', 1], ['a', 1], ['tie', 1], ['a', 2]]);
   });
 });
 

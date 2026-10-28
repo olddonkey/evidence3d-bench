@@ -58,14 +58,51 @@ export async function voteFiles(studyDir) {
 const compareText = (p, q) => p < q ? -1 : p > q ? 1 : 0;
 const identity = vote => JSON.stringify([vote.rater, vote.pair, vote.choice, vote.ms, vote.hidden_ms, vote.at]);
 
+// Marks every node with its strongly connected component (Tarjan, iterative):
+// nodes on a common cycle of `next` edges share `component`.
+function markComponents(nodes) {
+  let counter = 0;
+  const stack = [];
+  for (const root of nodes) {
+    if (root.index !== undefined) continue;
+    root.index = root.low = counter++;
+    stack.push(root);
+    root.onStack = true;
+    const work = [[root, root.next.values()]];
+    while (work.length) {
+      const [node, edges] = work[work.length - 1], step = edges.next();
+      if (!step.done) {
+        const next = step.value;
+        if (next.index === undefined) {
+          next.index = next.low = counter++;
+          stack.push(next);
+          next.onStack = true;
+          work.push([next, next.next.values()]);
+        } else if (next.onStack) node.low = Math.min(node.low, next.index);
+        continue;
+      }
+      work.pop();
+      if (work.length) work[work.length - 1][0].low = Math.min(work[work.length - 1][0].low, node.low);
+      if (node.low !== node.index) continue;
+      let member;
+      do {
+        member = stack.pop();
+        member.onStack = false;
+        member.component = node.index;
+      } while (member !== node);
+    }
+  }
+}
+
 // Merges the files' votes into one list. A file's lines keep their order: they
 // were appended in the order cast, whatever the clock said (it can step back),
 // so a revision stays after the vote it revises. The same line in several files
 // (a log copied, whole or in part) is one vote that keeps every file's order
-// around it. Otherwise the next vote is the earliest by the server's time stamp
-// (a missing one counts as earliest), then the earlier file and line. Files
-// whose orders contradict each other (a cycle) give way to the time stamp.
-// Returns the votes and how many lines were copies.
+// around it. Where files contradict each other (their orders form a cycle),
+// those contradicting orders are dropped and the time stamps decide among the
+// votes on the cycle; every other order is kept. Among the votes free to go
+// next, the earliest time stamp goes first (a missing one counts as earliest),
+// then the earlier file and line. Returns the votes and how many lines were copies.
 function mergeFiles(lists) {
   const nodes = new Map();
   let copies = 0;
@@ -76,19 +113,25 @@ function mergeFiles(lists) {
       let node = nodes.get(id);
       if (node) copies++;
       else nodes.set(id, node = { vote, at: vote.at ?? '', file, line, waiting: 0, next: new Set() });
-      if (previous && previous !== node && !previous.next.has(node)) { previous.next.add(node); node.waiting++; }
+      if (previous && previous !== node) previous.next.add(node);
       previous = node;
     });
   });
+  markComponents(nodes.values());
+  for (const node of nodes.values()) {
+    for (const next of node.next) {
+      if (next.component === node.component) node.next.delete(next);
+      else next.waiting++;
+    }
+  }
   const earlier = (p, q) => compareText(p.at, q.at) || p.file - q.file || p.line - q.line;
-  const left = new Set(nodes.values()), ready = new Set([...left].filter(node => !node.waiting)), merged = [];
-  while (left.size) {
+  const ready = new Set([...nodes.values()].filter(node => !node.waiting)), merged = [];
+  while (ready.size) {
     let pick = null;
-    for (const node of ready.size ? ready : left) if (!pick || earlier(node, pick) < 0) pick = node;
+    for (const node of ready) if (!pick || earlier(node, pick) < 0) pick = node;
     ready.delete(pick);
-    left.delete(pick);
     merged.push(pick.vote);
-    for (const node of pick.next) if (left.has(node) && --node.waiting === 0) ready.add(node);
+    for (const node of pick.next) if (--node.waiting === 0) ready.add(node);
   }
   return { votes: merged, copies };
 }
