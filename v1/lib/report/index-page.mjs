@@ -1,11 +1,11 @@
 import { VARIANTS } from '../contract.mjs';
 import { UNNAMED_SET, UNKNOWN_SET } from './collect.mjs';
-import { intervalText, attemptShareText, VARIANT_ORDER, CONFLICT_KINDS } from './aggregate.mjs';
+import { intervalText, attemptShareText, pText, allPairsNote, VARIANT_ORDER, CONFLICT_KINDS } from './aggregate.mjs';
 import { esc, num, percent, statCell, medianCell, sdCell, slug, fractionLabel, page, NOT_EVALUATED } from './html.mjs';
 
-// index.html: per task set the leaderboard, the pairwise comparison, where the
-// noise is, the breakdowns and the task index; then provenance, excluded
-// attempts and data problems.
+// index.html: per task set the two ladders, the leaderboard, the pairwise
+// comparison, where the noise is, the breakdowns and the task index; then
+// provenance, excluded attempts and data problems.
 
 const isNumber = value => typeof value === 'number' && Number.isFinite(value);
 const plural = (count, word) => count + ' ' + word + (count === 1 ? '' : 's');
@@ -13,17 +13,19 @@ const plural = (count, word) => count + ' ' + word + (count === 1 ? '' : 's');
 // ------------------------------------------------------------ leaderboard
 
 const identityHead = '<th class="num">#</th><th>System</th><th>Model</th><th>Effort</th>';
-const identity = (entry, index) => '<td class="num">' + (entry.rank ?? index + 1) + '</td><td>' + esc(entry.system) + '</td><td>' + esc(entry.model) + '</td><td>' +
-  (entry.effort === null ? NOT_EVALUATED : esc(entry.effort)) + '</td>';
+// A reference row (a configuration not in the roster) has no rank.
+const identity = (entry, rank) => '<td class="num">' + (entry.reference ? '<span class="na" title="reference row: not in the roster, not ranked">ref</span>' : rank) +
+  '</td><td>' + esc(entry.system) + '</td><td>' + esc(entry.model) + '</td><td>' + (entry.effort === null ? NOT_EVALUATED : esc(entry.effort)) + '</td>';
 
-// One row per configuration of the set, `cells(entry)` giving the rest.
-function entryTable(entries, head, cells) {
+// One row per configuration of the set, `cells(entry)` giving the rest;
+// `rankOf` gives the number in the first column (a ladder has its own ranks).
+function entryTable(entries, head, cells, { rankOf = (entry, index) => entry.rank ?? index + 1 } = {}) {
   return '<div class="scroll"><table><thead><tr>' + identityHead + head + '</tr></thead><tbody>' +
-    (entries.length ? entries.map((entry, index) => '<tr>' + identity(entry, index) + cells(entry).join('') + '</tr>').join('\n')
+    (entries.length ? entries.map((entry, index) => '<tr>' + identity(entry, rankOf(entry, index)) + cells(entry).join('') + '</tr>').join('\n')
       : '<tr><td colspan="99" class="muted">No scored attempts.</td></tr>') + '</tbody></table></div>';
 }
 
-function scoreTable(entries) {
+function scoreTable(entries, options) {
   const variants = VARIANT_ORDER.filter(variant => entries.some(entry => entry.variants[variant]));
   return entryTable(entries,
     '<th class="num">Score</th>' + variants.map(variant => '<th class="num" title="' + esc(VARIANTS[variant].title) + '">' + variant + '</th>').join('') +
@@ -35,7 +37,7 @@ function scoreTable(entries) {
       statCell(entry.shape),
       statCell(entry.detail),
       '<td class="num">' + percent(entry.success.rate) + '<small>' + entry.success.valid + ' / ' + entry.success.attempts + ' att.</small></td>',
-    ]);
+    ], options);
 }
 
 // Memory tasks get their own column only in a set that has them.
@@ -117,36 +119,110 @@ const verdictText = { a_higher: 'A higher', b_higher: 'B higher', not_separated:
 const verdictNote = { a_higher: 'both intervals exclude 0', b_higher: 'both intervals exclude 0', not_separated: 'both intervals include 0',
   unsettled: 'the two intervals disagree', not_evaluated: 'fewer than 2 objects' };
 export const VERDICT_TEXT = verdictText;
+const separated = verdict => verdict === 'a_higher' || verdict === 'b_higher';
+// Same wording as the statements: a bound that rounds to zero keeps a digit.
+const interval = ci => ci ? esc(intervalText(ci)) : NOT_EVALUATED;
+const intervalCell = pair => '<td class="num">' + interval(pair.ci95) +
+  (pair.t_ci95 ? '<small title="Student-t interval of the per-object differences">t ' + interval(pair.t_ci95) + '</small>' : '') + '</td>';
+const verdictCell = pair => '<td class="' + (separated(pair.verdict) ? 'good' : pair.verdict === 'unsettled' ? 'low' : 'na') + '">' + esc(verdictText[pair.verdict] ?? pair.verdict) +
+  '<small>' + esc(verdictNote[pair.verdict] ?? '') + (pair.small_sample && pair.verdict !== 'not_evaluated' ? '; only ' + pair.objects + ' objects' : '') + '</small></td>';
+// The corrected verdict: separated or not after Holm within the pair's family;
+// `note` says when the table of all pairs corrects the same pair the other way.
+const holmCell = (pair, note = '') => !pair.holm ? '<td class="na">' + (pair.reference ? 'reference row' : 'not tested') + '</td>'
+  : '<td class="' + (separated(pair.holm.verdict) ? 'good' : 'na') + '" title="Holm over the ' + pair.holm.comparisons + ' testable pairs of this table">' +
+    (separated(pair.holm.verdict) ? 'separated' : separated(pair.verdict) ? 'not separated<small>separated only uncorrected</small>' : 'not separated') +
+    '<small>adj. p ' + esc(pText(pair.holm.p_adjusted)) + '</small>' + (note ? '<small class="low">' + esc(note) + '</small>' : '') + '</td>';
+const holmHead = correction => '<th title="Holm&rsquo;s step-down correction at family-wise 5% on the paired t p-value, over the testable pairs of this table">Holm' +
+  '<small>m = ' + correction.comparisons + '</small></th>';
+const correctionLine = correction => correction.comparisons
+  ? correction.separated + ' of ' + correction.comparisons + ' pairs separated after Holm (' + correction.separated_uncorrected + ' uncorrected)' : 'no testable pair';
 
 function pairwiseSection(set) {
   const pairs = set.pairwise.pairs;
   if (!pairs.length) return '<p class="muted">Fewer than two ranked configurations in this set; nothing to compare.</p>';
-  // Same wording as the statements: a bound that rounds to zero keeps a digit.
-  const interval = ci => ci ? esc(intervalText(ci)) : NOT_EVALUATED;
-  const rows = pairs.map(pair => {
-    const verdictClass = pair.verdict === 'a_higher' || pair.verdict === 'b_higher' ? 'good' : pair.verdict === 'unsettled' ? 'low' : 'na';
-    const small = pair.t_ci95 ? '<small title="Student-t interval of the per-object differences">t ' + interval(pair.t_ci95) + '</small>' : '';
+  const tableOf = list => '<div class="scroll"><table><thead><tr><th>A</th><th>B</th><th class="num" title="objects with at least one task run by both">Objects</th>' +
+    '<th class="num" title="mean over objects of (A - B); per object, attempts are averaged within a task and tasks within the object">A &minus; B</th>' +
+    '<th class="num" title="95% percentile bootstrap over objects; below it the Student-t interval">95% interval<small>bootstrap / t</small></th><th class="num" title="share of bootstrap resamples in which A&rsquo;s mean is higher; not a p-value">A ahead</th>' +
+    '<th class="num" title="objects on which A scored higher / the same / lower">Won / tied / lost</th><th>Verdict<small>uncorrected</small></th>' + holmHead(set.pairwise.correction) +
+    '</tr></thead><tbody>' + list.map(row).join('\n') + '</tbody></table></div>';
+  const row = pair => {
     return '<tr><td>' + esc(pair.a) + '</td><td>' + esc(pair.b) + '</td>' +
       '<td class="num">' + pair.objects + '<small>' + pair.tasks + ' tasks' + (pair.unpaired_objects ? ' · ' + pair.unpaired_objects + ' obj. unpaired' : '') +
         (pair.unpaired_tasks ? ' · ' + plural(pair.unpaired_tasks, 'task') + ' unpaired' : '') + '</small></td>' +
       '<td class="num' + (pair.low_evidence ? ' low' : '') + '"><strong>' + num(pair.mean_difference, 1, { signed: true }) + '</strong>' + (pair.low_evidence ? '<span class="dagger">&dagger;</span>' : '') + '</td>' +
-      '<td class="num">' + interval(pair.ci95) + small + '</td>' +
+      intervalCell(pair) +
       '<td class="num">' + (pair.share_a_higher === null ? NOT_EVALUATED : percent(pair.share_a_higher, pair.share_a_higher > 0.99 && pair.share_a_higher < 1 ? 2 : 0)) + '</td>' +
-      '<td class="num">' + pair.won + ' / ' + pair.tied + ' / ' + pair.lost + '</td>' +
-      '<td class="' + verdictClass + '">' + esc(verdictText[pair.verdict] ?? pair.verdict) + '<small>' + esc(verdictNote[pair.verdict] ?? '') +
-        (pair.small_sample && pair.verdict !== 'not_evaluated' ? '; only ' + pair.objects + ' objects' : '') + '</small></td></tr>';
-  });
-  const table = '<div class="scroll"><table><thead><tr><th>A</th><th>B</th><th class="num" title="objects with at least one task run by both">Objects</th>' +
-    '<th class="num" title="mean over objects of (A - B); per object, attempts are averaged within a task and tasks within the object">A &minus; B</th>' +
-    '<th class="num" title="95% percentile bootstrap over objects; below it the Student-t interval">95% interval<small>bootstrap / t</small></th><th class="num" title="share of bootstrap resamples in which A&rsquo;s mean is higher; not a p-value">A ahead</th>' +
-    '<th class="num" title="objects on which A scored higher / the same / lower">Won / tied / lost</th><th>Verdict</th></tr></thead><tbody>' + rows.join('\n') + '</tbody></table></div>';
-  const words = '<ul class="statements">' + pairs.map(pair => '<li>' + esc(pair.statement) + '</li>').join('') + '</ul>';
-  return table + words + '<p class="legend">A is the higher-ranked configuration of each pair. Each object counts once: on the tasks both configurations ran, ' +
+      '<td class="num">' + pair.won + ' / ' + pair.tied + ' / ' + pair.lost + '</td>' + verdictCell(pair) + holmCell(pair) + '</tr>';
+  };
+  const formal = pairs.filter(pair => !pair.reference), reference = pairs.filter(pair => pair.reference);
+  const table = (formal.length ? tableOf(formal) : '<p class="muted">Fewer than two formal configurations in this set.</p>') + (reference.length
+    ? '<details class="more"><summary>' + plural(reference.length, 'pair') + ' with a reference row (uncorrected, in no family)</summary>' + tableOf(reference) + '</details>' : '');
+  const words = '<details class="more"><summary>Every pair in words</summary><ul class="statements">' + pairs.map(pair => '<li>' + esc(pair.statement) + '</li>').join('') + '</ul></details>';
+  return '<p><strong>' + esc(correctionLine(set.pairwise.correction)) + '.</strong></p>' + table + words +
+    '<p class="legend">A is the higher-ranked configuration of each pair. Each object counts once: on the tasks both configurations ran, ' +
     'attempts are averaged within a task and tasks within the object, then B is subtracted from A. The interval resamples objects (paired); ' +
     '&ldquo;A ahead&rdquo; is the share of resamples with a positive mean difference, a description of this sample, not a probability that A is better. ' +
     (set.pairwise.multiple_comparisons ? esc(set.pairwise.multiple_comparisons) + ' ' : '') +
     'Both a bootstrap and a Student-t interval are given: the bootstrap runs narrow with few objects (on synthetic data it covered the true difference 84% of the time with 5 objects, 93% with 24), ' +
-    'so a pair counts as separated only when both exclude zero and as unsettled when they disagree.</p>';
+    'so a pair counts as separated only when both exclude zero and as unsettled when they disagree. ' + HOLM_LEGEND + '</p>';
+}
+
+const HOLM_LEGEND = '<strong>Holm</strong>: the same verdict corrected for the number of comparisons. The pairs of a table form one family; their two-sided paired t ' +
+  'p-values are adjusted by Holm&rsquo;s step-down method (sorted, the k-th smallest of m multiplied by m &minus; k + 1, never below the one before), and a pair stays ' +
+  'separated when its adjusted p is below 0.05 and it is separated uncorrected, so the chance of any false separation in the table is at most 5%. ' +
+  'm counts the pairs with at least two objects; a larger table corrects harder, so one pair can be separated on a ladder and not in the table of every configuration.';
+
+// ----------------------------------------------------------------- ladders
+
+// A ladder's own pairs: the leaderboard's pairwise rows restricted to it, with
+// Holm over the ladder's pairs. `effort` rows are top minus default.
+function ladderPairs(rows, correction, { effort = false, note = () => '' } = {}) {
+  if (!rows.length) return '';
+  const name = pair => effort ? '' : '<td>' + esc(pair.a) + '</td><td>' + esc(pair.b) + '</td>';
+  return '<div class="scroll"><table><thead><tr>' + (effort ? '<th>System</th><th>Model</th><th>Default</th><th>Top</th>' : '<th>A</th><th>B</th>') +
+    '<th class="num">Objects</th><th class="num">' + (effort ? 'Top &minus; default' : 'A &minus; B') + '</th><th class="num">95% interval<small>bootstrap / t</small></th>' +
+    '<th class="num">Won / tied / lost</th><th>Verdict<small>uncorrected</small></th>' + holmHead(correction) + '</tr></thead><tbody>' +
+    rows.map(pair => '<tr>' + (effort ? '<td>' + esc(pair.system) + '</td><td>' + esc(pair.model) + '</td><td>' + (pair.default_effort === null ? NOT_EVALUATED : esc(pair.default_effort)) +
+      '</td><td>' + esc(pair.top_effort) + '</td>' : name(pair)) + '<td class="num">' + pair.objects + '</td><td class="num' + (pair.low_evidence ? ' low' : '') + '"><strong>' +
+      num(pair.mean_difference, 1, { signed: true }) + '</strong></td>' + intervalCell(pair) + '<td class="num">' + pair.won + ' / ' + pair.tied + ' / ' + pair.lost + '</td>' +
+      verdictCell(pair) + holmCell(pair, note(pair)) + '</tr>').join('\n') + '</tbody></table></div>';
+}
+
+const sentence = text => text ? text[0].toUpperCase() + text.slice(1) : '';
+
+function laddersSection(board, set) {
+  const byKey = new Map(board.entries.filter(entry => entry.set === set.id).map(entry => [entry.key, entry])), note = allPairsNote(set);
+  const parts = set.ladders.map(ladder => {
+    const entries = ladder.entries.map(item => byKey.get(item.key)), ranks = new Map(ladder.entries.map(item => [item.key, item.rank]));
+    const missing = ladder.missing.length ? '<p class="legend low">In the roster for this ladder but with no counted attempt in this set: ' + ladder.missing.map(esc).join(', ') + '.</p>' : '';
+    if (!entries.length) return '<h4>' + esc(ladder.label) + '</h4><p class="muted">No configuration of this set is on this ladder.</p>' + missing;
+    // Each rung against the one below it: the gap a reader asks about first.
+    const pairs = new Map(ladder.pairwise.pairs.map(pair => [pair.a + '|' + pair.b, pair]));
+    const next = (entry, index) => {
+      const pair = index + 1 < entries.length ? pairs.get(entry.key + '|' + entries[index + 1].key) : null;
+      return pair ? '<td class="num">' + num(pair.mean_difference, 1, { signed: true }) + '<small>' + interval(pair.t_ci95) + ' t</small></td>' + holmCell(pair, note(pair))
+        : '<td class="num"></td><td></td>';
+    };
+    const table = entryTable(entries, '<th class="num">Score</th><th class="num" title="attempts with a valid score report">Success</th>' +
+      '<th class="num" title="this configuration minus the next one down the ladder, per object; Student-t interval">Gap to next</th>' + holmHead(ladder.pairwise.correction),
+    entry => {
+      const index = entries.indexOf(entry);
+      return [statCell(entry.score), '<td class="num">' + percent(entry.success.rate) + '<small>' + entry.success.valid + ' / ' + entry.success.attempts + ' att.</small></td>', next(entry, index)];
+    }, { rankOf: entry => ranks.get(entry.key) });
+    const all = ladder.pairwise.pairs.length > 1 ? '<details class="more"><summary>All ' + ladder.pairwise.pairs.length + ' pairs of this ladder</summary>' +
+      ladderPairs(ladder.pairwise.pairs, ladder.pairwise.correction, { note }) + '</details>' : '';
+    return '<h4>' + esc(ladder.label) + ' <small>' + plural(entries.length, 'configuration') + ' · ' + esc(correctionLine(ladder.pairwise.correction)) + '</small></h4>' +
+      table + missing + all;
+  });
+  const effort = set.effort.pairs.length ? '<h4>Effort: top &minus; default, same client and model <small>' + esc(correctionLine(set.effort.correction)) + '</small></h4>' +
+    ladderPairs(set.effort.pairs, set.effort.correction, { effort: true, note }) : '';
+  const notes = set.ladder_notes?.length ? '<ul>' + set.ladder_notes.map(note => '<li>' + esc(note) + '</li>').join('') + '</ul>' : '';
+  return parts.join('\n') + effort + '<p class="legend">Every row is a system: client, model and effort together. Effort moves a model about as much as the gap between ' +
+    'models, so a model ladder compares each client at the same footing: its default effort, or the highest effort the round asked it for. ' + esc(sentence(set.ladder_rule)) + '.' +
+    ' Ranks, scores and intervals are the leaderboard&rsquo;s (variant breakdowns there). <strong>Gap to next</strong>: per object, this configuration minus the next one ' +
+    'down the ladder; its Holm verdict corrects over all pairs of the ladder (m in the header), and the folded table lists them all. ' +
+    'Each table&rsquo;s Holm column corrects over that table&rsquo;s own pairs; where the table of all pairs, correcting over more, reaches the other verdict ' +
+    'for the same pair, the cell says so.</p>' + notes;
 }
 
 // ---------------------------------------------------------------- variance
@@ -208,7 +284,7 @@ export const day = value => value ? esc(value.replace('T', ' ').replace(/\.\d+Z$
 function provenanceTable(board) {
   if (!board.batches.length) return '<p class="muted">No batches.</p>';
   const setOrder = id => { const index = board.sets.findIndex(set => set.id === id); return index < 0 ? Infinity : index; };
-  const rankOf = batch => Math.min(...board.entries.filter(entry => entry.batches.includes(batch.id)).map(entry => setOrder(entry.set) * 1000 + entry.rank), Infinity);
+  const rankOf = batch => Math.min(...board.entries.filter(entry => entry.batches.includes(batch.id)).map(entry => setOrder(entry.set) * 1000 + (entry.rank ?? 999)), Infinity);
   const batches = [...board.batches].sort((a, b) => rankOf(a) - rankOf(b) || a.id.localeCompare(b.id));
   // What computed the numbers: the stamp in each report (after any rescore).
   const scorer = batch => {
@@ -319,13 +395,18 @@ function setSection(board, set) {
   const unranked = set.unranked.length ? '<p class="legend bad">Not ranked, every attempt excluded: ' +
     set.unranked.map(item => esc(item.key) + ' (' + item.excluded_attempts + ')').join(', ') + '.</p>' : '';
   const multi = entries.some(entry => entry.attempts_per_task.max > 1);
+  const formal = entries.filter(entry => !entry.reference), reference = entries.filter(entry => entry.reference);
+  const references = reference.length ? '<h4>Reference rows <small>not in the roster: shown, not ranked, in no corrected family</small></h4>' + scoreTable(reference) : '';
   return `<section id="${setAnchor(set.id)}">
 <h2>${setTitle(set)}</h2>
 ${setNotice(set)}
-<p class="muted">${plural(set.objects, 'object')} · ${plural(set.tasks, 'task')} · ${set.counted} of ${plural(set.attempts, 'attempt')} counted · ${plural(set.configurations.length, 'ranked configuration')} · batches ${set.batches.map(id => '<code>' + esc(id) + '</code>').join(', ')}${set.first_started_at ? ' · attempts ran ' + day(set.first_started_at) + ' to ' + day(set.last_finished_at) : ''}</p>
+<p class="muted">${plural(set.objects, 'object')} · ${plural(set.tasks, 'task')} · ${set.counted} of ${plural(set.attempts, 'attempt')} counted · ${plural(set.configurations.length, 'ranked configuration')}${set.reference_configurations?.length ? ' · ' + plural(set.reference_configurations.length, 'reference row') : ''} · batches ${set.batches.map(id => '<code>' + esc(id) + '</code>').join(', ')}${set.first_started_at ? ' · attempts ran ' + day(set.first_started_at) + ' to ' + day(set.last_finished_at) : ''}</p>
 ${warnings}${mergedNote}
+<h3>Ladders</h3>
+${laddersSection(board, set)}
 <h3>Leaderboard</h3>
-${scoreTable(entries)}
+${scoreTable(formal)}
+${references}
 ${unranked}
 <p class="legend">Each cell: mean, 95% bootstrap interval over objects (variants of one object are not independent), and sample size.
 <strong>Score</strong> = the scorer&rsquo;s report.score, (shape score + detail score) / 2; attempts that produced no valid model count as 0, as do their shape and detail scores.

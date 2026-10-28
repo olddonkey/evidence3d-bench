@@ -79,6 +79,7 @@ main { max-width: 1440px; margin: 0 auto; padding: 24px 16px 72px; }
 h1 { font-size: 1.6rem; margin: 0 0 4px; }
 h2 { font-size: 1.2rem; margin: 36px 0 10px; padding-bottom: 4px; border-bottom: 1px solid var(--line); }
 h3 { font-size: 1.02rem; margin: 22px 0 8px; }
+h4 { font-size: 0.95rem; margin: 16px 0 6px; }
 a { color: var(--accent); }
 p { max-width: 80ch; }
 small, .muted { color: var(--muted); }
@@ -116,7 +117,7 @@ pre.notes { white-space: pre-wrap; max-height: 320px; overflow: auto; font-size:
 details > summary { cursor: pointer; color: var(--accent); }
 nav.crumbs { font-size: 0.9em; margin-bottom: 12px; }
 th small { display: block; font-weight: 400; color: var(--muted); font-size: 0.78em; }
-h2 small, h3 small { font-weight: 400; color: var(--muted); font-size: 0.75em; }
+h2 small, h3 small, h4 small { font-weight: 400; color: var(--muted); font-size: 0.75em; }
 .notice { border: 1px solid var(--low); border-left-width: 4px; border-radius: 6px; padding: 8px 12px; margin: 10px 0; background: var(--panel); max-width: 110ch; }
 .notice ul { margin: 4px 0 0; padding-left: 20px; }
 ul.statements { max-width: 110ch; padding-left: 20px; }

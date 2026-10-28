@@ -53,27 +53,41 @@ The first-pass intervals of rows 3 and 6 are in `docs/V1-TEST.md`
 variants each configuration ran.
 
 Pairwise, objects paired (bootstrap interval; "separated" = both intervals
-exclude zero):
+exclude zero). The last column, added on 2026-10-28, is the same verdict after
+Holm's correction over all 66 pairs of the 12 configurations (paired t
+p-value, family-wise 5 %, rule in `v1/lib/report/README.md`); the adjusted p
+is given where the verdict changes:
 
-| A | B | A − B | Won / lost | Verdict |
-|---|---|---|---|---|
-| Astra max | gpt-6.1-sol max | +2.0 [+0.7, +3.4] | 16 / 8 | separated, barely |
-| Astra max | Astra high | +5.7 [+4.2, +7.1] | 23 / 1 | separated |
-| gpt-6.1-sol max | gpt-6.1-sol high | +4.7 [+3.2, +5.9] | 23 / 1 | separated |
-| gpt-6.1-sol max | Opus max | +5.6 [+3.7, +7.5] | 20 / 4 | separated |
-| Astra high | gpt-6.1-sol high | +1.0 [−0.2, +2.2] | 17 / 7 | not separated |
-| gpt-6.1-sol high | Opus max | +0.9 [−0.7, +2.5] | 15 / 9 | not separated |
-| Astra high | Opus max | +1.9 [+0.2, +3.6] | 14 / 10 | separated, barely |
-| Opus max | Opus high | +5.0 [+3.8, +6.2] | 23 / 1 | separated |
-| Astra high | Opus high | +6.0 [+4.6, +7.4] | 24 / 0 | separated |
-| Opus high | gpt-6-sol high | +13.3 [+10.6, +16.2] | 24 / 0 | separated |
-| Opus high | grok-4.7 fast high | +13.0 [+11.0, +15.2] | 24 / 0 | separated |
-| grok-4.7 fast | grok-4.6 | +2.3 [+0.5, +4.2] | 16 / 8 | separated, barely |
-| grok-4.7 fast | grok-4.7 | +4.4 [+1.7, +7.5] | 14 / 10 | separated |
-| grok-4.6 | grok-4.7 | +2.2 [−1.1, +5.9] | 10 / 14 | not separated |
-| grok-4.7 | Luna high | +8.5 [+4.4, +12.3] | 20 / 4 | separated |
-| Opus high | Luna high | +25.8 [+22.5, +29.2] | 24 / 0 | separated |
-| Luna high | Haiku | +15.4 [+13.1, +17.9] | 24 / 0 | separated |
+| A | B | A − B | Won / lost | Verdict | Holm, 66 pairs |
+|---|---|---|---|---|---|
+| Astra max | gpt-6.1-sol max | +2.0 [+0.7, +3.4] | 16 / 8 | separated, barely | not separated (0.088); separated on the top ladder (0.010) |
+| Astra max | Astra high | +5.7 [+4.2, +7.1] | 23 / 1 | separated | separated |
+| gpt-6.1-sol max | gpt-6.1-sol high | +4.7 [+3.2, +5.9] | 23 / 1 | separated | separated |
+| gpt-6.1-sol max | Opus max | +5.6 [+3.7, +7.5] | 20 / 4 | separated | separated |
+| Astra high | gpt-6.1-sol high | +1.0 [−0.2, +2.2] | 17 / 7 | not separated | not separated |
+| gpt-6.1-sol high | Opus max | +0.9 [−0.7, +2.5] | 15 / 9 | not separated | not separated |
+| Astra high | Opus max | +1.9 [+0.2, +3.6] | 14 / 10 | separated, barely | not separated (0.303) |
+| Opus max | Opus high | +5.0 [+3.8, +6.2] | 23 / 1 | separated | separated |
+| Astra high | Opus high | +6.0 [+4.6, +7.4] | 24 / 0 | separated | separated |
+| Opus high | gpt-6-sol high | +13.3 [+10.6, +16.2] | 24 / 0 | separated | separated |
+| Opus high | grok-4.7 fast high | +13.0 [+11.0, +15.2] | 24 / 0 | separated | separated |
+| grok-4.7 fast | grok-4.6 | +2.3 [+0.5, +4.2] | 16 / 8 | separated, barely | not separated (0.243) |
+| grok-4.7 fast | grok-4.7 | +4.4 [+1.7, +7.5] | 14 / 10 | separated | not separated (0.081) |
+| grok-4.6 | grok-4.7 | +2.2 [−1.1, +5.9] | 10 / 14 | not separated | not separated |
+| grok-4.7 | Luna high | +8.5 [+4.4, +12.3] | 20 / 4 | separated | separated |
+| Opus high | Luna high | +25.8 [+22.5, +29.2] | 24 / 0 | separated | separated |
+| Luna high | Haiku | +15.4 [+13.1, +17.9] | 24 / 0 | separated | separated |
+
+Of the 66 pairs, 61 are separated uncorrected and 56 after Holm. The five
+that drop out are the three rows marked "barely" above, grok-4.7 fast vs
+grok-4.7 (+4.4, adjusted 0.081), and gpt-6-sol high vs grok-4.6 high (+2.7,
+adjusted 0.303), which the table does not list. On the ladders of §5,
+corrected over each ladder's own pairs: the default ladder (9
+configurations, 36 pairs) keeps 29 of 32 separations, losing gpt-6-sol vs
+grok-4.6 and grok-4.7 fast vs grok-4.6 and vs grok-4.7; the top ladder (3
+pairs) and the effort pairs (3) keep all of theirs. The re-report uses
+`v1/rounds/round3.roster.json`, written after the data (not a
+pre-registered decision), and changes no uncorrected number.
 
 Noise: between attempts on one task SD 4.6–5.1 for the three-attempt
 configurations; between objects SD 3.7–5.7; the paired per-object difference
@@ -191,7 +205,10 @@ Astra high and Opus high, so a ladder that mixes effort levels is not a model
 ladder. Two ladders are therefore reported: at each client's default (`high`),
 Astra > gpt-6.1-sol ≈ Opus max > Opus; at the top level each client was asked
 for, Astra max > gpt-6.1-sol max > Opus max, with the first gap barely
-separated and the second clear. Codex's `ultra` level and Grok's `xhigh` were
+separated and the second clear. After Holm's correction (2026-10-28) the
+first gap stays separated on the top ladder (3 pairs, adjusted p 0.010) but
+not among all 66 pairs (0.088): it holds as a ladder claim, not as one of the
+whole table's. Codex's `ultra` level and Grok's `xhigh` were
 not run.
 
 ## 6. gpt-6.1-sol and gpt-6-sol
