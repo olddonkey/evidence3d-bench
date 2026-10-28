@@ -221,11 +221,15 @@ async function findModel(result, attemptDir, problems) {
 }
 
 // The score-over-time snapshots the runner recorded (runner/snapshots.mjs),
-// reduced to tick, score and status; null when the batch took none.
+// reduced to tick, when the copy was taken (`at`: the end of its read, the
+// tick for a record that has none), score and status, in the order taken;
+// null when the batch took none.
 function snapshotSeries(result) {
   if (!Array.isArray(result.snapshots) || !finite(result.snapshot_interval_seconds) || result.snapshot_interval_seconds <= 0) return null;
+  const takenAt = item => [item.read_seconds, item.at_seconds, item.t].find(finite);
   return { interval_seconds: result.snapshot_interval_seconds,
-    points: result.snapshots.filter(item => finite(item?.t)).map(item => ({ t: item.t, score: finite(item.score) ? item.score : null, status: text(item.status) })).sort((a, b) => a.t - b.t) };
+    points: result.snapshots.filter(item => finite(item?.t)).map(item => ({ t: item.t, at: takenAt(item), score: finite(item.score) ? item.score : null, status: text(item.status) }))
+      .sort((a, b) => a.at - b.at || a.t - b.t) };
 }
 
 function setOf(truth, taskId, problems) {

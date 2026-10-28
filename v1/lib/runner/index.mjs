@@ -491,14 +491,19 @@ async function scoringDrift({ manifest, task, deps, repoRoot }) {
   return drift;
 }
 
-// A scorer interrupted by a dying runner may have left a worker and partial
-// files behind: the worker is stopped and the directory kept aside, so the
-// new scoring starts clean and the old one stays readable.
-async function freshScoreDir(scoreDir) {
+// A scorer interrupted by a dying runner may have left a worker behind.
+async function stopLeftoverWorker(scoreDir) {
   try {
     const worker = await readJSON(join(scoreDir, 'worker.json'));
     if (leftover(worker, 'score-worker.mjs')) killTree(worker.pid, 'SIGKILL');
   } catch {}
+}
+
+// It may also have left partial files: the worker is stopped and the
+// directory kept aside, so the new scoring starts clean and the old one stays
+// readable.
+async function freshScoreDir(scoreDir) {
+  await stopLeftoverWorker(scoreDir);
   if (await exists(scoreDir)) {
     let n = 1;
     while (await exists(scoreDir + '.interrupted-' + n)) n++;
@@ -527,6 +532,9 @@ async function scoreArtifact({ manifest, task, dir, artifact, deps, control, rep
   catch (error) { return { error: 'scorer wrote no report: ' + error.message }; }
 }
 
+// A setTimeout longer than 2^31 - 1 ms fires at once.
+const MAX_TIMER_SECONDS = Math.floor((2 ** 31 - 1) / 1000);
+
 // Scores an attempt's snapshots, after its final artifact, in one worker
 // process (score-worker.mjs) that loads the task once and draws no error
 // maps. Content already scored (an earlier snapshot, the final artifact) is
@@ -543,7 +551,9 @@ async function scoreSnapshots({ manifest, task, dir, batchDir, records, final, d
     const job = join(scoreDir, 'job.json');
     await writeJSON(job, { module: scorerModulePath(deps), taskDir: paths.task(task.id), truthDir: paths.truth(task.id), dataRoot: manifest.data_root,
       snapshots: jobs.map(item => ({ name: item.name, glb: join(dir, item.file), out: join(scoreDir, item.name + '.json') })) });
-    const run = await captureProcess(process.execPath, [join(HERE, 'score-worker.mjs'), job], { cwd: scoreDir, seconds: (deps.scoreSeconds ?? 1800) * jobs.length,
+    // The scorer's allowance per snapshot, for all of them; within what a timer can hold.
+    const seconds = Math.min((deps.scoreSeconds ?? 1800) * jobs.length, MAX_TIMER_SECONDS);
+    const run = await captureProcess(process.execPath, [join(HERE, 'score-worker.mjs'), job], { cwd: scoreDir, seconds,
       env: childEnvironment(), stdoutPath: join(scoreDir, 'worker.stdout.log'), stderrPath: join(scoreDir, 'worker.stderr.log'), signal: control.signal,
       onSpawn: pid => { control.pids.set(scoreDir, pid); writeJSONSync(join(scoreDir, 'worker.json'), { pid, started: startTimeOf(pid) }); } });
     control.pids.delete(scoreDir);
@@ -711,7 +721,12 @@ async function runAttempt({ batchDir, manifest, task, attempt, adapter, deps, lo
     events = readJSONLines(await readFile(join(dir, 'events.jsonl'), 'utf8').catch(() => ''));
     summary = adapter.parse(events);
     retryLost = recovered.service_retry_seconds ?? null;
-    if (snapshotSeconds) snapshotRecords = await readSnapshotIndex(dir);
+    if (snapshotSeconds) {
+      snapshotRecords = await readSnapshotIndex(dir);
+      // A snapshot scorer the dead runner left running would compete with the
+      // scoring below, or outlive it if that is cut short too.
+      await stopLeftoverWorker(join(dir, 'snapshots', 'score'));
+    }
     integrityProblems.push(...await workspaceProblems(workspace, task, manifest), ...toolSurfaceProblems(manifest.system, summary));
   } else {
     if (control.signal.aborted) return { result: null, skipped: false, interrupted: true };

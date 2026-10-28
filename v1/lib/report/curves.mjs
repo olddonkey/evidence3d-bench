@@ -7,30 +7,33 @@ import { finite, median, quantile } from './stats.mjs';
 // An attempt's score at time T:
 //   - its final score (failures 0, as on the leaderboard) once it has ended
 //     (wall_seconds <= T) or T has reached its wall-clock limit;
-//   - before that, the score of its last snapshot taken at or before T: 0 when
-//     there was no output/model.glb yet, or one the runner refused, or one the
-//     scorer judged invalid; a snapshot the scorer failed on also counts 0
-//     (and is counted in score_errors);
+//   - before that, the score of its last snapshot taken at or before T (taken:
+//     when the runner had read it, which can be after the tick it was due at
+//     on a busy runner): 0 when there was no output/model.glb yet, or one the
+//     runner refused, or one the scorer judged invalid; a snapshot the scorer
+//     failed on also counts 0 (and is counted in score_errors);
 //   - 0 before its first snapshot (output/ starts empty).
 // At each tick the attempts are averaged exactly as the leaderboard score is
 // (attempts within a task, tasks within an object, then objects), so the
 // point at the wall-clock limit is the leaderboard score.
 //
-// Time to 95 %: per attempt whose final score is at least T95_MIN_FINAL, the
-// first snapshot tick whose score is at least T95_SHARE of the final score,
-// or its end (wall_seconds) when no snapshot got there, the final file being
-// the snapshot at the end; the median over those attempts (not weighted by
-// object). Attempts below T95_MIN_FINAL are counted, not used: 95 % of almost
+// Time to 95 %: per attempt whose final score is at least T95_MIN_FINAL, when
+// its first snapshot with a score of at least T95_SHARE of the final score was
+// taken, or its end (wall_seconds) when no snapshot got there, the final file
+// being the snapshot at the end; the median over those attempts (not weighted
+// by object). Attempts below T95_MIN_FINAL are counted, not used: 95 % of almost
 // nothing says nothing about speed.
 export const T95_SHARE = 0.95;
 export const T95_MIN_FINAL = 10;
 
+// When a snapshot was taken (collect.mjs: `at`; the tick for older data).
+const takenAt = point => finite(point.at) ? point.at : point.t;
 const ended = (attempt, t) => (finite(attempt.wall_limit_seconds) && t >= attempt.wall_limit_seconds) || (finite(attempt.wall_seconds) && attempt.wall_seconds <= t);
 
 export function scoreAt(attempt, t) {
   if (ended(attempt, t) || !attempt.snapshots) return attempt.score;
   let value = 0;
-  for (const point of attempt.snapshots.points) if (point.t <= t) value = finite(point.score) ? point.score : 0;
+  for (const point of attempt.snapshots.points) if (takenAt(point) <= t) value = finite(point.score) ? point.score : 0;
   return value;
 }
 
@@ -39,8 +42,8 @@ export function scoreAt(attempt, t) {
 export function timeToShare(attempt, { share = T95_SHARE, minFinal = T95_MIN_FINAL } = {}) {
   if (!finite(attempt.score) || attempt.score < minFinal) return null;
   const end = finite(attempt.wall_seconds) ? attempt.wall_seconds : attempt.wall_limit_seconds ?? null;
-  const hit = (attempt.snapshots?.points ?? []).find(point => finite(point.score) && point.score >= share * attempt.score && (end === null || point.t < end));
-  return hit ? hit.t : end;
+  const hit = (attempt.snapshots?.points ?? []).find(point => finite(point.score) && point.score >= share * attempt.score && (end === null || takenAt(point) < end));
+  return hit ? takenAt(hit) : end;
 }
 
 // The ticks of a set of attempts: every multiple of each interval up to the

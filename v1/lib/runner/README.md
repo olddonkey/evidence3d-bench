@@ -176,30 +176,41 @@ the workspace: the contestant can neither see nor change it, nothing in the work
 written, and nothing frozen changes. A copy whose content repeats an earlier one is not
 stored again (its record names the earlier file, `same_as`).
 
-The read is careful because the contestant is still running and could swap files under
-it: `model.glb` is opened without following a symlink and without blocking (a FIFO
-cannot hang the runner), checked on the open handle (a regular file with one link,
-within the artifact byte budget) and read from it; afterwards `output/` must still be
-the directory the attempt started with (same device and inode) and `output/model.glb`
-the file that was read. A file replaced meanwhile (the model's own atomic rename, or a
-swap) or caught mid-write (a GLB whose header length is not what was read) is read
-again, up to 4 times 0.75 s apart; a symlink, hard link, non-regular or oversized file,
-or a replaced `output/`, is recorded as refused and scores 0, as the final read would.
+The read is careful because the contestant is still running and could swap files and
+directories under it. It happens in a short-lived process (`snapshot-read.mjs`) started
+with `output/` as its working directory, which resolves nothing through the workspace
+path again: it reads only if its working directory is the `output/` the attempt started
+with (same device and inode, recorded before the launch; had `output/` been swapped for
+a symlink, the process would be standing somewhere else), and a symlink swapped in and
+out meanwhile cannot redirect it. Node has no `openat()`; the working directory is the
+anchor it lacks. There `model.glb` is opened without following a symlink and without
+blocking (a FIFO cannot hang the read), checked on the open handle (a regular file with
+one link, within the artifact byte budget) and read from it; afterwards `model.glb`
+must still be the file that was read. A file replaced meanwhile (the model's own atomic
+rename, or a swap) or caught mid-write (a GLB whose header length is not what was read)
+is read again, up to 4 times 0.75 s apart; a symlink, hard link, non-regular or
+oversized file, or a replaced `output/`, is recorded as refused and scores 0, as the
+final read would. A tick the runner reaches late is read late: each record keeps when
+its copy was taken, and the report uses that time, not the tick.
 
 After the final file is scored, the attempt's snapshots are scored in one worker process
 (`score-worker.mjs` with a `snapshots` job: the task is loaded once, no error maps are
 drawn), one per distinct content; a snapshot with the final file's content takes its
 score. **The attempt's score is still the final file's alone.** With concurrency 1 this
 happens before the next attempt launches, so it never overlaps a contestant; it costs
-about one scoring (25–100 s) per distinct snapshot, at most 5 for a 30-minute attempt.
+about one scoring (25–100 s) per distinct snapshot, at most 5 for a 30-minute attempt
+(the worker's time limit is the scoring limit per snapshot, for all of them).
 Snapshots are scored only for a run supervised to its end with its boundary intact; for
 an infrastructure error or a broken boundary they are kept, unscored, for diagnosis. A
 runner stopped during snapshot scoring leaves the attempt unrecorded, and the next `run`
-scores the final file and the snapshots again (from `snapshots/index.json`).
+stops a snapshot worker it left running, then scores the final file and the snapshots
+again (from `snapshots/index.json`, rewritten after every tick; an index that could not
+be written is retried at the next tick and when the attempt ends, and costs no snapshot).
 `v1/cli.mjs rescore` scores the snapshots again with the final file.
 
 `result.json` carries `snapshot_interval_seconds` and `snapshots[]`, one per tick:
-`{ t, name, at_seconds (when it was read, from the spawn), present, bytes, sha256, complete
+`{ t, name, at_seconds and read_seconds (when the read that was kept began and ended,
+from the spawn), present, bytes, sha256, complete
 (a whole GLB), file, same_as, status, score, valid, score_of, report, problem, error }`.
 `status` is `absent` (no `model.glb` yet: score 0), `refused` (score 0, with `problem`),
 `scored` (the scorer's score, 0 for an invalid model; `score_of` names the snapshot,

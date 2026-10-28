@@ -15,12 +15,12 @@ import { mean } from '../lib/report/stats.mjs';
 const near = (actual, expected, tolerance = 1e-9) => assert.ok(Math.abs(actual - expected) <= tolerance, actual + ' is not within ' + tolerance + ' of ' + expected);
 const NOW = new Date('2026-10-28T12:00:00Z');
 
-// One attempt as collectRuns normalises it. points: [[t, score], ...].
+// One attempt as collectRuns normalises it. points: [[t, score, status?, taken at?], ...].
 const attempt = (fields = {}) => {
   const { object = 'x', variant = 't2', score = 80, wall = 1000, limit = 1800, points = [], interval = 300, system = 's', model = 'm', ...rest } = fields;
   return { batch: 'b', task_id: object + '-' + variant, attempt: 1, system, model, effort: null, status: 'completed', excluded: false, valid: score > 0, score,
     object, variant, scale_evidence: 'none', usage: null, wall_seconds: wall, wall_limit_seconds: limit, cost_usd: null,
-    snapshots: points === null ? null : { interval_seconds: interval, points: points.map(([t, value, status = value === null ? 'score_error' : 'scored']) => ({ t, score: value, status })) },
+    snapshots: points === null ? null : { interval_seconds: interval, points: points.map(([t, value, status = value === null ? 'score_error' : 'scored', at = t]) => ({ t, at, score: value, status })) },
     report: score > 0 ? { valid: true, score, shape_score: score, detail: { score }, alignment: { frame_error: { offset_fraction: 0, offset_m: 0, yaw_deg: 0 } }, shape: { scale: 1 } } : null,
     ...rest };
 };
@@ -40,6 +40,13 @@ test('an attempt counts its last snapshot while running, 0 before any model, and
   assert.equal(scoreAt(timedOut, 1800), 55, 'at the wall-clock limit every attempt has its final score');
   const failed = attempt({ score: 0, wall: 1200, points: [[300, 70]] });
   assert.equal(scoreAt(failed, 600), 70); assert.equal(scoreAt(failed, 1500), 0, 'a failure ends at 0 as on the leaderboard');
+});
+
+test('a snapshot read late counts from when it was taken, not from its tick', () => {
+  // The t = 300 tick was read at 650 s (a busy runner): its model is not the attempt's state at 300 or 600 s.
+  const late = attempt({ score: 80, wall: 1700, points: [[300, 78, 'scored', 650], [600, 78, 'scored', 660]] });
+  assert.equal(scoreAt(late, 300), 0); assert.equal(scoreAt(late, 600), 0); assert.equal(scoreAt(late, 900), 78);
+  assert.equal(timeToShare(late), 650);
 });
 
 test('time to 95%: the first snapshot at 95% of the final score, else the end; low finals are left out', () => {
@@ -123,10 +130,12 @@ test('collectRuns reads the snapshots from result.json', async t => {
   await writeFile(join(attemptDir, 'score', 'report.json'), JSON.stringify({ schema: 'e3d-report-v1', valid: true, score: 70 }));
   await writeFile(join(attemptDir, 'result.json'), JSON.stringify({ task_id: 'house-t2', attempt: 1, system: 's', model: 'm', status: 'completed', score: 70,
     wall_seconds: 1000, wall_limit_seconds: 1800, snapshot_interval_seconds: 300,
-    snapshots: [{ t: 600, status: 'scored', score: 50 }, { t: 300, status: 'absent', score: 0 }, { t: 900, status: 'score_error', score: null }] }));
+    snapshots: [{ t: 600, at_seconds: 600.01, read_seconds: 600.2, status: 'scored', score: 50 }, { t: 300, status: 'absent', score: 0 },
+      { t: 900, at_seconds: 1150.5, read_seconds: 1151, status: 'score_error', score: null }] }));
   const { attempts } = await collectRuns({ dataRoot, batches: ['b1'] });
   assert.equal(attempts[0].wall_limit_seconds, 1800);
-  assert.deepEqual(attempts[0].snapshots, { interval_seconds: 300, points: [{ t: 300, score: 0, status: 'absent' }, { t: 600, score: 50, status: 'scored' }, { t: 900, score: null, status: 'score_error' }] });
+  assert.deepEqual(attempts[0].snapshots, { interval_seconds: 300, points: [{ t: 300, at: 300, score: 0, status: 'absent' }, { t: 600, at: 600.2, score: 50, status: 'scored' },
+    { t: 900, at: 1151, score: null, status: 'score_error' }] }, 'taken at the end of the read; the tick for a record without times');
   await writeFile(join(attemptDir, 'result.json'), JSON.stringify({ task_id: 'house-t2', attempt: 1, status: 'completed', score: 70 }));
   assert.equal((await collectRuns({ dataRoot, batches: ['b1'] })).attempts[0].snapshots, null, 'an older result has none');
 });

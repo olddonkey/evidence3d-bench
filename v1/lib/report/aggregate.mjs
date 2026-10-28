@@ -708,9 +708,9 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
       memory: 'm2 / m3 tasks (named landmarks whose surveyed form differs from the published one): share of contested probes whose measurement is ' +
         'closer to the surveyed object the evidence shows than to the structure as published',
       time_curve: 'score over time from the runner\'s snapshots of output/model.glb (every interval seconds after the CLI started, scored after the attempt): ' +
-        'at each tick an attempt counts its final score once it has ended, else its last snapshot\'s score (0 with no or an invalid model, or a scorer failure); ' +
+        'at each tick an attempt counts its final score once it has ended, else the score of the last snapshot it had taken by then (0 with no or an invalid model, or a scorer failure); ' +
         'same averaging and bootstrap as the score, so the point at the wall-clock limit is the score. Time to ' + T95_SHARE * 100 + '%: per attempt with a final score of at least ' +
-        T95_MIN_FINAL + ', the first snapshot at ' + T95_SHARE * 100 + '% of its final score, else its end; median over attempts. ' +
+        T95_MIN_FINAL + ', when its first snapshot at ' + T95_SHARE * 100 + '% of its final score was taken, else its end; median over attempts. ' +
         'Only for configurations whose every counted attempt has snapshots',
       excluded_statuses: excludeStatuses,
     },

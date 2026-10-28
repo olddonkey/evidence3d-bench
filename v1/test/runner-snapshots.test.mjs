@@ -4,12 +4,13 @@ import { mkdtemp, mkdir, writeFile, readFile, rm, chmod, symlink, link, rename, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import { encodePNG } from '../lib/png.mjs';
 import { DEFAULT_BUDGET } from '../lib/contract.mjs';
 import { objectHash } from '../../lib/io.mjs';
 import { prepare, execute, manifestHash } from '../lib/runner/index.mjs';
+import { startTimeOf } from '../lib/runner/process.mjs';
 import { snapshotTicks, snapshotName, glbComplete, readSnapshot, outputIdentity, snapshotClock, snapshotJobs, scoredSnapshots, rescoreSnapshots,
   DEFAULT_SNAPSHOT_SECONDS } from '../lib/runner/snapshots.mjs';
 
@@ -144,11 +145,15 @@ test('a snapshot read refuses symlinks, hard links, FIFOs, oversized files and a
   const dir = await scratch(t), ws = join(dir, 'ws'), out = join(ws, 'output'), secret = join(dir, 'truth.glb');
   await mkdir(out, { recursive: true });
   await writeFile(secret, fakeGLB('C'));
-  const output = await outputIdentity(ws), read = () => readSnapshot(ws, { maxBytes: 1000, output });
+  const output = await outputIdentity(ws), copy = join(dir, 'copy.glb');
+  const read = async (known = []) => { await rm(copy, { force: true }); return readSnapshot(ws, { maxBytes: 1000, output, dest: copy, known }); };
   assert.deepEqual(await read(), { present: false, problem: null });
   await writeFile(join(out, 'model.glb'), fakeGLB('A'));
   const ok = await read();
-  assert.equal(ok.problem, null); assert.equal(ok.stable, true); assert.equal(markerOf(ok.data), 'A'); assert.equal(ok.sha256, sha(fakeGLB('A')));
+  assert.equal(ok.problem, null); assert.equal(ok.stable, true); assert.equal(ok.complete, true); assert.equal(ok.sha256, sha(fakeGLB('A')));
+  assert.equal(ok.written, true); assert.equal(markerOf(await readFile(copy)), 'A');
+  const repeat = await read([ok.sha256]);
+  assert.equal(repeat.sha256, ok.sha256); assert.equal(repeat.written, undefined); assert.equal(await exists(copy), false, 'content the runner has is not copied again');
   await rm(join(out, 'model.glb'));
   await symlink(secret, join(out, 'model.glb'));
   assert.match((await read()).problem, /symlink/);
@@ -169,7 +174,42 @@ test('a snapshot read refuses symlinks, hard links, FIFOs, oversized files and a
   await rename(out, join(ws, 'output.real'));
   await symlink(join(dir, 'elsewhere'), out);
   const swapped = await read();
-  assert.match(swapped.problem, /not the directory the attempt started with/); assert.equal(swapped.data, undefined);
+  assert.match(swapped.problem, /not the directory the attempt started with/); assert.equal(await exists(copy), false);
+  await rm(out);
+  assert.deepEqual(await read(), { present: false, problem: null }, 'no output/ at all: nothing there');
+});
+
+test('a contestant flipping output/ between itself and a symlink to another directory never gets that directory read', async t => {
+  // The reader stands in output/ (its working directory) and resolves nothing
+  // through the workspace path again, so no interleaving of the flips with
+  // its checks can make it read the other directory's model.glb.
+  const dir = await scratch(t), ws = join(dir, 'ws'), out = join(ws, 'output'), aside = join(ws, 'output.aside'), secret = join(dir, 'private');
+  await mkdir(out, { recursive: true }); await mkdir(secret);
+  await writeFile(join(out, 'model.glb'), fakeGLB('A'));
+  await writeFile(join(secret, 'model.glb'), fakeGLB('C'));
+  const output = await outputIdentity(ws), copy = join(dir, 'copy.glb'), hidden = sha(fakeGLB('C'));
+  let flipping = true, flips = 0;
+  const flipper = (async () => {
+    while (flipping) {
+      await rename(out, aside); await symlink(secret, out);
+      await new Promise(resolve => setImmediate(resolve));
+      await rm(out); await rename(aside, out);
+      await new Promise(resolve => setImmediate(resolve));
+      flips++;
+    }
+  })();
+  const seen = [];
+  for (const deadline = Date.now() + 2500; Date.now() < deadline;) {
+    await rm(copy, { force: true });
+    const found = await readSnapshot(ws, { maxBytes: 1000, output, dest: copy });
+    seen.push(found);
+    assert.notEqual(found.sha256, hidden, 'the other directory\'s model was read');
+    if (await exists(copy)) assert.equal(markerOf(await readFile(copy)), 'A');
+  }
+  flipping = false;
+  await flipper;
+  assert.ok(flips > 10, flips + ' flips');
+  assert.ok(seen.some(found => found.sha256 === sha(fakeGLB('A'))), 'the real output/ was still read between flips');
 });
 
 test('the snapshot clock waits for a file caught mid-write and stores repeated content once', async t => {
@@ -192,6 +232,25 @@ test('the snapshot clock waits for a file caught mid-write and stores repeated c
   assert.deepEqual((await readdir(join(attemptDir, 'snapshots'))).sort(), ['index.json', 't0001.glb']);
   assert.deepEqual((await readJSON(join(attemptDir, 'snapshots', 'index.json'))).snapshots, records);
   assert.deepEqual(await readdir(join(ws, 'output')), ['model.glb'], 'nothing was written into the workspace');
+});
+
+test('an index.json that cannot be written costs no snapshot', async t => {
+  const dir = await scratch(t), ws = join(dir, 'ws'), attemptDir = join(dir, 'a1');
+  await mkdir(join(ws, 'output'), { recursive: true });
+  await writeFile(join(ws, 'output', 'model.glb'), fakeGLB('A'));
+  // A directory where index.json should go: every write of the index fails, the snapshots do not.
+  await mkdir(join(attemptDir, 'snapshots', 'index.json', 'blocked'), { recursive: true });
+  const events = [];
+  const clock = snapshotClock({ attemptDir, workspace: ws, intervalSeconds: 1, wallSeconds: 2, maxBytes: 1000, log: event => events.push(event) });
+  await clock.prepare();
+  clock.begin(performance.now() - 950);
+  await new Promise(resolve => setTimeout(resolve, 600));
+  const records = await clock.stop();
+  assert.equal(records.length, 1);
+  assert.equal(records[0].file, 'snapshots/t0001.glb'); assert.equal(records[0].error, undefined);
+  assert.deepEqual(snapshotJobs(records).map(job => job.name), ['t0001']);
+  assert.equal(scoredSnapshots(records, { scores: new Map([[records[0].sha256, { status: 'scored', score: 30, valid: true }]]) })[0].status, 'scored');
+  assert.equal(events.filter(event => event.event === 'snapshot_index_error').length, 2, 'tried after the tick and again at stop');
 });
 
 test('a stopped clock takes no further snapshots', async t => {
@@ -230,12 +289,16 @@ test('snapshots are taken outside the sandbox while the CLI runs and scored afte
   // Ticks at 2, 4, 6 s: A is written at 1 s, B at 5 s, C (the final model) at 7 s.
   const batch = await snapshotBatch(t, { steps: [{ after: 1, write: 'A' }, { after: 4, write: 'B' }, { after: 2, write: 'C' }] });
   assert.deepEqual(batch.manifest.snapshots, { interval_seconds: 2, source: 'output/model.glb' });
-  await execute({ batchDir: batch.batchDir, deps: batch.deps, log: batch.log });
+  // A long scoring allowance: for the two snapshots together it is more than a timer can hold.
+  await execute({ batchDir: batch.batchDir, deps: { ...batch.deps, scoreSeconds: 1_500_000 }, log: batch.log });
   const result = await readJSON(join(batch.attemptDir, 'result.json'));
   assert.equal(result.status, 'completed'); assert.equal(result.score, 90, 'the score is the final file\'s');
   assert.equal(result.snapshot_interval_seconds, 2);
   assert.deepEqual(result.snapshots.map(item => [item.t, item.status, item.score, item.same_as ?? null]), [[2, 'scored', 30, null], [4, 'scored', 30, 't0002'], [6, 'scored', 60, null]]);
-  for (const item of result.snapshots) assert.ok(item.at_seconds >= item.t && item.at_seconds < item.t + 3, item.name + ' read at ' + item.at_seconds);
+  for (const item of result.snapshots) {
+    assert.ok(item.at_seconds >= item.t && item.at_seconds < item.t + 3, item.name + ' read at ' + item.at_seconds);
+    assert.ok(item.read_seconds >= item.at_seconds);
+  }
   assert.equal(result.snapshots[0].report, TASK + '/a1/snapshots/score/t0002.json');
   assert.deepEqual((await readdir(join(batch.attemptDir, 'snapshots'))).sort(), ['index.json', 'score', 't0002.glb', 't0006.glb']);
   assert.equal(markerOf(await readFile(join(batch.attemptDir, 'snapshots', 't0006.glb'))), 'B');
@@ -295,6 +358,23 @@ test('a runner that died after generation scores the snapshots from their index,
   assert.deepEqual(again.snapshots, first.snapshots);
   assert.equal(again.score, 90);
   assert.ok(await exists(join(batch.attemptDir, 'snapshots', 'score.interrupted-1', 't0002.json')));
+});
+
+test('a restarted runner stops a snapshot scorer the dead one left running, even with no snapshot left to score', async t => {
+  const batch = await snapshotBatch(t, { steps: [{ after: 0.5, write: 'C' }], sleep: 3 });
+  await execute({ batchDir: batch.batchDir, deps: batch.deps });
+  await rm(join(batch.attemptDir, 'result.json'));
+  // A worker the dead runner started (its own process group, as captureProcess starts one).
+  const worker = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', 'score-worker.mjs'], { detached: true, stdio: 'ignore' });
+  const gone = new Promise(resolve => worker.once('exit', () => resolve(true)));
+  t.after(() => { try { process.kill(worker.pid, 'SIGKILL'); } catch {} });
+  await new Promise(resolve => setTimeout(resolve, 200));
+  await mkdir(join(batch.attemptDir, 'snapshots', 'score'), { recursive: true });
+  await writeFile(join(batch.attemptDir, 'snapshots', 'score', 'worker.json'), JSON.stringify({ pid: worker.pid, started: startTimeOf(worker.pid) }));
+  await execute({ batchDir: batch.batchDir, deps: batch.deps });
+  const result = await readJSON(join(batch.attemptDir, 'result.json'));
+  assert.deepEqual(result.snapshots.map(item => [item.t, item.status, item.score_of]), [[2, 'scored', 'final']], 'no snapshot scoring ran');
+  assert.equal(await Promise.race([gone, new Promise(resolve => setTimeout(() => resolve(false), 3000))]), true, 'the leftover worker was stopped');
 });
 
 test('rescore scores every distinct snapshot again and keeps the earlier reports', async t => {

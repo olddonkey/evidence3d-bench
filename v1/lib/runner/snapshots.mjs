@@ -1,9 +1,13 @@
-import { open, lstat, mkdir, writeFile, readFile, rename, access } from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { lstat, mkdir, readFile, rename, access, unlink } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { join, relative } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { sha256, readJSON, writeJSON } from './workspace.mjs';
+import { readJSON, writeJSON } from './workspace.mjs';
 import { scoreOf } from './status.mjs';
+
+const execFileAsync = promisify(execFile);
 
 // Score-over-time snapshots. While an attempt generates, the runner copies the
 // contestant's output/model.glb every `interval` seconds (counted from the
@@ -41,55 +45,34 @@ export function glbComplete(bytes) {
 }
 
 // Device and inode of output/ before the CLI starts: a snapshot is only ever
-// taken from that directory.
+// taken from that directory. Strings, as the reader (snapshot-read.mjs) gets them.
 export async function outputIdentity(workspace) {
-  const info = await lstat(join(workspace, 'output'));
-  return { dev: info.dev, ino: info.ino };
+  const info = await lstat(join(workspace, 'output'), { bigint: true });
+  return { dev: String(info.dev), ino: String(info.ino) };
 }
 
-const OPEN_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+const READER = fileURLToPath(new URL('./snapshot-read.mjs', import.meta.url));
+const READ_TIMEOUT_MS = 120_000;
 
 // Reads output/model.glb while the contestant is still running. Unlike the
 // final read (readArtifact, after the process tree is gone) the contestant can
-// swap files under the runner while it reads, and the runner reads outside the
-// sandbox, so: the file is opened without following a symlink and without
-// blocking (a FIFO would hang an ordinary open), checked on the open handle
-// (a regular file, one link, within the byte budget) and read from it; then
-// output/ must still be the directory the attempt started with and
-// output/model.glb still the file that was read. A file replaced meanwhile
-// (an atomic rename by the model, or a swap) is read again (`retry`).
-export async function readSnapshot(workspace, { maxBytes, output }) {
-  const dir = join(workspace, 'output'), path = join(dir, 'model.glb');
-  let handle;
-  try { handle = await open(path, OPEN_FLAGS); }
-  catch (error) {
-    if (error.code === 'ENOENT') return { present: false, problem: null };
-    if (error.code === 'ELOOP' || error.code === 'EMLINK') return { present: true, problem: 'artifact is a symlink' };
-    return { present: false, problem: 'output/model.glb could not be opened (' + (error.code ?? error.message) + ')' };
-  }
+// swap files and directories under the runner while it reads, and the runner
+// reads outside the sandbox. So the read happens in a short-lived process
+// started in output/ (snapshot-read.mjs, where the checks are): it resolves
+// nothing through the workspace path again, and reads nothing unless its
+// working directory is the output/ the attempt started with. The bytes go to
+// `dest` (unless their sha256 is in `known`); what it found is returned.
+export async function readSnapshot(workspace, { maxBytes, output, dest = null, known = [] }) {
+  const job = JSON.stringify({ dev: output.dev, ino: output.ino, maxBytes, dest, known });
   try {
-    const before = await handle.stat();
-    if (!before.isFile()) return { present: true, problem: 'artifact is not a regular file' };
-    if (before.nlink !== 1) return { present: true, problem: 'artifact has ' + before.nlink + ' hard links' };
-    if (before.size > maxBytes) return { present: true, bytes: before.size, problem: 'artifact is ' + before.size + ' bytes, over the ' + maxBytes + ' byte budget' };
-    const data = Buffer.alloc(before.size);
-    let read = 0;
-    while (read < data.length) {
-      const { bytesRead } = await handle.read(data, read, data.length - read, read);
-      if (!bytesRead) break;
-      read += bytesRead;
-    }
-    const after = await handle.stat();
-    const [dirInfo, pathInfo] = await Promise.all([lstat(dir).catch(() => null), lstat(path).catch(() => null)]);
-    if (!dirInfo || !dirInfo.isDirectory() || dirInfo.dev !== output.dev || dirInfo.ino !== output.ino) {
-      return { present: true, problem: 'output/ is not the directory the attempt started with', retry: true };
-    }
-    if (after.nlink !== 1) return { present: true, problem: 'artifact has ' + after.nlink + ' hard links' };
-    if (!pathInfo || pathInfo.dev !== after.dev || pathInfo.ino !== after.ino) return { present: true, problem: 'output/model.glb was replaced while it was read', retry: true };
-    const stable = read === before.size && after.size === before.size && after.mtimeMs === before.mtimeMs;
-    const bytes = data.subarray(0, read);
-    return { present: true, bytes: bytes.length, sha256: sha256(bytes), data: bytes, stable, problem: null };
-  } finally { await handle.close().catch(() => {}); }
+    const { stdout } = await execFileAsync(process.execPath, [READER, job], { cwd: join(workspace, 'output'), env: {}, timeout: READ_TIMEOUT_MS, maxBuffer: 1 << 20 });
+    return JSON.parse(stdout.trim().split('\n').at(-1));
+  } catch (error) {
+    // output/ gone (or a dangling symlink): nothing to read, as an empty output/.
+    if (error.code === 'ENOENT' && String(error.syscall).startsWith('spawn')) return { present: false, problem: null };
+    if (error.code === 'ENOTDIR' && String(error.syscall).startsWith('spawn')) return { present: true, problem: 'output/ is not the directory the attempt started with' };
+    return { present: false, problem: 'output/model.glb could not be read (' + (error.killed ? 'timed out' : error.code ?? error.message) + ')' };
+  }
 }
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -100,45 +83,66 @@ const round = (value, digits = 3) => Math.round(value * 10 ** digits) / 10 ** di
 // performance.now() value), stop() once it has ended: it waits for a snapshot
 // in progress and returns every record. Never throws into the attempt: a
 // snapshot that cannot be read or written is recorded as such.
+// Each record has its tick `t` and when the copy was taken: at_seconds, when
+// the read that was kept began, and read_seconds, when it ended (both after
+// the CLI's spawn). A tick reached late (a busy runner, a file still being
+// written) is read late; the report places the snapshot at read_seconds.
 export function snapshotClock({ attemptDir, workspace, intervalSeconds, wallSeconds, maxBytes, settle = SETTLE, log = () => {} }) {
   const ticks = snapshotTicks(intervalSeconds, wallSeconds), records = [], dir = join(attemptDir, 'snapshots');
-  let output = null, clock = null, timer = null, current = Promise.resolve(), stopped = false;
-  const write = () => writeJSON(join(dir, 'index.json'), { schema: SNAPSHOT_SCHEMA, interval_seconds: intervalSeconds, wall_seconds: wallSeconds, ticks, snapshots: records });
+  let output = null, clock = null, timer = null, current = Promise.resolve(), stopped = false, indexed = true;
+  const seconds = () => round((performance.now() - clock) / 1000);
+  // index.json is rewritten whole after every tick; one that could not be
+  // written is retried at the next tick and at stop(). It is what a restarted
+  // runner reads; the records in memory are what this runner scores.
+  async function writeIndex() {
+    try {
+      await mkdir(dir, { recursive: true });
+      await writeJSON(join(dir, 'index.json'), { schema: SNAPSHOT_SCHEMA, interval_seconds: intervalSeconds, wall_seconds: wallSeconds, ticks, snapshots: records });
+      indexed = true;
+    } catch (error) { indexed = false; log({ event: 'snapshot_index_error', message: error.message }); }
+  }
 
   async function take(t) {
-    const name = snapshotName(t), at = (performance.now() - clock) / 1000;
-    let found, tries = 0;
+    const name = snapshotName(t), dest = join(dir, '.' + name + '.reading');
+    const known = records.filter(item => item.file && !item.same_as).map(item => item.sha256);
+    await mkdir(dir, { recursive: true }).catch(() => {});
+    let found, tries = 0, at;
     for (;;) {
-      found = await readSnapshot(workspace, { maxBytes, output }).catch(error => ({ present: false, problem: 'output/model.glb could not be read: ' + error.message }));
-      const settled = !found.present || (found.problem && !found.retry) || (!found.problem && found.stable && glbComplete(found.data));
+      await unlink(dest).catch(() => {});
+      at = seconds();
+      found = await readSnapshot(workspace, { maxBytes, output, dest, known }).catch(error => ({ present: false, problem: 'output/model.glb could not be read: ' + error.message }));
+      const settled = !found.present || (found.problem && !found.retry) || (!found.problem && found.stable && found.complete);
       if (settled || ++tries >= settle.tries) break;
       await sleep(settle.ms);
     }
-    const record = { t, name, at_seconds: round(at), read_seconds: round((performance.now() - clock) / 1000), present: found.present };
+    const record = { t, name, at_seconds: at, read_seconds: seconds(), present: found.present };
     if (found.problem) record.problem = found.problem;
     else if (found.present) {
-      Object.assign(record, { bytes: found.bytes, sha256: found.sha256, complete: glbComplete(found.data), stable: found.stable });
+      Object.assign(record, { bytes: found.bytes, sha256: found.sha256, complete: found.complete, stable: found.stable });
       const earlier = records.find(item => item.sha256 === found.sha256 && item.file);
       if (earlier) { record.file = earlier.file; record.same_as = earlier.name; }
-      else {
-        try {
-          await mkdir(dir, { recursive: true });
-          await writeFile(join(dir, name + '.glb'), found.data, { flag: 'wx' });
-          record.file = 'snapshots/' + name + '.glb';
-        } catch (error) { record.error = 'snapshot not written: ' + error.message; }
-      }
+      else if (found.written) {
+        try { await rename(dest, join(dir, name + '.glb')); record.file = 'snapshots/' + name + '.glb'; }
+        catch (error) { record.error = 'snapshot not written: ' + error.message; }
+      } else record.error = 'snapshot not written: ' + (found.write_error ?? 'the reader stored no copy');
     }
+    await unlink(dest).catch(() => {});
     records.push(record);
-    try { await mkdir(dir, { recursive: true }); await write(); } catch (error) { record.error ??= 'index not written: ' + error.message; }
+    await writeIndex();
     log({ event: 'snapshot', t, at_seconds: record.at_seconds, present: record.present, bytes: record.bytes ?? null, same_as: record.same_as ?? null, problem: record.problem ?? null });
   }
 
   function schedule(i) {
     if (stopped || i >= ticks.length) return;
-    timer = setTimeout(() => {
+    const due = clock + ticks[i] * 1000;
+    // A timer may fire a millisecond early by the performance clock; it waits out the rest.
+    const fire = () => {
       timer = null;
+      if (stopped) return;
+      if (performance.now() < due) { timer = setTimeout(fire, Math.max(1, Math.ceil(due - performance.now()))); timer.unref?.(); return; }
       current = take(ticks[i]).catch(error => log({ event: 'snapshot_error', t: ticks[i], message: error.message })).then(() => schedule(i + 1));
-    }, Math.max(0, clock + ticks[i] * 1000 - performance.now()));
+    };
+    timer = setTimeout(fire, Math.max(0, Math.ceil(due - performance.now())));
     timer.unref?.();
   }
 
@@ -150,6 +154,7 @@ export function snapshotClock({ attemptDir, workspace, intervalSeconds, wallSeco
       stopped = true;
       if (timer) clearTimeout(timer);
       await current;
+      if (!indexed) await writeIndex();
       return records;
     },
   };
@@ -187,7 +192,7 @@ export function snapshotJobs(records, finalSha = null) {
 // final:  { sha256, score, valid, report } of the final artifact's report, or null
 export function scoredSnapshots(records, { scores = new Map(), final = null, scored = true } = {}) {
   return records.map(record => {
-    const base = { t: record.t, name: record.name, at_seconds: record.at_seconds, present: record.present, ...(record.bytes !== undefined ? { bytes: record.bytes } : {}),
+    const base = { t: record.t, name: record.name, at_seconds: record.at_seconds, read_seconds: record.read_seconds, present: record.present, ...(record.bytes !== undefined ? { bytes: record.bytes } : {}),
       ...(record.sha256 ? { sha256: record.sha256, complete: record.complete } : {}), ...(record.file ? { file: record.file } : {}), ...(record.same_as ? { same_as: record.same_as } : {}) };
     if (!record.present) return { ...base, status: 'absent', score: 0, valid: false, ...(record.problem ? { problem: record.problem } : {}) };
     if (record.problem) return { ...base, status: 'refused', score: 0, valid: false, problem: record.problem };
