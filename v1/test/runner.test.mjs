@@ -782,8 +782,12 @@ test('a runner that died after generation but before scoring is recovered from i
 
 test('a usage limit is an infrastructure error: not scored, not averaged, its reset time kept', async t => {
   // Live shape (real codex against a local server answering usage_limit_reached),
-  // after the model had already built something.
-  const events = [...CODEX_START, ...CODEX_WORK, { type: 'error', message: CODEX_USAGE_LIMIT }, { type: 'turn.failed', error: { message: CODEX_USAGE_LIMIT } }];
+  // after the model had already built something. The reset is two hours from
+  // now: a fixed "7:50 PM" read just after 19:50 local time is today, already
+  // past, and the run would not stop for it.
+  const reset = new Date(Date.now() + 2 * 3600000), hours = reset.getHours();
+  const limitText = CODEX_USAGE_LIMIT.replace('7:50 PM', (hours % 12 || 12) + ':' + String(reset.getMinutes()).padStart(2, '0') + (hours < 12 ? ' AM' : ' PM'));
+  const events = [...CODEX_START, ...CODEX_WORK, { type: 'error', message: limitText }, { type: 'turn.failed', error: { message: limitText } }];
   const { batchDir, deps, dir } = await fakeBatch(t, { tasks: ['house-a-t1', 'house-b-t1'],
     behaviour: { artifact: 'glb', byTask: { 'house-b-t1': { events, exit: 1 } } } });
   await passPreflight(batchDir);
@@ -798,7 +802,7 @@ test('a usage limit is an infrastructure error: not scored, not averaged, its re
   assert.equal(result.status, 'infra_error'); assert.equal(result.score, null); assert.equal(result.report, null);
   assert.equal(result.infra.reason, 'usage_limit'); assert.equal(result.infra.action, 'wait'); assert.equal(result.infra.during, 'session');
   assert.ok(result.infra.retry_after && Date.parse(result.infra.retry_after) > Date.parse(result.finished_at) - 300000, 'retry_after ' + result.infra.retry_after);
-  assert.ok(result.infra.evidence.includes(CODEX_USAGE_LIMIT));
+  assert.ok(result.infra.evidence.includes(limitText));
   assert.ok(result.artifact.sha256, 'the artifact is recorded'); assert.equal(await exists(join(batchDir, 'house-b-t1', 'a1', 'score')), false, 'but not scored');
   assert.equal((await readFile(join(dir, 'scorer-calls.log'), 'utf8')).length, 1, 'only the real sample was scored');
   assert.deepEqual([summary.counts.completed, summary.counts.infra_error, summary.samples, summary.pending], [1, 1, 1, 0]);
