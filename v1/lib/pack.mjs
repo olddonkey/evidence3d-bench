@@ -167,14 +167,15 @@ function scoringText(version, metric) {
       'the shape score is 100 × the mean of the three F values.',
     'Detail score: the reference is divided into groups of parts in categories such as main walls, roof, openings, entrance, ornament, attachments and structural members. ' +
       'Each group is judged on its own, after a small local shift, at a tolerance of 0.6 × its feature size (a few centimetres for window frames), ' +
-      'and a surface matches only if it also faces the same way (within 45°). The detail score is 100 × the mean over categories of the mean F of their groups, ' +
+      'and a surface matches only if it lies the same way as the reference surface there (within 45°; which side it faces does not matter). The detail score is 100 × the mean over categories of the mean F of their groups, ' +
       'so every category counts the same however small its parts. A group the evidence shows less than half of is not scored; if no group is scored, the score is the shape score alone.',
     'Only what the supplied evidence shows is scored: reference surfaces that no evidence shows do not count, so complete them plausibly. ' +
       'Anything that is not part of the object (ground, vegetation, vehicles, neighbouring buildings) counts against you wherever the evidence shows that place to be empty.',
     'Named dimensions such as heights and wall positions are measured on the fitted model and reported but do not enter the score; ' +
       'on some tasks the report also says whether they follow the target state or another state of the object. ' +
       'Solid base colours are compared and reported but do not enter the score; textures are ignored.',
-    'A GLB that cannot be read, breaks the output rules for the model file, exceeds the budget or has no visible surface scores 0.',
+    'A GLB that cannot be read, is not a static uncompressed triangle mesh in one scene (animations, skins, morph targets, ' +
+      'compressed geometry and external resources are refused), exceeds the triangle or byte budget, or has no visible surface scores 0.',
   ].join(' ');
 }
 
@@ -197,13 +198,53 @@ export function taskPrompt(model, variant, inputs, version = TASK_PROMPT) {
   ].filter(Boolean).join('\n\n');
 }
 
+// The version of a built task's scoring paragraph, or null when it matches none.
+export function taskPromptVersion(task) {
+  const scoring = String(task?.prompt ?? '').split('\n\n').at(-1), metric = task?.scale_evidence === 'metric';
+  return TASK_PROMPT_VERSIONS.find(version => scoringText(version, metric) === scoring) ?? null;
+}
+
+// The versions the tasks of a set already built under this data root carry
+// (null for a prompt that matches no version).
+async function setVersions(dataRoot, set) {
+  const paths = layout(dataRoot), versions = new Set();
+  let ids = [];
+  try { ids = await readdir(join(dataRoot, 'tasks')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  for (const id of ids) {
+    let truth, task;
+    try { truth = await readJSON(join(paths.truth(id), 'truth.json')); task = await readJSON(join(paths.task(id), 'task.json')); }
+    catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    if (truth.set === set) versions.add(taskPromptVersion(task));
+  }
+  return versions;
+}
+
+// A task that build-set finds already built is reused only if it has the set's wording.
+export async function assertTaskPrompt(dataRoot, taskId, version) {
+  const found = taskPromptVersion(await readJSON(join(layout(dataRoot).task(taskId), 'task.json')));
+  if (found !== version) throw new Error('Task ' + taskId + ' exists with task prompt version ' + found + ', but this set is built with version ' + version);
+}
+
 // Object + variant -> public task pack and private truth record. promptVersion:
-// the scoring paragraph's wording (TASK_PROMPT_VERSIONS); a set's builder passes
-// setPromptVersion(set file).
-export async function buildTask({ dataRoot, objectId, variant, set, promptVersion = TASK_PROMPT }) {
+// the scoring paragraph's wording (TASK_PROMPT_VERSIONS). A task of a set takes
+// the wording of the set's tasks already built under this data root and refuses
+// any other, so adding to a set (a real object to real-2026-10, a variant to
+// test-2026-10) never mixes wordings; a set's first task, or a task of no set,
+// takes promptVersion, else the latest. build-set passes setPromptVersion(set file).
+export async function buildTask({ dataRoot, objectId, variant, set, promptVersion }) {
   const spec = VARIANTS[variant];
   if (!spec) throw new Error('Unknown variant ' + variant);
-  if (!TASK_PROMPT_VERSIONS.includes(promptVersion)) throw new Error('Unknown task prompt version ' + promptVersion);
+  if (promptVersion !== undefined && !TASK_PROMPT_VERSIONS.includes(promptVersion)) throw new Error('Unknown task prompt version ' + promptVersion);
+  if (set !== undefined) {
+    const versions = [...await setVersions(dataRoot, set)];
+    if (versions.includes(null)) throw new Error('Set ' + set + ' has a task whose prompt matches no task prompt version');
+    if (versions.length > 1) throw new Error('Set ' + set + ' already mixes task prompt versions ' + versions.sort().join(' and '));
+    if (versions.length && promptVersion !== undefined && promptVersion !== versions[0]) {
+      throw new Error('Set ' + set + ' was built with task prompt version ' + versions[0] + '; refusing a version ' + promptVersion + ' task');
+    }
+    promptVersion ??= versions[0];
+  }
+  promptVersion ??= TASK_PROMPT;
   const paths = layout(dataRoot), objectDir = paths.object(objectId), evidenceDir = join(objectDir, 'evidence');
   const model = validateModel(await readJSON(join(objectDir, 'model.json')));
   const evidence = await readJSON(join(evidenceDir, 'evidence.json'));

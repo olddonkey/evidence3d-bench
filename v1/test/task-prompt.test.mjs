@@ -7,12 +7,14 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { taskPrompt, setPromptVersion, TASK_PROMPT, TASK_PROMPT_VERSIONS, TASK_PROMPT_SCORER } from '../lib/pack.mjs';
+import { taskPrompt, setPromptVersion, taskPromptVersion, buildTask, TASK_PROMPT, TASK_PROMPT_VERSIONS, TASK_PROMPT_SCORER } from '../lib/pack.mjs';
 import { VARIANTS, layout } from '../lib/contract.mjs';
 import { sampleModel } from '../fixtures/sample-model.mjs';
 import { SCORER_VERSION } from '../lib/score/version.mjs';
 import { SHAPE_FRACTIONS } from '../lib/score/metrics.mjs';
 import { DETAIL_TAU_FACTOR, MIN_EVIDENCED_FRACTION, NORMAL_AGREEMENT_DEG } from '../lib/score/detail.mjs';
+import { PointGrid } from '../lib/score/grid.mjs';
+import { validateStatic } from '../../lib/glb.mjs';
 
 const run = promisify(execFile);
 const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
@@ -54,8 +56,8 @@ const V1_SHA256 = {
 // Version 2's scoring paragraph, scale-free and metric. Pinned for the same
 // reason once a set has been built with it: a change of wording is a new version.
 const V2_SCORING_SHA256 = {
-  none: '36ebe648b2fdfd61e0a990be3609ec894faafb76db1a7cb79f43d9cc10398314',
-  metric: '1d8526e8332de38a9ed35fe5fe06f5e929e137079c3014437b7deea35c2c5176',
+  none: '1c399eb2f63f1f00fb52487e4e2609ab9825d75967c80f262bba1f4aa86235b0',
+  metric: 'e669bcb643f3338a7dee657fbc7e729733fb4c857d9452fb4ccdd787547e37e6',
 };
 
 test('version 1 of the task prompt is byte for byte the wording of the existing sets', () => {
@@ -90,10 +92,20 @@ test('the latest wording describes the current scorer', () => {
   assert.ok(text.includes('100 × the mean of the three F values') && SHAPE_FRACTIONS.length === 3, 'shape score');
   assert.ok(text.includes('the mean of a shape score and a detail score'), 'score = (shape + detail) / 2');
   assert.ok(text.includes(DETAIL_TAU_FACTOR + ' × its feature size'), 'detail tolerance');
-  assert.ok(text.includes('within ' + NORMAL_AGREEMENT_DEG + '°'), 'detail normals');
+  assert.ok(text.includes('within ' + NORMAL_AGREEMENT_DEG + '°; which side it faces does not matter'), 'detail normals');
+  // ... because the detail match compares normals up to sign: a reversed face still matches.
+  const grid = new PointGrid([0, 0, 0], 1), cos = Math.cos(NORMAL_AGREEMENT_DEG * Math.PI / 180);
+  assert.ok(grid.anyFacing(0, 0, 0, 0.5, [0, 0, 1], 0, 0, -1, cos), 'antiparallel normals match');
+  assert.ok(!grid.anyFacing(0, 0, 0, 0.5, [0, 0, 1], 1, 0, 0, cos), 'perpendicular normals do not');
   assert.ok(text.includes('less than half') && MIN_EVIDENCED_FRACTION === 0.5, 'unscored groups');
   assert.ok(text.includes('mean over categories of the mean F of their groups'), 'detail score');
   assert.ok(!/counts most|within a few percent/.test(text), 'none of the version 1 wording that 1.1.0 contradicts');
+  // Zero is promised only for what the reader refuses: animations are, cameras are not
+  // (they are stripped before scoring), so the text must not promise zero for every output rule.
+  assert.ok(text.includes('animations, skins, morph targets, compressed geometry and external resources are refused') && !text.includes('output rules'));
+  const glb = extra => ({ asset: { version: '2.0' }, buffers: [{ byteLength: 4 }], scenes: [{ nodes: [0] }], nodes: [{ camera: 0 }], cameras: [{ type: 'perspective', perspective: { yfov: 1, znear: 0.1 } }], ...extra });
+  assert.doesNotThrow(() => validateStatic(glb({}), Buffer.alloc(4)));
+  assert.throws(() => validateStatic(glb({ animations: [{ channels: [], samplers: [] }] }), Buffer.alloc(4)), /animations/);
 });
 
 test('a set file names its wording; one without the field keeps version 1', async () => {
@@ -126,7 +138,7 @@ fs.writeFileSync(spec.result, JSON.stringify({ ok: true, engine: { engine: 'fake
   shots: spec.shots.map(s => ({ id: s.id, seconds: 0, render_seconds: 0 })) }));
 `;
 
-test('new-set writes the current wording; build-set builds each set with the wording its file names', async () => {
+test('new-set writes the current wording; build-set and buildTask keep each set to one wording', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'e3d-task-prompt-test-'));
   try {
     const blender = join(dir, 'fake-blender.cjs'), dataRoot = join(dir, 'data'), cli = join(root, 'v1', 'cli.mjs');
@@ -149,17 +161,33 @@ test('new-set writes the current wording; build-set builds each set with the wor
     await cliRun('build-set', '--set', newSet, '--blender', blender, '--quality', 'draft');
 
     const paths = layout(dataRoot), model = JSON.parse(await readFile(join(paths.object(object.id), 'model.json'), 'utf8'));
-    const t1 = JSON.parse(await readFile(join(paths.task(object.id + '-t1'), 'task.json'), 'utf8'));
-    const t3 = JSON.parse(await readFile(join(paths.task(object.id + '-t3'), 'task.json'), 'utf8'));
+    const task = async variant => JSON.parse(await readFile(join(paths.task(object.id + '-' + variant), 'task.json'), 'utf8'));
+    const t1 = await task('t1'), t3 = await task('t3');
     assert.equal(t1.prompt, taskPrompt(model, 't1', t1.inputs, 1));
     assert.equal(t3.prompt, taskPrompt(model, 't3', t3.inputs, 2));
     assert.match(t1.prompt, /Overall shape counts most/);
     assert.match(t3.prompt, /the two count equally/);
+    assert.deepEqual([taskPromptVersion(t1), taskPromptVersion(t3), taskPromptVersion({ ...t1, prompt: t1.prompt + ' edited' })], [1, 2, null]);
     for (const [name, version] of [['old', 1], ['new', 2]]) {
       assert.equal(JSON.parse(await readFile(join(dataRoot, 'sets', name + '.built.json'), 'utf8')).task_prompt, version, name);
     }
+
+    // A task of no set takes the latest. build-set then refuses to reuse it for
+    // the old set rather than recording a set that mixes wordings.
+    await cliRun('build-task', '--object', object.id, '--variant', 't2');
+    assert.equal(taskPromptVersion(await task('t2')), TASK_PROMPT);
+    await assert.rejects(cliRun('build-set', '--set', oldSet, '--variants', 't1,t2', '--blender', blender),
+      error => /Task obj-0a1b2c3d-t2 exists with task prompt version 2, but this set is built with version 1/.test(error.stderr));
+
+    // Adding to an existing set (as real.mjs build --set does, with no version
+    // given) takes the set's wording; asking for another is refused.
+    await buildTask({ dataRoot, objectId: object.id, variant: 't4', set: 'old' });
+    assert.equal(taskPromptVersion(await task('t4')), 1);
+    await assert.rejects(buildTask({ dataRoot, objectId: object.id, variant: 'c1', set: 'old', promptVersion: 2 }),
+      /Set old was built with task prompt version 1; refusing a version 2 task/);
+
     const { stdout } = await cliRun('verify');
-    assert.match(stdout, /across 2 tasks/);
+    assert.match(stdout, /across 4 tasks/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -138,7 +138,9 @@ even on a metric task, and that scale. On a metric task, `shape.f` high but
   size. `scored` is false (with `reason`) when under half of the group is shown
   by the evidence (`evidenced_fraction`). `precision`/`recall`/`f` are as
   above but at `tau_m`, inside the group's own box, and a match also needs the
-  two surfaces to face the same way (within 45°). `local_offset_m` is the
+  two surfaces to lie the same way (normals within 45°, up to sign:
+  `PointGrid.anyFacing` compares |cos|, so a reversed winding still matches;
+  only attribution, Departure 2, uses the sign). `local_offset_m` is the
   small shift (at most 2 % of D) the scorer allowed the group, `local_offset`
   the shift vector; `frame_offset_m` is how far the group's own frame (fitted to
   the rest of the object) moved it from the global fit.

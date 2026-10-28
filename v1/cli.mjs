@@ -5,7 +5,7 @@ import { readFile, writeFile, mkdir, readdir, access } from 'node:fs/promises';
 import { randomBytes, randomInt } from 'node:crypto';
 import { readJSON, writeJSON } from '../lib/io.mjs';
 import { layout, VARIANTS, GENERATED_VARIANTS } from './lib/contract.mjs';
-import { buildObject, buildTask, verifyTasks, truthGLB, TASK_PROMPT, setPromptVersion } from './lib/pack.mjs';
+import { buildObject, buildTask, verifyTasks, truthGLB, TASK_PROMPT, setPromptVersion, assertTaskPrompt } from './lib/pack.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const args = process.argv.slice(2), command = args.shift() || 'help', options = {};
@@ -31,7 +31,7 @@ try {
     print(await buildObject({ dataRoot, archetype: need('archetype'), seed: Number(need('seed')), id: options.id,
       blender: options.blender, quality: options.quality, log: message => console.error('· ' + message) }));
   } else if (command === 'build-task') {
-    const promptVersion = options['task-prompt'] === undefined ? TASK_PROMPT : Number(options['task-prompt']);
+    const promptVersion = options['task-prompt'] === undefined ? undefined : Number(options['task-prompt']);
     print(await buildTask({ dataRoot, objectId: need('object'), variant: need('variant'), promptVersion }));
   } else if (command === 'new-set') {
     // A test set is private because its seeds are. They are drawn from the OS
@@ -60,7 +60,8 @@ try {
     // version control: the seeds are what keeps a test set private.
     const set = await readJSON(resolve(need('set'))), variants = options.variants ? list(options.variants) : set.variants ?? GENERATED_VARIANTS;
     // The set file decides the prompt's wording (a file without task_prompt: 1), so a
-    // resumed or rebuilt set never mixes wordings.
+    // resumed or rebuilt set never mixes wordings: buildTask refuses a set already
+    // built with another, and a task found already built must have it too.
     const built = [], promptVersion = setPromptVersion(set);
     // Resumable: a long build interrupted half way continues where it stopped.
     // buildObject removes a half-built object, so a directory with evidence.json is complete.
@@ -77,6 +78,7 @@ try {
       const tasks = [];
       for (const variant of variants) {
         if (!(await exists(join(paths.task(objectId + '-' + variant), 'task.json')))) await buildTask({ dataRoot, objectId, variant, set: set.name, promptVersion });
+        else await assertTaskPrompt(dataRoot, objectId + '-' + variant, promptVersion);
         tasks.push(objectId + '-' + variant);
       }
       built.push({ object: objectId, triangles, tasks });

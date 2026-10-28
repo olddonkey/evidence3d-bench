@@ -16,7 +16,7 @@ import { randomBytes, randomInt } from 'node:crypto';
 import { readJSON, writeJSON } from '../../lib/io.mjs';
 import { layout } from '../lib/contract.mjs';
 import { modelToGLB } from '../lib/model.mjs';
-import { buildObject, buildTask, truthGLB, TASK_PROMPT, setPromptVersion } from '../lib/pack.mjs';
+import { buildObject, buildTask, truthGLB, TASK_PROMPT, setPromptVersion, assertTaskPrompt } from '../lib/pack.mjs';
 import { LANDMARKS, LANDMARKS_VERSION, REMEMBERED, generateLandmark } from '../lib/generator/landmarks/index.mjs';
 
 const MEMORY_VARIANTS = ['m2', 'm3'];
@@ -86,6 +86,7 @@ try {
       const tasks = [];
       for (const variant of variants) {
         if (!(await exists(join(paths.task(entry.id + '-' + variant), 'task.json')))) await buildTask({ dataRoot, objectId: entry.id, variant, set: set.name, promptVersion });
+        else await assertTaskPrompt(dataRoot, entry.id + '-' + variant, promptVersion);
         tasks.push(entry.id + '-' + variant);
       }
       built.push({ object: entry.id, triangles, build_seconds: seconds, tasks });

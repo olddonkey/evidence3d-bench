@@ -54,8 +54,9 @@ truth against the drawings.
       --pack PATH/TO/REFERENCE_PACK --sources-root .local/v1/real-sources/mcd-homestead
 
     # Object + r2 / r4 tasks (refuses an existing object), then the kernel's checks.
-    # --task-prompt N: the wording of the prompt's scoring paragraph (v1/lib/pack.mjs),
-    # the latest by default; 1 rebuilds an object built before 2026-10-28 as it was.
+    # The prompt's scoring paragraph (v1/lib/pack.mjs) is that of the set's tasks already
+    # built under the data root (real-2026-10: version 1); --task-prompt N only chooses
+    # it for a set's first object (default: the latest), and must agree with it otherwise.
     node v1/scripts/real.mjs build --source v1/real/mcd-homestead \
       --sources-root .local/v1/real-sources/mcd-homestead --set real-2026-10 [--task-prompt N] [--data DIR]
     node v1/cli.mjs verify
