@@ -2,8 +2,8 @@ import { join, resolve } from 'node:path';
 import { writeJSON } from '../../../lib/io.mjs';
 import { layout, VARIANTS, CONFLICT_VARIANTS, PROTOCOL } from '../contract.mjs';
 import { collectRuns, DEFAULT_EXCLUDED_STATUSES, UNNAMED_SET, UNKNOWN_SET, UNKNOWN_ARCHETYPE, scorerIdentity } from './collect.mjs';
-import { finite, mean, median, sampleSD, summarise, pairedBootstrap, tInterval, tTestP, holmAdjust, pooledSD, sdRange, detectableDifference, BOOTSTRAP_SAMPLES,
-  PAIRWISE_SAMPLES, LOW_EVIDENCE_OBJECTS, SMALL_SAMPLE_OBJECTS, TIE_TOLERANCE, FAMILY_ALPHA } from './stats.mjs';
+import { finite, mean, median, spread, sampleSD, summarise, pairedBootstrap, tInterval, tTestP, holmAdjust, pooledSD, sdRange, detectableDifference,
+  BOOTSTRAP_SAMPLES, PAIRWISE_SAMPLES, LOW_EVIDENCE_OBJECTS, SMALL_SAMPLE_OBJECTS, TIE_TOLERANCE, FAMILY_ALPHA } from './stats.mjs';
 import { LADDERS, LADDER_RULE, inferLadders, parseRoster, rosterProvenance } from './roster.mjs';
 
 // v3: ladders, Holm-corrected verdicts, reference rows (rank null) when a roster is given.
@@ -81,6 +81,44 @@ function conflictCounts(attempts) {
     }
   }
   return counts;
+}
+
+// Detail categories in the order DESIGN.md lists them; any other category a
+// report names comes after these, by name.
+export const DETAIL_CATEGORIES = ['massing', 'roof', 'openings', 'entrance', 'attachments', 'structure', 'ornament'];
+
+// The categories the valid reports among `attempts` scored, in that order.
+export function detailCategories(attempts) {
+  const found = new Set();
+  for (const attempt of attempts) {
+    if (!attempt.valid) continue;
+    for (const row of attempt.report?.detail?.categories ?? []) if (typeof row?.id === 'string' && row.id && finite(row.f)) found.add(row.id);
+  }
+  const rank = id => DETAIL_CATEGORIES.includes(id) ? DETAIL_CATEGORIES.indexOf(id) : DETAIL_CATEGORIES.length;
+  return [...found].sort((p, q) => rank(p) - rank(q) || p.localeCompare(q));
+}
+
+// 100 x the mean group F of one category in one report (detail.score is the
+// mean of these over categories); undefined when the report scored no group
+// of that category.
+export function categoryScore(report, id) {
+  const row = (report?.detail?.categories ?? []).find(category => category?.id === id);
+  return row && finite(row.f) ? 100 * row.f : undefined;
+}
+
+// The named dimensions of one report, counted as the scorer's probe_summary
+// counts them: probes the evidence shows whose ray hits the truth. A probe
+// whose ray hits nothing on the submission is missed and has no error. Per
+// report: the median absolute error in metres and as a fraction of the truth
+// diagonal, and the share missed; null when the report has no such probe.
+export function probeErrors(report) {
+  const evaluated = (Array.isArray(report?.probes) ? report.probes : []).filter(probe => probe?.evidenced === true && finite(probe.truth_m));
+  if (!evaluated.length) return null;
+  const hits = evaluated.filter(probe => probe.missed !== true && finite(probe.measured_m));
+  const middle = median(hits.map(probe => finite(probe.error_m) ? Math.abs(probe.error_m) : Math.abs(probe.measured_m - probe.truth_m)));
+  const diagonal = report.global?.diagonal_m;
+  return { evaluated: evaluated.length, missed: evaluated.length - hits.length, missed_share: (evaluated.length - hits.length) / evaluated.length,
+    median_m: middle, median_fraction: finite(middle) && finite(diagonal) && diagonal > 0 ? middle / diagonal : null };
 }
 
 // The tolerance rows of one report, whatever fractions the scorer used. Which
@@ -162,7 +200,7 @@ function variantDelta(attempts, high, low, seed) {
     pairs: deltas.size, unpaired_objects: new Set([...upper.keys(), ...lower.keys()]).size - deltas.size };
 }
 
-function cellEntry(key, set, attempts, seed, { deltaPairs = [], archetypes = [] } = {}) {
+function cellEntry(key, set, attempts, seed, { deltaPairs = [], archetypes = [], categories = [] } = {}) {
   const first = attempts[0];
   // The unnamed set keeps the seed path it always had, so a report of the
   // same batches reproduces earlier intervals exactly.
@@ -171,6 +209,21 @@ function cellEntry(key, set, attempts, seed, { deltaPairs = [], archetypes = [] 
     const { values, attempts: used, tasks } = perObject(attempts, valueOf, filter);
     return summarise(values, { seed: seedFor(name), attempts: used, tasks, basis });
   };
+  // The same per-object values with their median and interquartile range over
+  // objects. Errors of position, size and named dimensions are skewed (one
+  // model turned round adds 180 degrees to its object), so the page shows the
+  // median; the mean and its interval stay alongside, seeded as before.
+  const diagnostic = (name, valueOf, filter, basis) => {
+    const { values, attempts: used, tasks } = perObject(attempts, valueOf, filter);
+    return { ...summarise(values, { seed: seedFor(name), attempts: used, tasks, basis }), ...spread([...values.values()]) };
+  };
+  const probeResults = new Map(attempts.filter(attempt => attempt.valid).map(attempt => [attempt, probeErrors(attempt.report)]));
+  const probesOf = attempt => probeResults.get(attempt) ?? null;
+  const detailByCategory = {};
+  for (const category of categories) {
+    detailByCategory[category] = metric('detail/' + category, attempt => attempt.valid ? categoryScore(attempt.report, category) : undefined, undefined,
+      'valid attempts whose report scored a group of this category; 100 x the mean F of its groups');
+  }
   const variants = {};
   for (const variant of VARIANT_ORDER) {
     if (!attempts.some(attempt => attempt.variant === variant)) continue;
@@ -230,12 +283,26 @@ function cellEntry(key, set, attempts, seed, { deltaPairs = [], archetypes = [] 
       'all attempts; failures count as 0; shape_score as reported by the scorer'),
     detail: metric('detail', attempt => attempt.valid ? attempt.report.detail?.score : 0, undefined,
       'all attempts; failures count as 0; valid reports without a detail score are left out'),
-    frame_error: {
-      offset_fraction: metric('frame/offset_fraction', attempt => frameError(attempt)?.offset_fraction, undefined, 'valid attempts only; fraction of the truth diagonal'),
-      offset_m: metric('frame/offset_m', attempt => frameError(attempt)?.offset_m, undefined, 'valid attempts only'),
-      yaw_deg: metric('frame/yaw_deg', attempt => finite(frameError(attempt)?.yaw_deg) ? Math.abs(frameError(attempt).yaw_deg) : undefined, undefined, 'valid attempts only; absolute degrees'),
+    // Diagnostics: where a delivered model loses its score. Valid attempts
+    // only; a failure has no model to diagnose and is counted in `success`.
+    detail_categories: detailByCategory,
+    probe_error: {
+      cm: diagnostic('probes/error_cm', attempt => finite(probesOf(attempt)?.median_m) ? 100 * probesOf(attempt).median_m : undefined, undefined,
+        'valid attempts only; per attempt the median absolute error, in cm, of the evidenced probes whose ray hit the submission'),
+      diagonal_pct: diagnostic('probes/error_pct', attempt => finite(probesOf(attempt)?.median_fraction) ? 100 * probesOf(attempt).median_fraction : undefined, undefined,
+        'valid attempts only; per attempt the median absolute probe error as a percentage of the truth diagonal'),
+      missed: metric('probes/missed', attempt => probesOf(attempt)?.missed_share, undefined,
+        'valid attempts only; per attempt the share of evidenced probes whose ray hit nothing on the submission'),
+      probes: { evaluated: [...probeResults.values()].reduce((sum, item) => sum + (item?.evaluated ?? 0), 0),
+        missed: [...probeResults.values()].reduce((sum, item) => sum + (item?.missed ?? 0), 0),
+        attempts: [...probeResults.values()].filter(Boolean).length },
     },
-    scale_error_pct: metric('scale', attempt => attempt.valid && finite(attempt.report.shape?.scale) ? Math.abs(attempt.report.shape.scale - 1) * 100 : undefined,
+    frame_error: {
+      offset_fraction: diagnostic('frame/offset_fraction', attempt => frameError(attempt)?.offset_fraction, undefined, 'valid attempts only; fraction of the truth diagonal'),
+      offset_m: diagnostic('frame/offset_m', attempt => frameError(attempt)?.offset_m, undefined, 'valid attempts only'),
+      yaw_deg: diagnostic('frame/yaw_deg', attempt => finite(frameError(attempt)?.yaw_deg) ? Math.abs(frameError(attempt).yaw_deg) : undefined, undefined, 'valid attempts only; absolute degrees'),
+    },
+    scale_error_pct: diagnostic('scale', attempt => attempt.valid && finite(attempt.report.shape?.scale) ? Math.abs(attempt.report.shape.scale - 1) * 100 : undefined,
       attempt => attempt.scale_evidence === 'metric', 'valid attempts on metric tasks; |fitted scale - 1| in percent'),
     success: { rate: attempts.length ? valid / attempts.length : null, valid, attempts: attempts.length, basis: 'attempts with a valid score report' },
     status_counts: statuses,
@@ -703,7 +770,8 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
     // has the same columns (a configuration that ran none shows n/a).
     const deltaPairs = variantPairs([...new Set(counted.map(attempt => attempt.variant))]);
     const archetypeIds = [...new Set(counted.map(attempt => attempt.archetype))].sort((p, q) => (p === UNKNOWN_ARCHETYPE) - (q === UNKNOWN_ARCHETYPE) || p.localeCompare(q));
-    const ranked = [...cells].map(([key, attempts]) => cellEntry(key, set, attempts, seed, { deltaPairs, archetypes: archetypeIds }));
+    const categoryIds = detailCategories(counted);
+    const ranked = [...cells].map(([key, attempts]) => cellEntry(key, set, attempts, seed, { deltaPairs, archetypes: archetypeIds, categories: categoryIds }));
     ranked.sort((a, b) => (b.score.mean ?? -Infinity) - (a.score.mean ?? -Infinity) || a.key.localeCompare(b.key));
     // Formal configurations are ranked; reference rows (not in the roster) keep
     // their place in score order for the pairwise orientation but get no rank.
@@ -750,6 +818,10 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
         Object.entries(conflict.values).map(([batch, value]) => batch + ' = ' + value).join('; '));
     for (const warning of warnings) problems.push('set ' + set + ': ' + warning);
     const objectsByArchetype = archetypeIds.map(id => ({ id, objects: new Set(counted.filter(attempt => attempt.archetype === id).map(attempt => attempt.object)).size }));
+    // Which objects have a scored group of each category depends on the
+    // evidence, not on the contestant: counted from the valid reports.
+    const objectsByCategory = categoryIds.map(id => ({ id,
+      objects: new Set(counted.filter(attempt => attempt.valid && finite(categoryScore(attempt.report, id))).map(attempt => attempt.object)).size }));
     sets.push({
       id: set, named: set !== UNNAMED_SET && set !== UNKNOWN_SET,
       description: describeSet(set, new Set(inSet.map(attempt => attempt.task_id)), collected.setFiles),
@@ -759,6 +831,7 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
       variants: VARIANT_ORDER.filter(variant => counted.some(attempt => attempt.variant === variant)),
       variant_pairs: deltaPairs.map(([high, low]) => high + '-' + low),
       archetypes: objectsByArchetype,
+      detail_categories: objectsByCategory,
       tasks: new Set(inSet.map(attempt => attempt.task_id)).size,
       attempts: inSet.length, counted: inSet.filter(attempt => !attempt.excluded).length,
       batches: setBatches.map(batch => batch.id).sort(),
@@ -839,6 +912,10 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
       evidence_deltas: 'every pair of variants of one family present in the set (generated t1-t4 and c1; memory m2, m3; real r2, r4), later minus earlier in ' +
         VARIANT_ORDER.join(' ') + ': per object, mean score on one minus mean score on the other; only objects with both; bootstrap and Student-t intervals over objects',
       archetypes: 'per archetype (objects/<id>/model.json): mean over that archetype\'s objects, same averaging as the score',
+      diagnostics: 'valid attempts only, same averaging as the score. detail_categories: per category of report.detail.categories, 100 x the mean F of its groups. ' +
+        'probe_error: per attempt, the median absolute error of the evidenced probes whose ray hit the submission (cm, and % of the truth diagonal), and the share ' +
+        'of evidenced probes missed. probe_error, frame_error and scale_error_pct also give the median and interquartile range of the per-object values ' +
+        '(a description of spread, not an interval)',
       variance: 'between attempts: pooled SD over tasks with >= 2 counted attempts; between objects: SD of per-object means; paired: SD of per-object differences, ' +
         'from which the half-width of the 95% t interval (resolution) and the true difference detected with 80% power by a two-sided 95% t test, ' +
         'also projected to ' + plannedObjects + ' objects; SD ranges are 95% chi-square intervals (normal noise assumed); fewer than ' + LITTLE_DATA_DF +
