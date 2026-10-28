@@ -1,0 +1,118 @@
+name: test
+
+# The tests that do not need the Mac, on Linux: all of v0, and v1 apart from
+# what runs under macOS Seatbelt (sandbox-exec). Those tests skip themselves
+# here with the reason "macOS only", as do the ones that need Blender or data
+# that lives only in .local/ on the Mac; each job lists what it skipped in its
+# log and its summary. On the Mac, `npm run test:v1` still runs everything.
+#
+# score.test.mjs takes about 13 minutes on one core, so it has a job of its own
+# with a longer timeout. It runs on every push to main, nightly, by hand, and on
+# a pull request only when the pull request changes a scorer file (the files
+# whose hash stamps every report, SCORER_FILES in v1/lib/score/version.mjs),
+# the test or its fixtures.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 19 * * *' # 03:00 in Beijing
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: v0 and v1 (without score)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - id: install
+        run: npm ci --ignore-scripts
+      - name: v0 (npm test)
+        run: >-
+          node --test
+          --test-reporter=spec --test-reporter-destination=stdout
+          --test-reporter=./.github/skipped-tests.mjs --test-reporter-destination=skipped-v0.md
+          test/*.test.mjs
+      - name: v1 (npm run test:v1 without score.test.mjs)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: >-
+          node --test
+          --test-reporter=spec --test-reporter-destination=stdout
+          --test-reporter=./.github/skipped-tests.mjs --test-reporter-destination=skipped-v1.md
+          $(ls v1/test/*.test.mjs | grep -v '/score\.test\.mjs$')
+      - name: List the skipped tests
+        if: ${{ !cancelled() }}
+        run: |
+          for part in v0 v1; do
+            [ -f "skipped-$part.md" ] || continue
+            echo "== $part"
+            cat "skipped-$part.md"
+            { echo "### $part"; echo; cat "skipped-$part.md"; echo; } >> "$GITHUB_STEP_SUMMARY"
+          done
+
+  scorer-changed:
+    name: does the pull request change the scorer?
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - id: check
+        # On a pull request HEAD is its merge into the base branch, so HEAD^1 is the base.
+        run: |
+          git diff --name-only HEAD^1 HEAD > changed.txt
+          node --input-type=module <<'EOF'
+          import { appendFileSync, readFileSync } from 'node:fs';
+          import { SCORER_FILES } from './v1/lib/score/version.mjs';
+          const also = ['v1/test/score.test.mjs', 'package.json', 'package-lock.json', '.github/workflows/test.yml', '.github/skipped-tests.mjs'];
+          const hits = readFileSync('changed.txt', 'utf8').split('\n')
+            .filter(file => SCORER_FILES.includes(file) || also.includes(file) || file.startsWith('v1/fixtures/'));
+          console.log(hits.length ? 'score.test.mjs runs for: ' + hits.join(', ') : 'No scorer file changed; score.test.mjs is left to main and the nightly run.');
+          appendFileSync(process.env.GITHUB_OUTPUT, 'changed=' + (hits.length > 0) + '\n');
+          EOF
+
+  score:
+    name: v1 score.test.mjs
+    needs: scorer-changed
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.scorer-changed.outputs.changed == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: v1 score.test.mjs
+        run: >-
+          node --test
+          --test-reporter=spec --test-reporter-destination=stdout
+          --test-reporter=./.github/skipped-tests.mjs --test-reporter-destination=skipped-score.md
+          v1/test/score.test.mjs
+      - name: List the skipped tests
+        if: ${{ !cancelled() }}
+        run: |
+          [ -f skipped-score.md ] || exit 0
+          cat skipped-score.md
+          { echo "### score"; echo; cat skipped-score.md; } >> "$GITHUB_STEP_SUMMARY"

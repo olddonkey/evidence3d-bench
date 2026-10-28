@@ -19,6 +19,11 @@ import { redactor } from '../lib/runner/api/http.mjs';
 // The API loop on its own, against the mocks: how each HTTP failure ends a
 // session, the budget, the key. The runner-level consequences (holds, stops,
 // re-runs) are the existing machinery, exercised in runner-api.test.mjs.
+
+// The loop runs its shell under /usr/bin/sandbox-exec, which only macOS has;
+// elsewhere the sessions are skipped and only the pure shapes are checked.
+const MACOS_ONLY = process.platform !== 'darwin' && 'macOS only: needs Seatbelt (/usr/bin/sandbox-exec)';
+
 const FAST_RETRY = { backoff_ms: [20, 20, 20], rate_wait_max_ms: 1500, rate_wait_total_ms: 3000, rate_default_ms: 50 };
 
 async function workspace(t) {
@@ -59,7 +64,7 @@ async function runLoop(t, { protocol = 'anthropic', script, budget = { tokens: 1
 const tool = (name, args) => ({ name, args });
 
 for (const protocol of ['anthropic', 'openai']) {
-  test(`api-${protocol}: each HTTP failure ends the session as the classification table says`, async t => {
+  test(`api-${protocol}: each HTTP failure ends the session as the classification table says`, { skip: MACOS_ONLY }, async t => {
     const cases = [
       // [script, expected infra reason or null, expected status, note]
       [[{ status: 529 }, { status: 529 }, { status: 529 }, { status: 529 }], 'overloaded', 'infra_error', '529 four times: three retries, then infra'],
@@ -100,7 +105,7 @@ for (const protocol of ['anthropic', 'openai']) {
     }
   });
 
-  test(`api-${protocol}: the budget notice comes once at 85 %, and an exhausted budget ends the session as budget_exhausted`, async t => {
+  test(`api-${protocol}: the budget notice comes once at 85 %, and an exhausted budget ends the session as budget_exhausted`, { skip: MACOS_ONLY }, async t => {
     // Tokens: every reply costs 1200 (1000 in + 200 out) of 10000 (the
     // smallest budget prepare accepts): the 8th reply crosses 85 % (9600), so
     // the notice goes with its tool results; the 9th crosses the budget, its
@@ -132,7 +137,7 @@ for (const protocol of ['anthropic', 'openai']) {
     assert.deepEqual(calls.events.filter(event => event.type === 'notice').map(event => event.calls_left), [0]);
   });
 
-  test(`api-${protocol}: a reply cut off at the output limit is continued and its calls are not run; bad calls come back as errors`, async t => {
+  test(`api-${protocol}: a reply cut off at the output limit is continued and its calls are not run; bad calls come back as errors`, { skip: MACOS_ONLY }, async t => {
     const run = await runLoop(t, { protocol, script: [
       { cut_off: true, tools: [tool('write_file', { path: 'output/half.txt', content: 'x' })] },
       { cut_off: true, text: 'I was writing' },
@@ -149,7 +154,7 @@ for (const protocol of ['anthropic', 'openai']) {
     assert.deepEqual(run.mock.violations, []);
   });
 
-  test(`api-${protocol}: the key is never printed, even when the API echoes it back`, async t => {
+  test(`api-${protocol}: the key is never printed, even when the API echoes it back`, { skip: MACOS_ONLY }, async t => {
     // A key of no recognisable shape: only the exact-key redaction can catch it.
     const run = await runLoop(t, { protocol, script: [{ status: 401, echo_key: true }], key: 'plain-key-' + randomBytes(10).toString('hex') });
     assert.equal(run.infra.reason, 'auth');
