@@ -37,6 +37,12 @@ the mean of the shape score and the detail score. Small features are judged
 separately at their own scale, named dimensions are measured with rays,
 colours are compared, and error pictures are drawn.
 
+Contestants are told this in the task prompt's "How it is scored" paragraph
+(version 2, `v1/lib/pack.mjs`; sets built before it have version 1, written for
+1.0.0). When a definition here changes, give the prompt a new version for the sets
+built after the change: `v1/test/task-prompt.test.mjs` fails until the latest
+version names the current `SCORER_VERSION`.
+
 ## Every number in the report
 
 **`valid`, `error`, `score`.** `score` = (`shape_score` + `detail.score`) / 2,

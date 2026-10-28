@@ -16,7 +16,7 @@ import { randomBytes, randomInt } from 'node:crypto';
 import { readJSON, writeJSON } from '../../lib/io.mjs';
 import { layout } from '../lib/contract.mjs';
 import { modelToGLB } from '../lib/model.mjs';
-import { buildObject, buildTask, truthGLB } from '../lib/pack.mjs';
+import { buildObject, buildTask, truthGLB, TASK_PROMPT, setPromptVersion } from '../lib/pack.mjs';
 import { LANDMARKS, LANDMARKS_VERSION, REMEMBERED, generateLandmark } from '../lib/generator/landmarks/index.mjs';
 
 const MEMORY_VARIANTS = ['m2', 'm3'];
@@ -67,11 +67,12 @@ try {
     for (let i = objects.length - 1; i > 0; i--) { const j = randomInt(0, i + 1); [objects[i], objects[j]] = [objects[j], objects[i]]; }
     await mkdir(dirname(file), { recursive: true });
     await writeFile(file, JSON.stringify({ name, private: true, kind: 'memory', created_at: new Date().toISOString(), generator: LANDMARKS_VERSION,
-      variants: MEMORY_VARIANTS, objects }, null, 2) + '\n', { flag: 'wx' });
+      task_prompt: TASK_PROMPT, variants: MEMORY_VARIANTS, objects }, null, 2) + '\n', { flag: 'wx' });
     print({ set: name, file, objects: objects.length, note: 'private: keep this file out of version control' });
   } else if (command === 'build-set') {
     const { set, objects } = await readSet(), variants = options.variants ? list(options.variants) : set.variants ?? MEMORY_VARIANTS;
-    const paths = layout(dataRoot), built = [];
+    // The set file decides the prompt's wording (pack.mjs; a file without task_prompt: 1).
+    const paths = layout(dataRoot), built = [], promptVersion = setPromptVersion(set);
     for (const entry of objects) {
       // Resumable: buildObject removes a half-built object, so a directory with evidence.json is complete.
       let triangles = null, seconds = null;
@@ -84,13 +85,13 @@ try {
       }
       const tasks = [];
       for (const variant of variants) {
-        if (!(await exists(join(paths.task(entry.id + '-' + variant), 'task.json')))) await buildTask({ dataRoot, objectId: entry.id, variant, set: set.name });
+        if (!(await exists(join(paths.task(entry.id + '-' + variant), 'task.json')))) await buildTask({ dataRoot, objectId: entry.id, variant, set: set.name, promptVersion });
         tasks.push(entry.id + '-' + variant);
       }
       built.push({ object: entry.id, triangles, build_seconds: seconds, tasks });
       console.error('✓ ' + entry.id + ' (' + tasks.length + ' tasks' + (seconds === null ? '' : ', ' + seconds + ' s') + ')');
     }
-    await writeJSON(join(dataRoot, 'sets', (set.name ?? 'set') + '.built.json'), { name: set.name, built_at: new Date().toISOString(), built });
+    await writeJSON(join(dataRoot, 'sets', (set.name ?? 'set') + '.built.json'), { name: set.name, built_at: new Date().toISOString(), task_prompt: promptVersion, built });
     print(built);
   } else if (command === 'check') {
     // For every object and variant: the truth as a submission (about 100, every

@@ -90,7 +90,7 @@ function pngSize(bytes) {
 
 // Builds the object and its real-variant tasks. Objects are immutable: an
 // existing object directory is refused, and a half-built one is removed.
-export async function buildRealObject({ source, sourcesRoot, dataRoot, set, id, variants = REAL_VARIANTS, log = () => {} }) {
+export async function buildRealObject({ source, sourcesRoot, dataRoot, set, id, variants = REAL_VARIANTS, promptVersion, log = () => {} }) {
   const authoring = await loadAuthoring(source), model = authoring.model;
   // The object id is public (it names the task packs), so it is neutral; the
   // model's own id, which may name the building, stays private (verifyTasks
@@ -136,7 +136,7 @@ export async function buildRealObject({ source, sourcesRoot, dataRoot, set, id, 
     log('object ' + objectId + ': ' + object.items.length + ' evidence items, ' + object.triangles + ' triangles');
     const tasks = [];
     for (const variant of variants) {
-      tasks.push(await buildTask({ dataRoot, objectId, variant, set }));
+      tasks.push(await buildTask({ dataRoot, objectId, variant, set, promptVersion }));
       log('task ' + tasks.at(-1).task + ': ' + tasks.at(-1).inputs + ' inputs');
     }
     // The packs as a contestant sees them must not name the brand or address.

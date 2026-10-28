@@ -190,6 +190,20 @@ real buildings — "…Do not rely on knowing this or a similar real building. T
 photographs are real: expect lens distortion, people, vehicles and signage." The
 target-state date is the date of the newest photograph among the inputs.
 
+The prompt ends with a "How it is scored" paragraph, which is versioned
+(`TASK_PROMPT_VERSIONS` in `v1/lib/pack.mjs`). The prompt is part of `task.json` and
+so of the task hash, so a set keeps the wording it was built with: `new-set` writes
+the current version into the set file as `task_prompt`, and `build-set` builds with
+the version the set file names, 1 when it names none. Version 1 is the wording of
+every set built before 2026-10-28 (dev, test-2026-10, the memory and real sets),
+written for scorer 1.0.0: "overall shape counts most", "within a few percent".
+Version 2 states what scorer 1.1.0 computes (`v1/lib/score/README.md`): fit about
+the vertical axis only, reported not punished; score = (shape + detail) / 2; shape
+F at 0.25 / 0.5 / 1 % of the diagonal; detail by category at 0.6 × each group's
+feature size; named dimensions, contested probes and colours reported but not
+scored. A change of wording is a new version, never an edit of an old one
+(`v1/test/task-prompt.test.mjs` pins both).
+
 ## 8. Module contracts
 
 Each module owns its paths and exports exactly these entry points.

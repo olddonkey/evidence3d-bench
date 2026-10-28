@@ -167,7 +167,9 @@ node v1/scripts/landmarks.mjs check     --set .local/v1/sets/memory-2026-10.json
 
 `new-set` draws one seed per landmark from the OS random source and gives each
 object an opaque id; the file lives under the git-ignored data root and must
-never be committed. `build-set` is resumable (an object with `evidence.json` is
+never be committed, and names the task prompt's wording (`task_prompt`, see
+`v1/lib/pack.mjs`; a set file without it, such as memory-2026-10, gets version
+1). `build-set` is resumable (an object with `evidence.json` is
 complete) and writes `<data>/sets/<name>.built.json` with the build time per
 object. `check` scores, for every object and variant, the truth (must reach 98
 with every contested probe closer to the primary), the published model (must be

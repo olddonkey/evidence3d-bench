@@ -5,7 +5,7 @@ import { readFile, writeFile, mkdir, readdir, access } from 'node:fs/promises';
 import { randomBytes, randomInt } from 'node:crypto';
 import { readJSON, writeJSON } from '../lib/io.mjs';
 import { layout, VARIANTS, GENERATED_VARIANTS } from './lib/contract.mjs';
-import { buildObject, buildTask, verifyTasks, truthGLB } from './lib/pack.mjs';
+import { buildObject, buildTask, verifyTasks, truthGLB, TASK_PROMPT, setPromptVersion } from './lib/pack.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const args = process.argv.slice(2), command = args.shift() || 'help', options = {};
@@ -31,7 +31,8 @@ try {
     print(await buildObject({ dataRoot, archetype: need('archetype'), seed: Number(need('seed')), id: options.id,
       blender: options.blender, quality: options.quality, log: message => console.error('· ' + message) }));
   } else if (command === 'build-task') {
-    print(await buildTask({ dataRoot, objectId: need('object'), variant: need('variant') }));
+    const promptVersion = options['task-prompt'] === undefined ? TASK_PROMPT : Number(options['task-prompt']);
+    print(await buildTask({ dataRoot, objectId: need('object'), variant: need('variant'), promptVersion }));
   } else if (command === 'new-set') {
     // A test set is private because its seeds are. They are drawn from the OS
     // random source, objects get opaque ids, and the file lives under the data
@@ -51,13 +52,16 @@ try {
     // Shuffle so that ids and order say nothing about the archetype.
     for (let i = objects.length - 1; i > 0; i--) { const j = randomInt(0, i + 1); [objects[i], objects[j]] = [objects[j], objects[i]]; }
     await mkdir(dirname(file), { recursive: true });
-    await writeFile(file, JSON.stringify({ name, private: true, created_at: new Date().toISOString(), variants: GENERATED_VARIANTS, objects }, null, 2) + '\n', { flag: 'wx' });
+    // task_prompt: the scoring paragraph's wording, fixed for the set's lifetime (pack.mjs).
+    await writeFile(file, JSON.stringify({ name, private: true, created_at: new Date().toISOString(), task_prompt: TASK_PROMPT, variants: GENERATED_VARIANTS, objects }, null, 2) + '\n', { flag: 'wx' });
     print({ set: name, file, objects: objects.length, archetypes: archetypes.length, note: 'private: keep this file out of version control' });
   } else if (command === 'build-set') {
     // A set file lists objects by archetype and seed. Keep test-set files out of
     // version control: the seeds are what keeps a test set private.
     const set = await readJSON(resolve(need('set'))), variants = options.variants ? list(options.variants) : set.variants ?? GENERATED_VARIANTS;
-    const built = [];
+    // The set file decides the prompt's wording (a file without task_prompt: 1), so a
+    // resumed or rebuilt set never mixes wordings.
+    const built = [], promptVersion = setPromptVersion(set);
     // Resumable: a long build interrupted half way continues where it stopped.
     // buildObject removes a half-built object, so a directory with evidence.json is complete.
     const exists = async path => access(path).then(() => true, () => false), paths = layout(dataRoot);
@@ -72,13 +76,13 @@ try {
       }
       const tasks = [];
       for (const variant of variants) {
-        if (!(await exists(join(paths.task(objectId + '-' + variant), 'task.json')))) await buildTask({ dataRoot, objectId, variant, set: set.name });
+        if (!(await exists(join(paths.task(objectId + '-' + variant), 'task.json')))) await buildTask({ dataRoot, objectId, variant, set: set.name, promptVersion });
         tasks.push(objectId + '-' + variant);
       }
       built.push({ object: objectId, triangles, tasks });
       console.error('✓ ' + objectId + ' (' + tasks.length + ' tasks)');
     }
-    await writeJSON(join(dataRoot, 'sets', (set.name ?? 'set') + '.built.json'), { name: set.name, built_at: new Date().toISOString(), built });
+    await writeJSON(join(dataRoot, 'sets', (set.name ?? 'set') + '.built.json'), { name: set.name, built_at: new Date().toISOString(), task_prompt: promptVersion, built });
     print(built);
   } else if (command === 'verify') {
     const tasks = await verifyTasks(dataRoot);
@@ -170,7 +174,7 @@ try {
     console.log([
       'Evidence3D v1 — hidden-truth reconstruction benchmark', '',
       '  node v1/cli.mjs build-object --archetype NAME --seed N [--quality draft|final]',
-      '  node v1/cli.mjs build-task   --object ID --variant ' + Object.keys(VARIANTS).join('|'),
+      '  node v1/cli.mjs build-task   --object ID --variant ' + Object.keys(VARIANTS).join('|') + ' [--task-prompt N]',
       '  node v1/cli.mjs new-set      --name NAME [--per-archetype 3]      (private seeds, opaque ids, under the data root)',
       '  node v1/cli.mjs build-set    --set FILE [--variants t1,t2,...]',
       '  node v1/cli.mjs verify',

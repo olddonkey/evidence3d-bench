@@ -118,11 +118,68 @@ function targetDate(inputs) {
   return dates.at(-1) ?? DATES.photos;
 }
 
-export function taskPrompt(model, variant, inputs) {
-  const spec = VARIANTS[variant], date = targetDate(inputs);
-  const scale = spec.scale === 'metric'
+// The task prompt's "How it is scored" paragraph, by version. The prompt is in
+// task.json and so in the task hash: a set keeps the wording it was built with.
+// A set file names its version as `task_prompt`; one without it (every set made
+// before version 2: dev, test-2026-10, the memory sets) means 1, so building or
+// resuming such a set again writes the same packs byte for byte. New sets get
+// TASK_PROMPT.
+//  1: the first sets' wording, written for scorer 1.0.0 (1 / 2 / 5 %): "overall
+//     shape counts most ... within a few percent". Scorer 1.1.0 weighs shape and
+//     detail equally at 0.25 / 0.5 / 1 %, so under it contestants underrate detail.
+//  2: what scorer 1.1.0 computes (v1/lib/score/README.md), sentence by sentence.
+export const TASK_PROMPT_VERSIONS = [1, 2];
+export const TASK_PROMPT = 2;
+// The scorer each version describes. The latest must name the current
+// SCORER_VERSION (a test checks it): a scorer whose numbers change needs a new
+// wording for the sets built after it, never an edit of an old one.
+export const TASK_PROMPT_SCORER = { 1: '1.0.0', 2: '1.1.0' };
+
+// The version a set file asks for (absent: 1, the version before the field existed).
+export function setPromptVersion(set) {
+  const version = set?.task_prompt ?? 1;
+  if (!TASK_PROMPT_VERSIONS.includes(version)) throw new Error('Set ' + (set?.name ?? '') + ' names unknown task_prompt ' + JSON.stringify(set.task_prompt));
+  return version;
+}
+
+function scoringText(version, metric) {
+  const scale = metric
     ? 'The evidence fixes absolute size, so your model is compared at the size you submit.'
     : 'None of the supplied evidence fixes absolute size, so your model is compared up to one uniform scale factor: proportions matter, absolute size does not.';
+  if (version === 1) {
+    return 'How it is scored: your GLB is compared with a hidden reference model. Overall shape counts most (surface agreement within a few percent of the object size); ' +
+      'small features — openings, frames, canopies, structural members — are scored separately, as are named dimensions such as heights and wall positions. ' +
+      'A small error in where you put the origin or which way the model faces is fitted out and reported, not punished. ' + scale + ' ' +
+      'Surfaces that no supplied evidence shows are not scored: complete them plausibly. Anything that is not part of the object ' +
+      '(ground, vegetation, vehicles, neighbouring buildings) counts against you. Solid base colours are compared as a secondary measure; textures are ignored.';
+  }
+  if (version !== 2) throw new Error('Unknown task prompt version ' + version);
+  return [
+    'How it is scored: your GLB is compared with a hidden reference model.',
+    'It is first fitted to the reference: turned about the vertical axis' + (metric ? ' and moved' : ', moved and scaled uniformly') + ' to match it as well as possible.',
+    scale,
+    'That fit is reported, not punished, so a small error in where you put the origin or which way the model faces costs nothing; ' +
+      'it turns the model about the vertical axis only, so a wrong up axis or a mirrored model is not fitted out.',
+    'The score is the mean of a shape score and a detail score, each out of 100: the two count equally. ' +
+      'Both compare only the outer surface of each model, what can be seen from outside.',
+    'Shape score: at each of three tolerances, 0.25 %, 0.5 % and 1 % of the reference\'s bounding-box diagonal, precision is the share of your model\'s surface ' +
+      'within that distance of the reference surface, recall the share of the reference surface within that distance of yours, and F = 2PR / (P + R); ' +
+      'the shape score is 100 × the mean of the three F values.',
+    'Detail score: the reference is divided into groups of parts in categories such as main walls, roof, openings, entrance, ornament, attachments and structural members. ' +
+      'Each group is judged on its own, after a small local shift, at a tolerance of 0.6 × its feature size (a few centimetres for window frames), ' +
+      'and a surface matches only if it also faces the same way (within 45°). The detail score is 100 × the mean over categories of the mean F of their groups, ' +
+      'so every category counts the same however small its parts. A group the evidence shows less than half of is not scored; if no group is scored, the score is the shape score alone.',
+    'Only what the supplied evidence shows is scored: reference surfaces that no evidence shows do not count, so complete them plausibly. ' +
+      'Anything that is not part of the object (ground, vegetation, vehicles, neighbouring buildings) counts against you wherever the evidence shows that place to be empty.',
+    'Named dimensions such as heights and wall positions are measured on the fitted model and reported but do not enter the score; ' +
+      'on some tasks the report also says whether they follow the target state or another state of the object. ' +
+      'Solid base colours are compared and reported but do not enter the score; textures are ignored.',
+    'A GLB that cannot be read, breaks the output rules for the model file, exceeds the budget or has no visible surface scores 0.',
+  ].join(' ');
+}
+
+export function taskPrompt(model, variant, inputs, version = TASK_PROMPT) {
+  const spec = VARIANTS[variant], date = targetDate(inputs);
   // The evidence rule, worded for what the contestant may know about the object.
   const rule = spec.memory
     ? 'Use only this evidence, even where it disagrees with what you know or remember about this structure. The surveyed object is what is scored, not published figures.'
@@ -136,18 +193,17 @@ export function taskPrompt(model, variant, inputs) {
     'Frame: metres, right-handed, +Y up, ground at y = 0. ' + model.frame.front + ' ' + model.frame.origin,
     'Evidence (' + inputs.length + ' item' + (inputs.length === 1 ? '' : 's') + '): ' + inputs.map(i => i.path.replace('inputs/', '') + ' — ' + i.description + ' (' + i.captured_at + ')').join('; ') + '.',
     rule,
-    'How it is scored: your GLB is compared with a hidden reference model. Overall shape counts most (surface agreement within a few percent of the object size); ' +
-      'small features — openings, frames, canopies, structural members — are scored separately, as are named dimensions such as heights and wall positions. ' +
-      'A small error in where you put the origin or which way the model faces is fitted out and reported, not punished. ' + scale + ' ' +
-      'Surfaces that no supplied evidence shows are not scored: complete them plausibly. Anything that is not part of the object ' +
-      '(ground, vegetation, vehicles, neighbouring buildings) counts against you. Solid base colours are compared as a secondary measure; textures are ignored.',
+    scoringText(version, spec.scale === 'metric'),
   ].filter(Boolean).join('\n\n');
 }
 
-// Object + variant -> public task pack and private truth record.
-export async function buildTask({ dataRoot, objectId, variant, set }) {
+// Object + variant -> public task pack and private truth record. promptVersion:
+// the scoring paragraph's wording (TASK_PROMPT_VERSIONS); a set's builder passes
+// setPromptVersion(set file).
+export async function buildTask({ dataRoot, objectId, variant, set, promptVersion = TASK_PROMPT }) {
   const spec = VARIANTS[variant];
   if (!spec) throw new Error('Unknown variant ' + variant);
+  if (!TASK_PROMPT_VERSIONS.includes(promptVersion)) throw new Error('Unknown task prompt version ' + promptVersion);
   const paths = layout(dataRoot), objectDir = paths.object(objectId), evidenceDir = join(objectDir, 'evidence');
   const model = validateModel(await readJSON(join(objectDir, 'model.json')));
   const evidence = await readJSON(join(evidenceDir, 'evidence.json'));
@@ -176,7 +232,7 @@ export async function buildTask({ dataRoot, objectId, variant, set }) {
       description: item.description, sha256: item.sha256, bytes: item.bytes });
   }
   const task = validateTask({
-    schema: TASK_SCHEMA, id: taskId, title: model.title, variant, prompt: taskPrompt(model, variant, inputs),
+    schema: TASK_SCHEMA, id: taskId, title: model.title, variant, prompt: taskPrompt(model, variant, inputs, promptVersion),
     target_state: 'The object as it stood in ' + targetDate(inputs) + ', the date of the photographs.',
     frame: { unit: 'metre', up: '+Y', origin: model.frame.origin, front: model.frame.front },
     scale_evidence: spec.scale, inputs,
