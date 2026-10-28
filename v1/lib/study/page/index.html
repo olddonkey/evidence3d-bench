@@ -11,7 +11,7 @@
 <header>
   <div class="top">
     <p class="instruction">同一道题的参考模型和两份提交。哪一份的几何更接近参考？忽略颜色和材质。</p>
-    <span id="progress"></span>
+    <span class="who"><span id="rater"></span><button id="change-rater" class="link" type="button" hidden>更换</button><span id="progress"></span></span>
   </div>
   <p id="task" class="task"></p>
 </header>
@@ -35,6 +35,18 @@
     <figcaption id="zoom-caption"></figcaption>
   </figure>
   <p class="zoom-hint">↑ ↓ 切换 A／参考／B　　← → 切换视角　　Esc 或点击关闭</p>
+</div>
+<div id="ask" class="ask" hidden>
+  <form id="ask-form" class="ask-box" novalidate>
+    <label for="ask-name">请输入你的名字，用来区分不同评审者的选择。</label>
+    <p class="ask-hint">只用英文字母和数字（1 到 32 个），例如 zhangsan。这个浏览器会记住它。</p>
+    <input id="ask-name" name="name" type="text" maxlength="32" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <p id="ask-error" class="status error" role="alert"></p>
+    <div class="ask-buttons">
+      <button id="ask-cancel" type="button" hidden>取消</button>
+      <button type="submit">开始</button>
+    </div>
+  </form>
 </div>
 </body>
 </html>
