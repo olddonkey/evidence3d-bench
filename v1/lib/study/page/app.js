@@ -1,4 +1,4 @@
-import { KEY_CHOICES, LEGACY_RATER, latestChoices, votedTrail, nextUnrated, afterCurrent, progress, elapsed, raterId } from './state.js';
+import { KEY_CHOICES, LEGACY_RATER, latestChoices, votedTrail, nextUnrated, afterCurrent, progress, elapsed, raterId, pauseClock } from './state.js';
 
 // The rating page. Asks the rater's name on the first visit (kept in this
 // browser), reads pairs.json and that rater's votes so far, shows the first
@@ -18,8 +18,11 @@ const RATER_STORAGE = 'e3d-study-rater';
 
 const state = {
   pairs: [], views: [], latest: new Map(), trail: [], ahead: [], current: -1,
-  shownAt: 0, hiddenMs: 0, hiddenSince: null, busy: false, zoom: null, cells: new Map(), rater: null, asking: null,
+  shownAt: 0, busy: false, zoom: null, cells: new Map(), rater: null, asking: null,
 };
+// What of the time on a pair the rater was not looking at it (hidden page, name form).
+const paused = pauseClock();
+if (document.hidden) paused.pause('hidden', performance.now());
 const $ = id => document.getElementById(id);
 const choiceButtons = () => [...document.querySelectorAll('button.choice')];
 
@@ -113,8 +116,7 @@ function show(index) {
   const chosen = state.latest.get(pair.id);
   setStatus(chosen ? '这一对已选“' + CHOICE_TEXT[chosen] + '”。再选一次即修改，按“下一对”保持不变。' : '');
   state.shownAt = performance.now();
-  state.hiddenMs = 0;
-  state.hiddenSince = document.hidden ? state.shownAt : null;
+  paused.restart(state.shownAt);
   updateControls();
   preload(nextUnrated(state.pairs, state.latest, index));
 }
@@ -124,7 +126,7 @@ async function vote(choice) {
   if (!pair || state.busy || state.zoom || state.asking || !state.rater) return;
   if (document.querySelector('.cell img.loading')) { setStatus('图片还在加载，请稍候再选。'); return; }
   const now = performance.now(), rater = state.rater;
-  const hidden = state.hiddenMs + (state.hiddenSince === null ? 0 : now - state.hiddenSince);
+  const hidden = paused.excluded(now);
   // busy also keeps 更换 off until the vote is saved, so the vote and its result stay this rater's.
   state.busy = true;
   updateControls();
@@ -203,12 +205,12 @@ function storeRater(id) {
 function askRater({ current = '', cancellable = false } = {}) {
   closeZoom();
   return new Promise(resolve => {
-    const opened = performance.now();
+    // The time the form is open does not count as time spent on the pair.
+    paused.pause('asking', performance.now());
     const finish = id => {
       $('ask').hidden = true;
       state.asking = null;
-      // The time the form was open does not count as time spent on the pair.
-      state.hiddenMs += performance.now() - opened;
+      paused.resume('asking', performance.now());
       resolve(id);
     };
     state.asking = { cancel: cancellable ? () => finish(null) : null };
@@ -276,9 +278,8 @@ document.addEventListener('keydown', event => {
   if (choice) { event.preventDefault(); vote(choice); }
 });
 document.addEventListener('visibilitychange', () => {
-  const now = performance.now();
-  if (document.hidden) state.hiddenSince = now;
-  else if (state.hiddenSince !== null) { state.hiddenMs += now - state.hiddenSince; state.hiddenSince = null; }
+  if (document.hidden) paused.pause('hidden', performance.now());
+  else paused.resume('hidden', performance.now());
 });
 $('zoom').addEventListener('click', closeZoom);
 $('back').addEventListener('click', back);

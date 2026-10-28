@@ -59,8 +59,34 @@ export function progress(pairs, latest) {
   return { rated: pairs.filter(pair => latest.has(pair.id)).length, total: pairs.length };
 }
 
+// Time on a pair that does not count as looking at it: while the page is
+// hidden (another tab, a covered window) or the name form is open. The reasons
+// can overlap (the form open, then another tab); their union counts once.
+// Times are the caller's clock (performance.now() on the page).
+export function pauseClock() {
+  const reasons = new Set();
+  let since = null, total = 0;
+  return {
+    pause(reason, now) {
+      if (!reasons.size) since = now;
+      reasons.add(reason);
+    },
+    resume(reason, now) {
+      if (!reasons.delete(reason) || reasons.size) return;
+      total += now - since;
+      since = null;
+    },
+    // A new pair is shown at `now`: count afresh; a reason still in force goes on counting.
+    restart(now) {
+      total = 0;
+      since = reasons.size ? now : null;
+    },
+    excluded(now) { return total + (since === null ? 0 : now - since); },
+  };
+}
+
 // Time on a pair: all of it (ms), and the part during which the page was
-// hidden (another tab, a covered window), so the analysis can leave that out.
+// hidden or the name form open (pauseClock), so the analysis can leave that out.
 export function elapsed(shownAt, now, hiddenMs) {
   const ms = Math.max(0, Math.round(now - shownAt));
   return { ms, hidden_ms: Math.min(ms, Math.max(0, Math.round(hiddenMs))) };

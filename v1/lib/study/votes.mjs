@@ -60,31 +60,48 @@ const identity = vote => JSON.stringify([vote.rater, vote.pair, vote.choice, vot
 
 // Merges the files' votes into one list. A file's lines keep their order: they
 // were appended in the order cast, whatever the clock said (it can step back),
-// so a revision stays after the vote it revises. Between files the next vote is
-// the earliest file head by the server's time stamp (a missing one counts as
-// earliest; the earlier file on a tie).
+// so a revision stays after the vote it revises. The same line in several files
+// (a log copied, whole or in part) is one vote that keeps every file's order
+// around it. Otherwise the next vote is the earliest by the server's time stamp
+// (a missing one counts as earliest), then the earlier file and line. Files
+// whose orders contradict each other (a cycle) give way to the time stamp.
+// Returns the votes and how many lines were copies.
 function mergeFiles(lists) {
-  const next = lists.map(() => 0), merged = [];
-  for (;;) {
-    let pick = -1;
-    for (let i = 0; i < lists.length; i++) {
-      if (next[i] >= lists[i].length) continue;
-      if (pick < 0 || compareText(lists[i][next[i]].at ?? '', lists[pick][next[pick]].at ?? '') < 0) pick = i;
-    }
-    if (pick < 0) return merged;
-    merged.push(lists[pick][next[pick]++]);
+  const nodes = new Map();
+  let copies = 0;
+  lists.forEach((list, file) => {
+    let previous = null;
+    list.forEach((vote, line) => {
+      const id = identity(vote);
+      let node = nodes.get(id);
+      if (node) copies++;
+      else nodes.set(id, node = { vote, at: vote.at ?? '', file, line, waiting: 0, next: new Set() });
+      if (previous && previous !== node && !previous.next.has(node)) { previous.next.add(node); node.waiting++; }
+      previous = node;
+    });
+  });
+  const earlier = (p, q) => compareText(p.at, q.at) || p.file - q.file || p.line - q.line;
+  const left = new Set(nodes.values()), ready = new Set([...left].filter(node => !node.waiting)), merged = [];
+  while (left.size) {
+    let pick = null;
+    for (const node of ready.size ? ready : left) if (!pick || earlier(node, pick) < 0) pick = node;
+    ready.delete(pick);
+    left.delete(pick);
+    merged.push(pick.vote);
+    for (const node of pick.next) if (left.has(node) && --node.waiting === 0) ready.add(node);
   }
+  return { votes: merged, copies };
 }
 
 // Every vote of a study directory, each file in its own line order, files
 // interleaved by time (see mergeFiles). A line that appears in two files (the
-// same vote copied twice) counts once, where it first appears.
+// same vote copied twice) counts once.
 //   legacyRater: whose the votes in votes.jsonl without a rater are (default r0).
 export async function readVoteFiles(studyDir, { legacyRater = LEGACY_RATER } = {}) {
   if (legacyRater !== LEGACY_RATER && !isRater(legacyRater)) throw new Error('legacy rater must be letters and digits (not r0): ' + JSON.stringify(legacyRater));
   const { files, ignored } = await voteFiles(studyDir);
-  const lists = [], summaries = [], seen = new Set();
-  let malformed = 0, duplicates = 0;
+  const lists = [], summaries = [];
+  let malformed = 0;
   for (const { file, rater } of files) {
     let text;
     try { text = await readFile(join(studyDir, file), 'utf8'); } catch (error) {
@@ -95,14 +112,8 @@ export async function readVoteFiles(studyDir, { legacyRater = LEGACY_RATER } = {
     malformed += parsed.malformed;
     summaries.push({ file, lines: parsed.votes.length + parsed.malformed, valid_lines: parsed.votes.length, malformed_lines: parsed.malformed, unnamed_lines: parsed.unnamed,
       raters: [...new Set(parsed.votes.map(vote => vote.rater))].sort() });
-    const list = [];
-    for (const vote of parsed.votes) {
-      const id = identity(vote);
-      if (seen.has(id)) { duplicates++; continue; }
-      seen.add(id);
-      list.push(vote);
-    }
-    lists.push(list);
+    lists.push(parsed.votes);
   }
-  return { votes: mergeFiles(lists), malformed, duplicates, files: summaries, ignored, legacy_rater: legacyRater };
+  const { votes, copies } = mergeFiles(lists);
+  return { votes, malformed, duplicates: copies, files: summaries, ignored, legacy_rater: legacyRater };
 }

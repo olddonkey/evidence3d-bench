@@ -4,6 +4,7 @@ import { request } from 'node:http';
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { decodePNG, encodePNG } from '../lib/png.mjs';
 import { soupFromModel } from '../lib/soup.mjs';
@@ -15,7 +16,7 @@ import { prepareStudy, exportStudy, studyDir } from '../lib/study/index.mjs';
 import { startStudyServer } from '../lib/study/server.mjs';
 import { parseVotes, readVoteFiles } from '../lib/study/votes.mjs';
 import { analyzeStudy, analysisMarkdown, wilson, cohenKappa, fleissKappa, writeAnalysis } from '../lib/study/analyze.mjs';
-import { KEY_CHOICES, LEGACY_RATER, latestChoices, votedTrail, nextUnrated, afterCurrent, progress, elapsed, raterId, isRater } from '../lib/study/page/state.js';
+import { KEY_CHOICES, LEGACY_RATER, latestChoices, votedTrail, nextUnrated, afterCurrent, progress, elapsed, raterId, isRater, pauseClock } from '../lib/study/page/state.js';
 
 const PAGE = fileURLToPath(new URL('../lib/study/page/', import.meta.url));
 const near = (actual, expected, tolerance = 5e-4) => assert.ok(Math.abs(actual - expected) <= tolerance, actual + ' is not within ' + tolerance + ' of ' + expected);
@@ -245,6 +246,27 @@ test('page logic: keys, last vote per pair, resume at the first unrated pair, tr
   assert.equal(isRater('r0'), false);
   assert.equal(isRater('Ann'), false);
   assert.equal(isRater('ann'), true);
+  // Time not spent looking: the union of the page hidden and the name form open, each moment once.
+  const clock = pauseClock();
+  clock.restart(0);
+  clock.pause('asking', 10);
+  clock.pause('hidden', 12);   // another tab while the form is open
+  clock.resume('hidden', 15);
+  clock.resume('asking', 20);  // form open 10-20, hidden 12-15 inside it: 10, not 13
+  assert.equal(clock.excluded(30), 10);
+  clock.pause('hidden', 40);
+  assert.equal(clock.excluded(45), 15);
+  clock.pause('asking', 42);
+  clock.resume('hidden', 50);  // hidden 40-50 and form 42-60 overlap: 20
+  clock.resume('asking', 60);
+  assert.equal(clock.excluded(70), 30);
+  clock.resume('asking', 80);  // not paused: nothing changes
+  assert.equal(clock.excluded(90), 30);
+  clock.pause('hidden', 100);
+  clock.restart(110);          // a new pair while hidden counts from its start
+  assert.equal(clock.excluded(115), 5);
+  clock.resume('hidden', 120);
+  assert.equal(clock.excluded(200), 10);
   assert.deepEqual(elapsed(1000, 6000.4, 1500.2), { ms: 5000, hidden_ms: 1500 });
   assert.deepEqual(elapsed(1000, 900, 0), { ms: 0, hidden_ms: 0 });
   assert.deepEqual(elapsed(0, 100, 250), { ms: 100, hidden_ms: 100 });
@@ -533,6 +555,29 @@ test('readVoteFiles merges votes.jsonl and votes-<rater>.jsonl in the order cast
   });
 });
 
+test('copies of a log, whole or in part, keep each file\'s order around the shared lines', async () => {
+  await withTemp(async dir => {
+    const line = value => JSON.stringify(value) + '\n';
+    const a = { rater: 'ann', pair: 'P1', choice: 'a', ms: 1, at: '2026-10-05T12:01:00.000Z' }, b = { rater: 'ann', pair: 'P1', choice: 'b', ms: 1, at: '2026-10-05T12:00:00.000Z' };
+    const latest = async () => latestChoices((await readVoteFiles(dir)).votes).get('P1');
+    // The full log is in a later file than a copy of its first line, and the other way round.
+    await writeFile(join(dir, 'votes-ann.jsonl'), line(a));
+    await writeFile(join(dir, 'votes-copy.jsonl'), line(a) + line(b));
+    assert.equal(await latest(), 'b');
+    assert.equal((await readVoteFiles(dir)).duplicates, 1);
+    await writeFile(join(dir, 'votes-ann.jsonl'), line(a) + line(b));
+    await writeFile(join(dir, 'votes-copy.jsonl'), line(a));
+    assert.equal(await latest(), 'b');
+    // A copy of only the later line.
+    await writeFile(join(dir, 'votes-copy.jsonl'), line(b));
+    assert.equal(await latest(), 'b');
+    // Files that contradict each other give way to the time stamps (b is earlier, so a is last).
+    await writeFile(join(dir, 'votes-copy.jsonl'), line(b) + line(a));
+    assert.equal(await latest(), 'a');
+    assert.equal((await readVoteFiles(dir)).votes.length, 2);
+  });
+});
+
 test('a revision counts even when the server clock stepped back, or the line has no time', async () => {
   await withTemp(async dir => {
     const line = value => JSON.stringify(value);
@@ -802,13 +847,15 @@ test('export copies pairs.json and the images it names for a rater, nothing priv
     await assert.rejects(exportStudy({ dataRoot, name: 'srv', out }), /already exists/);
     const repo = fileURLToPath(new URL('../../', import.meta.url));
     // Should the guard ever fail, what it let through is removed again.
-    t.after(() => Promise.all([rm(join(repo, 'exported-study'), { recursive: true, force: true }), rm(join(repo, 'v1', 'new'), { recursive: true, force: true })]));
-    await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: join(repo, 'exported-study') }), /inside the repository/);
+    // Names no one else uses; should the guard ever fail, only what it let through under them is removed.
+    const probe = 'e3d-export-probe-' + randomUUID();
+    t.after(() => Promise.all([rm(join(repo, probe), { recursive: true, force: true }), rm(join(repo, 'v1', probe), { recursive: true, force: true })]));
+    await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: join(repo, probe) }), /inside the repository/);
     await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: repo }), /inside the repository/);
     // Nor through a symlinked alias of the repository (e.g. macOS /tmp for /private/tmp), or a symlink to a missing path.
     await symlink(repo, join(root, 'alias'));
-    await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: join(root, 'alias', 'exported-study') }), /inside the repository/);
-    await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: join(root, 'alias', 'v1', 'new', 'deeper') }), /inside the repository/);
+    await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: join(root, 'alias', probe) }), /inside the repository/);
+    await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: join(root, 'alias', 'v1', probe, 'deeper') }), /inside the repository/);
     await symlink(join(root, 'nowhere'), join(root, 'dangling'));
     await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: join(root, 'dangling', 'sub') }), /symlink to a missing path/);
     await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: join(root, 'dangling') }), /symlink to a missing path|already exists/);
