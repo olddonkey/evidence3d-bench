@@ -4,9 +4,9 @@ Reads run batches, aggregates them into a leaderboard (`e3d-leaderboard-v3`)
 and writes a static site that opens from disk: `index.html` (per task set:
 what the set is, the two ladders, leaderboard, pairwise comparison, where the
 noise is, evidence deltas, archetypes, detail by category, named dimensions,
-frame and scale, evidence use and cost, task index; then provenance, excluded
-attempts, data problems), `summary.md` (the same numbers in Markdown,
-to paste into a document), one page per task under `tasks/`, renders and
+frame and scale, evidence use and cost, score over time, task index; then
+provenance, excluded attempts, data problems), `summary.md` (the same numbers
+in Markdown, to paste into a document), one page per task under `tasks/`, renders and
 copied evidence under `assets/`, and the full leaderboard as
 `leaderboard.json`.
 
@@ -42,7 +42,9 @@ Everything else is in `leaderboard.json`.
   are failures of the harness, the machine or the scorer. They are listed with
   the runner's reason (`result.infra.reason`) and are left out of every mean
   and every comparison. Every other attempt without a valid report scores 0
-  (timeouts without a model, invalid GLBs, missing artifacts).
+  (timeouts without a model, invalid GLBs, missing artifacts), and so does an
+  attempt with integrity problems (`result.integrity_problems`, a broken
+  boundary), whatever its file scored.
 - **Configurations** are `system / model / effort` as requested in
   `result.json`. Batches of one configuration merge; when the merged batches
   differ in CLI version or binary, prompt, runner, tool kit, runtime, protocol,
@@ -275,6 +277,40 @@ errors are skewed (one model turned round adds 180° to its object), so the page
 and `summary.md` show the median with the IQR under it, a description of the
 spread and not an interval; the mean and its bootstrap interval stay in the JSON
 (same seeds as before) and in each cell's tooltip.
+
+## Score over time (`entry.time_curve`)
+
+From the snapshots the runner takes while an attempt runs (copies of
+`output/model.glb` every `snapshot_interval_seconds` after the CLI started,
+scored after the attempt; `v1/lib/runner/README.md`, *Score-over-time
+snapshots*), `curves.mjs` computes per configuration:
+
+- `points[]`: at every tick (each multiple of the interval up to the
+  wall-clock limit, and the limit itself) the mean score with the same
+  averaging and bootstrap as `entry.score`, where an attempt counts its final
+  score once it has ended (`wall_seconds <= t`, or t at its
+  `wall_limit_seconds`) and, before that, the score of its last snapshot taken
+  at or before t (taken: the end of its read, `read_seconds`, which a busy runner
+  can put after the tick it was due at): 0 with no `model.glb` yet, a refused
+  file or an invalid model. An attempt whose snapshot there has no score through
+  no fault of the model (the scorer failed on it, also on the runner's retries:
+  `score_error`; or the runner could not store it: `lost`) is left out of that
+  tick's mean and counted in the point's `missing`; `score_errors` counts those
+  snapshots. An attempt with integrity problems is 0 at every tick. The point
+  at the limit is therefore `entry.score`. `finished` is the share of attempts
+  that had ended by t.
+- `t95`: per attempt with a final score of at least 10 (`T95_MIN_FINAL`), when
+  its first snapshot at 95 % (`T95_SHARE`) of its final score was taken, or its
+  end when no snapshot got there (the final file is the snapshot at the end);
+  `median_seconds`, `q1_seconds`, `q3_seconds` over those attempts (not
+  weighted by object), `attempts`, and `low_final`, the attempts left out.
+
+A configuration with no snapshots has `time_curve: null`; one where only some
+counted attempts have them gets `{ available: false, reason }` and no curve,
+since a curve over a subset would not end at its score. The page draws an
+inline SVG (one line per configuration, at most 8, coloured by name; hover
+text from SVG titles, no scripts) above a table with every point, its
+interval and the share finished; `summary.md` has the table.
 
 ## Scale
 

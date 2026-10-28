@@ -2,6 +2,7 @@ import { VARIANTS } from '../contract.mjs';
 import { UNNAMED_SET, UNKNOWN_SET } from './collect.mjs';
 import { intervalText, attemptShareText, pText, allPairsNote, VARIANT_ORDER, CONFLICT_KINDS } from './aggregate.mjs';
 import { esc, num, percent, statCell, medianCell, sdCell, slug, fractionLabel, page, NOT_EVALUATED } from './html.mjs';
+import { timeSection } from './time-chart.mjs';
 
 // index.html: per task set the two ladders, the leaderboard, the pairwise
 // comparison, where the noise is, the breakdowns and the task index; then
@@ -448,6 +449,8 @@ ${evidenceCostTable(entries, set)}
 <p class="legend"><strong>Conflict</strong>: on c1 tasks (drawings out of date), the share of contested probes closer to the as-photographed building.${hasMemory(set)
     ? '\n<strong>Memory</strong>: on m2 / m3 tasks (a named landmark whose surveyed proportions differ from its published figures), the share of contested probes closer to the surveyed object the evidence shows than to the structure as published; low means the model built what it remembered.' : ''}
 Tokens are input (including cached reads) + output as recorded in result.json; cost is whatever the harness reported (Claude Code: its list-price estimate) and stays n/a when not reported.</p>
+<h3>Score over time</h3>
+${timeSection(entries)}
 <h3>Tasks</h3>
 ${taskIndexTable(entries, tasks)}
 </section>`;

@@ -13,6 +13,7 @@ Seatbelt-based and macOS-only (Darwin 27).
 
 ```sh
 node v1/scripts/run.mjs prepare   --id <batch> --system codex|claude-code|grok|antigravity|api-anthropic|api-openai --model <id> [--effort <level>] --tasks a,b,c [--attempts 1] [--data <root>]
+                                  [--snapshot-seconds 300]                                               (score-over-time snapshots; 0: none)
                                   [--binary <cli>]                                                       (CLI systems)
                                   [--token-budget 2000000] [--tool-budget 200] [--max-output-tokens 32000]   (API systems)
 node v1/scripts/run.mjs preflight --batch <dir> [--probe-model <id>] [--probe-effort <level>] [--no-wait]
@@ -54,7 +55,9 @@ URL from `E3D_ANTHROPIC_BASE_URL` / `E3D_OPENAI_BASE_URL` at `prepare` (default
    safety cap; SIGTERM to the whole process tree, SIGKILL 5 s
    later), events and stderr logged byte for byte, then integrity checks, then
    the host-sleep rule and the infrastructure-error check (below), then scoring in a separate process
-   (module D's `scoreSubmission`) after the contestant's process tree is gone.
+   (module D's `scoreSubmission`) after the contestant's process tree is gone. While
+   the CLI runs, the runner copies `output/model.glb` every 5 minutes, and scores the
+   copies after the final file (see *Score-over-time snapshots*).
    A sample is run once and never overwritten. An attempt that ended in an
    infrastructure error is not a sample: it is archived and run again from a
    pristine workspace, inside the same `run`, after waiting out a limit if there is
@@ -77,6 +80,8 @@ URL from `E3D_ANTHROPIC_BASE_URL` / `E3D_OPENAI_BASE_URL` at `prepare` (default
   keeps its `process.json` and is scored, not generated again, by the next `run` once
   the code is back. The generator's source is recorded for provenance only: its output
   (tasks, truth, objects) is what is frozen.
+- `snapshots`: `{ interval_seconds, source: 'output/model.glb' }`, or `null` when the
+  batch was prepared with `--snapshot-seconds 0` (see *Score-over-time snapshots*).
 - per task: `set` (from `truth.json`, `null` when absent), `object`, `variant`,
   `generator_version` (from the object's `model.json`), and `object_files`: the sha256 of
   the private files the scorer reads (`model.json`, `evidence/evidence.json`, each
@@ -106,6 +111,8 @@ hashes are not equal; each pins the code by its own definition.
     started.json (with the sleep counter at launch)  child.json  process.json  events.jsonl  stderr.log  result.json
     score/ submission.glb  report.json  error-*.png  worker logs  worker.json
     score.interrupted-<k>/          a scoring cut short by a stopped runner, kept aside
+    snapshots/ index.json  t0300.glb  t0900.glb ...   copies of output/model.glb taken while the CLI ran
+               score/ t0300.json ...  worker logs     their reports (score.interrupted-<k>/, score.previous-<k>/ as for score/)
   <task>/a<n>.infra-<k>/            the k-th earlier try of a<n>, which ended in infra_error:
                                     kept exactly as it was, never deleted, never scored
   <task>/a<n>.fresh/                transient: the pristine copy being built for a re-run
@@ -126,7 +133,8 @@ retry_after, times and message) and timing:
 CLI process), `result_at` (the record was written), `wall_limit_seconds`,
 `host_sleep_check` (see *The host-sleep rule*), and
 `load_1m: { start, end, mean, max, samples, cpus }`, the machine's 1-minute load
-average sampled every 30 s while the CLI ran. `process.json` keeps `event_ms`, the
+average sampled every 30 s while the CLI ran, and, when the batch takes snapshots,
+`snapshot_interval_seconds` and `snapshots[]` (see *Score-over-time snapshots*). `process.json` keeps `event_ms`, the
 arrival time of every event, which the timeout rule below uses.
 `service_retry_seconds` is the time the CLI spent in retry streaks it recovered from (a
 diagnostic: such a session is still a sample).
@@ -154,6 +162,75 @@ diagnostic: such a session is still a sample).
 - The artifact is read by the runner outside the sandbox, so it must be a regular
   file with one link inside `output/`. A symlink or hard link to the hidden truth
   would otherwise be scored as the submission.
+
+### Score-over-time snapshots
+
+A 30-minute wall clock mixes speed, machine load and ability: one score per attempt
+cannot tell "slow but good" from "fast but mediocre". So while an attempt runs, the
+runner (`snapshots.mjs`) reads the contestant's `output/model.glb` at every multiple of
+the interval (default 300 s, `prepare --snapshot-seconds`, frozen in the manifest)
+counted from the CLI's spawn and strictly inside its wall clock (t300 … t1500 for 30
+minutes; the final file is the point at the end), and copies it to
+`<attempt>/snapshots/t0300.glb`, … . The copy is made outside the sandbox and outside
+the workspace: the contestant can neither see nor change it, nothing in the workspace is
+written, and nothing frozen changes. A copy whose content repeats an earlier one is not
+stored again (its record names the earlier file, `same_as`).
+
+The read is careful because the contestant is still running and could swap files and
+directories under it. It happens in a short-lived process (`snapshot-read.mjs`) started
+with `output/` as its working directory, which resolves nothing through the workspace
+path again: it reads only if its working directory is the `output/` the attempt started
+with (same device and inode, recorded before the launch; had `output/` been swapped for
+a symlink, the process would be standing somewhere else), and a symlink swapped in and
+out meanwhile cannot redirect it. Node has no `openat()`; the working directory is the
+anchor it lacks. There `model.glb` is opened without following a symlink and without
+blocking (a FIFO cannot hang the read), checked on the open handle (a regular file with
+one link, within the artifact byte budget) and read from it; afterwards `model.glb`
+must still be the file that was read. A file replaced meanwhile (the model's own atomic
+rename, or a swap) or caught mid-write (a GLB whose header length is not what was read)
+is read again, up to 4 times 0.75 s apart; a symlink, hard link, non-regular or
+oversized file, or a replaced `output/`, is recorded as refused and scores 0, as the
+final read would. A tick the runner reaches late is read late: each record keeps when
+its copy was taken, and the report uses that time, not the tick.
+
+After the final file is scored, the attempt's snapshots are scored in one worker process
+(`score-worker.mjs` with a `snapshots` job: the task is loaded once, no error maps are
+drawn), one per distinct content; a snapshot with the final file's content takes its
+score, unless that report is the scorer's failure. A snapshot the scorer fails on (it
+throws, the worker crashes or times out before reaching it, or the report says
+`scorer_failed: true` or, as `v1/lib/score` reports an internal error it caught,
+`valid: false` with an error starting `Scorer error: `; `valid: false` otherwise
+is an invalid model, scored 0) is scored again from the same stored file, up to 2 times
+(`SNAPSHOT_SCORE_RETRIES`; nothing is generated again), each retry in a worker of its
+own, so a file that crashes the scorer every time cannot hold up the others; the failed
+tries' reports are kept as `t0300.try-1.json`, … . **The attempt's score is still the final file's alone.** With concurrency 1 this
+happens before the next attempt launches, so it never overlaps a contestant; it costs
+about one scoring (25–100 s) per distinct snapshot, at most 5 for a 30-minute attempt
+(the worker's time limit is the scoring limit per snapshot, for all of them).
+Snapshots are scored only for a run supervised to its end with its boundary intact; for
+an infrastructure error or a broken boundary they are kept, unscored, for diagnosis. A
+runner stopped during snapshot scoring leaves the attempt unrecorded, and the next `run`
+stops a snapshot worker it left running, then scores the final file and the snapshots
+again (from `snapshots/index.json`, rewritten after every tick; an index that could not
+be written is retried at the next tick and when the attempt ends, and costs no snapshot).
+A tick due while the CLI ran that the restarted runner finds no record of (the index
+could not be written or read) is recorded as `lost`, missing on the curve, not 0.
+`v1/cli.mjs rescore` scores the snapshots again with the final file, going by the records in
+`result.json` (not the index, which a write error may have left short).
+
+`result.json` carries `snapshot_interval_seconds` and `snapshots[]`, one per tick:
+`{ t, name, at_seconds and read_seconds (when the read that was kept began and ended,
+from the spawn), present, bytes, sha256, complete
+(a whole GLB), file, same_as, status, score, valid, score_of, report, problem, error }`.
+`status` is `absent` (no `model.glb` yet: score 0), `refused` (score 0, with `problem`),
+`scored` (the scorer's score, 0 for an invalid model; `score_of` names the snapshot,
+or `final`, whose scoring it shares), `score_error` (the scorer failed on it, and on its
+retries: score null, `tries` in all), `lost` (read but not stored, or its record lost
+with the index: score null) or
+`not_scored`. The report counts a `score_error` or `lost` snapshot as missing, not as 0:
+a scorer failure is not the model's performance. The report turns them
+into a score-over-time curve and the median time to 95 % of the final score
+(`v1/lib/report/README.md`).
 
 ### Statuses
 

@@ -220,6 +220,19 @@ async function findModel(result, attemptDir, problems) {
   return { path: null, sha256: null };
 }
 
+// The score-over-time snapshots the runner recorded (runner/snapshots.mjs),
+// reduced to tick, when the copy was taken (`at`: the end of its read, the
+// tick for a record that has none), score and status, in the order taken;
+// null when the batch took none. With integrity problems every point is 0.
+function snapshotSeries(result, { integrity = false } = {}) {
+  if (!Array.isArray(result.snapshots) || !finite(result.snapshot_interval_seconds) || result.snapshot_interval_seconds <= 0) return null;
+  const takenAt = item => [item.read_seconds, item.at_seconds, item.t].find(finite);
+  const scoreOf = item => integrity ? 0 : finite(item.score) ? item.score : null;
+  return { interval_seconds: result.snapshot_interval_seconds,
+    points: result.snapshots.filter(item => finite(item?.t)).map(item => ({ t: item.t, at: takenAt(item), score: scoreOf(item), status: text(item.status) }))
+      .sort((a, b) => a.at - b.at || a.t - b.t) };
+}
+
 function setOf(truth, taskId, problems) {
   if (!truth) return UNKNOWN_SET;
   if (truth.set === undefined || truth.set === null) return UNNAMED_SET;
@@ -283,7 +296,10 @@ export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT
           continue;
         }
         const status = typeof result.status === 'string' ? result.status : 'unknown';
-        const valid = report?.valid === true && finite(report.score);
+        // A broken boundary voids the attempt whatever its file scored (the
+        // runner scores it for diagnosis and records 0), at every tick too.
+        const integrity = Array.isArray(result.integrity_problems) && result.integrity_problems.length > 0;
+        const valid = !integrity && report?.valid === true && finite(report.score);
         if (valid && finite(result.score) && Math.abs(result.score - report.score) > 1e-6) {
           problems.push(attemptDir + ': result.score ' + result.score + ' differs from report.score ' + report.score + '; the report is used');
         }
@@ -302,8 +318,11 @@ export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT
           status_reason: text(result.infra?.reason) ?? text(result.infra_error?.reason) ?? text(result.infra_reason) ?? null,
           // Failures (no output, invalid GLB, timeout without a scored model ...) count as 0.
           score: valid ? report.score : 0,
-          failure: valid ? null : (report?.error ?? (report ? 'invalid submission' : 'no score report (status ' + status + ')')),
+          failure: valid ? null : integrity ? 'integrity problems: ' + result.integrity_problems.map(String).join('; ')
+            : (report?.error ?? (report ? 'invalid submission' : 'no score report (status ' + status + ')')),
           wall_seconds: finite(result.wall_seconds) ? result.wall_seconds : null,
+          wall_limit_seconds: finite(result.wall_limit_seconds) ? result.wall_limit_seconds : null,
+          snapshots: snapshotSeries(result, { integrity }),
           started_at: text(result.started_at), finished_at: text(result.finished_at),
           usage: normaliseUsage(result.usage),
           cost_usd: finite(result.cost_usd) ? result.cost_usd : null,
