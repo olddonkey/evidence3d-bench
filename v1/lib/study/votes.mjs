@@ -98,7 +98,9 @@ function markComponents(nodes) {
 // were appended in the order cast, whatever the clock said (it can step back),
 // so a revision stays after the vote it revises. The same line in several files
 // (a log copied, whole or in part) is one vote that keeps every file's order
-// around it. Where files contradict each other (their orders form a cycle),
+// around it; a line repeated within a file (a, b, then a again, without times)
+// is a vote each time, and its n-th time in one file is a copy of its n-th time
+// in another. Where files contradict each other (their orders form a cycle),
 // those contradicting orders are dropped and the time stamps decide among the
 // votes on the cycle; every other order is kept. Among the votes free to go
 // next, the earliest time stamp goes first (a missing one counts as earliest),
@@ -107,13 +109,16 @@ function mergeFiles(lists) {
   const nodes = new Map();
   let copies = 0;
   lists.forEach((list, file) => {
+    const times = new Map();
     let previous = null;
     list.forEach((vote, line) => {
-      const id = identity(vote);
+      const text = identity(vote), nth = times.get(text) ?? 0;
+      times.set(text, nth + 1);
+      const id = text + '#' + nth;
       let node = nodes.get(id);
       if (node) copies++;
       else nodes.set(id, node = { vote, at: vote.at ?? '', file, line, waiting: 0, next: new Set() });
-      if (previous && previous !== node) previous.next.add(node);
+      if (previous) previous.next.add(node);
       previous = node;
     });
   });

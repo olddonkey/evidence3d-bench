@@ -74,6 +74,7 @@ async function main(argv) {
     const share = stat => stat.n ? { agree: stat.k, decided: stat.n, share: stat.p, ci95: [stat.low, stat.high] } : null;
     const between = analysis.between_raters;
     print({ event: 'analyzed', files, ignored_files: analysis.votes.ignored_files, malformed_lines: analysis.votes.malformed_lines,
+      ...(analysis.votes.raters_only_unknown_pairs.length ? { raters_only_unknown_pairs: analysis.votes.raters_only_unknown_pairs } : {}),
       raters: analysis.raters.map(item => ({ rater: item.rater, pairs_rated: item.votes.pairs_rated, pairs_unrated: item.votes.pairs_unrated, ties: item.votes.ties,
         agreement: share(item.agreement.find(measure => measure.measure === 'score').overall) })),
       between_raters: between.raters.length < 2 ? null : {

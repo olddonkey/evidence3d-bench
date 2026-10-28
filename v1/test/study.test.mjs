@@ -587,6 +587,26 @@ test('copies of a log, whole or in part, keep each file\'s order around the shar
   });
 });
 
+test('the same line twice in one file is two votes; its second time is a copy only of a second time elsewhere', async () => {
+  await withTemp(async dir => {
+    const line = value => JSON.stringify(value) + '\n';
+    // Revisions a, b, a with no time and no timing: the last a stands.
+    const a = { rater: 'ann', pair: 'P1', choice: 'a' }, b = { rater: 'ann', pair: 'P1', choice: 'b' };
+    await writeFile(join(dir, 'votes-ann.jsonl'), line(a) + line(b) + line(a));
+    let read = await readVoteFiles(dir);
+    assert.deepEqual([read.votes.map(vote => vote.choice), read.duplicates], [['a', 'b', 'a'], 0]);
+    assert.equal(latestChoices(read.votes).get('P1'), 'a');
+    // A whole copy of that log adds nothing; a copy of its first line only matches the first a.
+    await writeFile(join(dir, 'votes-copy.jsonl'), line(a) + line(b) + line(a));
+    read = await readVoteFiles(dir);
+    assert.deepEqual([read.votes.map(vote => vote.choice), read.duplicates], [['a', 'b', 'a'], 3]);
+    await writeFile(join(dir, 'votes-copy.jsonl'), line(a));
+    read = await readVoteFiles(dir);
+    assert.deepEqual([read.votes.map(vote => vote.choice), read.duplicates], [['a', 'b', 'a'], 1]);
+    assert.equal(analyzeStudy({ key: handKey(), votes: read.votes }).raters[0].votes.revisions, 2);
+  });
+});
+
 test('a revision counts even when the server clock stepped back, or the line has no time', async () => {
   await withTemp(async dir => {
     const line = value => JSON.stringify(value);
@@ -655,7 +675,7 @@ test('analysis on a hand-computed example: last vote wins, agreement, Wilson, st
   assert.equal(analysis.schema, 'e3d-study-analysis-v2');
   assert.deepEqual(analysis.raters.map(item => item.rater), ['r0']);
   assert.deepEqual(analysis.votes, { files: null, ignored_files: [], legacy_rater: 'r0', lines: 11, valid_lines: 10, malformed_lines: 1, duplicate_lines: 0,
-    unknown_pair_lines: 1, raters: ['r0'], raters_left_out: [], raters_not_found: [], left_out_lines: 0, pairs_total: 9, originals_total: 7 });
+    unknown_pair_lines: 1, raters: ['r0'], raters_only_unknown_pairs: [], raters_left_out: [], raters_not_found: [], left_out_lines: 0, pairs_total: 9, originals_total: 7 });
   const rater = analysis.raters[0];
   assert.deepEqual(rater.votes, { lines: 10, unknown_pair_lines: 1, revisions: 1, pairs_total: 9, pairs_rated: 8,
     pairs_unrated: 1, originals_total: 7, originals_rated: 6, ties: 1, median_ms: 4500, median_visible_ms: 4500 });
@@ -772,6 +792,12 @@ test('between raters: Cohen\'s kappa per two raters, Fleiss\' kappa, majority vo
   assert.deepEqual(m.agreement.map(row => [row.measure, row.overall.k, row.overall.n, row.overall.no_higher_side]),
     [['score', 5, 5, 0], ['shape_score', 3, 5, 0], ['detail_score', 3, 4, 1]]);
   assert.deepEqual(m.agreement[0].strata.map(row => [row.stratum, row.k, row.n]), [['0-3', 2, 2], ['3-8', 0, 0], ['8-15', 1, 1], ['15-100', 2, 2]]);
+  // A rater whose only votes are for another study's pairs is listed, not analysed or compared.
+  const stray = analyzeStudy({ key, votes: [...votes, { rater: 'zed', pair: 'other-study-1', choice: 'a', ms: 10, at: '2026-10-11T00:00:00.000Z' }] });
+  assert.deepEqual([stray.votes.raters, stray.votes.raters_only_unknown_pairs, stray.votes.unknown_pair_lines, stray.raters.length], [['ann', 'bob', 'cy'], ['zed'], 2, 3]);
+  assert.deepEqual(stray.between_raters, between);
+  assert.match(analysisMarkdown(stray), /\| raters whose votes are all for unknown pairs \(not analysed\) \| zed \|/);
+  assert.deepEqual(analyzeStudy({ key, votes: [...votes, { rater: 'zed', pair: 'other-study-1', choice: 'a' }], raters: ['ann', 'zed'] }).votes.raters_only_unknown_pairs, ['zed']);
   // Two raters: no Fleiss; --raters picks them.
   const two = analyzeStudy({ key, votes, raters: ['ann', 'cy', 'dan'] });
   assert.deepEqual([two.votes.raters, two.votes.raters_left_out, two.votes.raters_not_found, two.votes.left_out_lines], [['ann', 'cy'], ['bob'], ['dan'], 8]);

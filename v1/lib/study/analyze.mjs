@@ -233,8 +233,12 @@ export function analyzeStudy({ key, votes, malformed = 0, duplicates = 0, files 
   const strata = (key.strata ?? []).map(item => item.id);
   for (const pair of key.pairs) if (!strata.includes(pair.stratum)) strata.push(pair.stratum);
   const named = votes.map(vote => ({ ...vote, rater: vote.rater ?? legacyRater }));
-  const present = [...new Set(named.map(vote => vote.rater))].sort();
-  const chosen = raters ? present.filter(id => raters.includes(id)) : present;
+  const voters = [...new Set(named.map(vote => vote.rater))].sort();
+  const listed = raters ? voters.filter(id => raters.includes(id)) : voters;
+  // A rater of this study has a vote for one of its pairs. One whose every vote
+  // names another pair (another study's votes, say) is reported with those
+  // lines, never analysed or compared with the others.
+  const chosen = listed.filter(id => named.some(vote => vote.rater === id && byId.has(vote.pair)));
 
   const perRater = [], latestByRater = new Map();
   for (const rater of chosen) {
@@ -242,13 +246,14 @@ export function analyzeStudy({ key, votes, malformed = 0, duplicates = 0, files 
     perRater.push(analysis);
     latestByRater.set(rater, latest);
   }
-  const kept = named.filter(vote => chosen.includes(vote.rater));
+  const kept = named.filter(vote => listed.includes(vote.rater));
 
   const votesSummary = {
     files, ignored_files: ignored, legacy_rater: legacyRater,
     lines: votes.length + duplicates + malformed, valid_lines: votes.length, malformed_lines: malformed, duplicate_lines: duplicates,
     unknown_pair_lines: kept.filter(vote => !byId.has(vote.pair)).length,
-    raters: chosen, raters_left_out: present.filter(id => !chosen.includes(id)), raters_not_found: (raters ?? []).filter(id => !present.includes(id)),
+    raters: chosen, raters_only_unknown_pairs: listed.filter(id => !chosen.includes(id)),
+    raters_left_out: voters.filter(id => !listed.includes(id)), raters_not_found: (raters ?? []).filter(id => !voters.includes(id)),
     left_out_lines: named.length - kept.length,
     pairs_total: key.pairs.length, originals_total: key.pairs.filter(pair => !pair.repeat_of).length,
   };
@@ -335,6 +340,7 @@ export function analysisMarkdown(analysis) {
   lines.push('| | count |', '|---|---|');
   lines.push('| lines | ' + v.lines + ' |', '| malformed lines (skipped) | ' + v.malformed_lines + ' |', '| the same vote in two files (counted once) | ' + v.duplicate_lines + ' |',
     '| lines for unknown pairs (skipped) | ' + v.unknown_pair_lines + ' |', '| raters | ' + (v.raters.join(', ') || 'none') + ' |');
+  if (v.raters_only_unknown_pairs.length) lines.push('| raters whose votes are all for unknown pairs (not analysed) | ' + v.raters_only_unknown_pairs.join(', ') + ' |');
   if (v.raters_left_out.length) lines.push('| raters left out (--raters) | ' + v.raters_left_out.join(', ') + ' (' + v.left_out_lines + ' lines) |');
   if (v.raters_not_found.length) lines.push('| raters asked for but without votes | ' + v.raters_not_found.join(', ') + ' |');
   lines.push('');

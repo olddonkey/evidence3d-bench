@@ -180,7 +180,8 @@ Per rater (each rater on their own, as below), side by side in a table of
 raters and a table of P(higher) per stratum with the majority next to them:
 
 - The rater's last vote per pair counts. Malformed lines and votes for unknown
-  pairs are counted and skipped.
+  pairs are counted and skipped; a rater whose votes are all for unknown pairs
+  (another study's file, say) is listed but neither analysed nor compared.
 - Agreement: among decided (non-tie) votes on original pairs, the share in which
   the rater chose the submission with the higher headline score, with a Wilson
   95 % interval; the same per stratum; the same for `shape_score` alone and
