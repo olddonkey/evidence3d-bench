@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { decodePNG, encodePNG } from '../lib/png.mjs';
 import { soupFromModel } from '../lib/soup.mjs';
@@ -11,10 +12,11 @@ import { writeSampleRuns } from '../lib/report/sample-runs.mjs';
 import { sampleModel } from '../fixtures/sample-model.mjs';
 import { STRATA, stratumOf, higherSide, selectPairs, collectSubmissions, publicPairs, privateKey, imageName } from '../lib/study/select.mjs';
 import { STUDY_VIEWS, studyCameras, renderViews } from '../lib/study/render.mjs';
-import { prepareStudy, studyDir } from '../lib/study/index.mjs';
-import { startStudyServer, parseVotes } from '../lib/study/server.mjs';
-import { analyzeStudy, wilson, writeAnalysis } from '../lib/study/analyze.mjs';
-import { KEY_CHOICES, latestChoices, votedTrail, nextUnrated, afterCurrent, progress, elapsed } from '../lib/study/page/state.js';
+import { prepareStudy, exportStudy, studyDir } from '../lib/study/index.mjs';
+import { startStudyServer } from '../lib/study/server.mjs';
+import { parseVotes, readVoteFiles } from '../lib/study/votes.mjs';
+import { analyzeStudy, analysisMarkdown, wilson, cohenKappa, fleissKappa, writeAnalysis } from '../lib/study/analyze.mjs';
+import { KEY_CHOICES, LEGACY_RATER, latestChoices, votedTrail, nextUnrated, afterCurrent, progress, elapsed, raterId, isRater, pauseClock } from '../lib/study/page/state.js';
 
 const PAGE = fileURLToPath(new URL('../lib/study/page/', import.meta.url));
 const near = (actual, expected, tolerance = 5e-4) => assert.ok(Math.abs(actual - expected) <= tolerance, actual + ' is not within ' + tolerance + ' of ' + expected);
@@ -204,7 +206,14 @@ test('the page source names no score, batch, model, system or private file', asy
   }
   const html = await readFile(join(PAGE, 'index.html'), 'utf8');
   assert.match(html, /同一道题的参考模型和两份提交。哪一份的几何更接近参考？忽略颜色和材质。/);
-  for (const label of ['A 更接近', '分不出', 'B 更接近', '上一对']) assert.ok(html.includes(label), label);
+  for (const label of ['A 更接近', '分不出', 'B 更接近', '上一对', '请输入你的名字', '更换']) assert.ok(html.includes(label), label);
+  // Every vote names its rater; the votes read back are only that rater's.
+  const app = await readFile(join(PAGE, 'app.js'), 'utf8');
+  assert.match(app, /const now = performance\.now\(\), rater = state\.rater;/);
+  assert.match(app, /JSON\.stringify\(\{ rater, pair: pair\.id, choice,/);
+  assert.match(app, /'votes\?rater=' \+ encodeURIComponent\(id\)/);
+  // Nothing votes while another rater's votes load (the pair on screen is still the previous rater's).
+  assert.match(app, /async function useRater\(id\) \{\n  state\.busy = true;/);
 });
 
 test('page logic: keys, last vote per pair, resume at the first unrated pair, trail for "上一对"', () => {
@@ -230,6 +239,34 @@ test('page logic: keys, last vote per pair, resume at the first unrated pair, tr
   // Back from the closing screen (-1): done with the pair goes to the next unrated, or closes again.
   assert.equal(afterCurrent(pairs, all, 4, [-1]), -1);
   assert.equal(afterCurrent(pairs, latest, 0, [-1]), 2);
+  // Rater ids: what was typed, trimmed and in lower case; letters and digits only; r0 is reserved.
+  assert.deepEqual(['Zhang San', ' LiSi2 ', 'r0', 'R0', '', '张三', 'a-b', 'x'.repeat(33), 'x'.repeat(32), null].map(raterId),
+    [null, 'lisi2', null, null, null, null, null, null, 'x'.repeat(32), null]);
+  assert.equal(LEGACY_RATER, 'r0');
+  assert.equal(isRater('r0'), false);
+  assert.equal(isRater('Ann'), false);
+  assert.equal(isRater('ann'), true);
+  // Time not spent looking: the union of the page hidden and the name form open, each moment once.
+  const clock = pauseClock();
+  clock.restart(0);
+  clock.pause('asking', 10);
+  clock.pause('hidden', 12);   // another tab while the form is open
+  clock.resume('hidden', 15);
+  clock.resume('asking', 20);  // form open 10-20, hidden 12-15 inside it: 10, not 13
+  assert.equal(clock.excluded(30), 10);
+  clock.pause('hidden', 40);
+  assert.equal(clock.excluded(45), 15);
+  clock.pause('asking', 42);
+  clock.resume('hidden', 50);  // hidden 40-50 and form 42-60 overlap: 20
+  clock.resume('asking', 60);
+  assert.equal(clock.excluded(70), 30);
+  clock.resume('asking', 80);  // not paused: nothing changes
+  assert.equal(clock.excluded(90), 30);
+  clock.pause('hidden', 100);
+  clock.restart(110);          // a new pair while hidden counts from its start
+  assert.equal(clock.excluded(115), 5);
+  clock.resume('hidden', 120);
+  assert.equal(clock.excluded(200), 10);
   assert.deepEqual(elapsed(1000, 6000.4, 1500.2), { ms: 5000, hidden_ms: 1500 });
   assert.deepEqual(elapsed(1000, 900, 0), { ms: 0, hidden_ms: 0 });
   assert.deepEqual(elapsed(0, 100, 250), { ms: 100, hidden_ms: 100 });
@@ -348,8 +385,11 @@ test('prepare: real files, identical cameras for the three models, non-blank ren
     assert.equal(key.render.concerns.submissions, new Set(key.pairs.flatMap(pair => [pair.a.model_path, pair.b.model_path])).size);
     // A study is not prepared over itself without --force, and never over votes.
     await assert.rejects(prepareStudy({ dataRoot, name: 'unit', batches: ['demo-codex'], pairs: 4, seed: 'prep' }), /--force/);
+    await writeFile(join(dir, 'votes-ann.jsonl'), JSON.stringify({ rater: 'ann', pair: key.pairs[0].id, choice: 'a', ms: 1, at: 'x' }) + '\n');
+    await assert.rejects(prepareStudy({ dataRoot, name: 'unit', batches: ['demo-codex'], pairs: 4, seed: 'prep', force: true }), /votes-ann\.jsonl holds votes/);
+    await rm(join(dir, 'votes-ann.jsonl'));
     await writeFile(join(dir, 'votes.jsonl'), JSON.stringify({ pair: key.pairs[0].id, choice: 'a', ms: 1, at: 'x' }) + '\n');
-    await assert.rejects(prepareStudy({ dataRoot, name: 'unit', batches: ['demo-codex'], pairs: 4, seed: 'prep', force: true }), /holds votes/);
+    await assert.rejects(prepareStudy({ dataRoot, name: 'unit', batches: ['demo-codex'], pairs: 4, seed: 'prep', force: true }), /votes\.jsonl holds votes/);
   });
 });
 
@@ -358,7 +398,7 @@ test('prepare: real files, identical cameras for the three models, non-blank ren
 function call(url, { method = 'GET', body, headers = {} } = {}) {
   const target = new URL(url);
   return new Promise((resolve, reject) => {
-    const req = request({ host: target.hostname, port: target.port, path: target.pathname, method, headers: { Host: target.host, ...headers } }, response => {
+    const req = request({ host: target.hostname, port: target.port, path: target.pathname + target.search, method, headers: { Host: target.host, ...headers } }, response => {
       const chunks = [];
       response.on('data', chunk => chunks.push(chunk));
       response.on('end', () => resolve({ status: response.statusCode, headers: response.headers, body: Buffer.concat(chunks) }));
@@ -406,44 +446,183 @@ test('server: 127.0.0.1 only, serves the page, pairs and named images, never key
         assert.equal(response.status, 404, path);
         assert.doesNotMatch(response.body.toString(), /secret/, path);
       }
-      // No votes yet.
-      assert.deepEqual(JSON.parse((await call(url + 'votes')).body).votes, []);
+      // No votes yet; the votes are asked for by rater.
+      assert.deepEqual(JSON.parse((await call(url + 'votes?rater=ann')).body).votes, []);
+      for (const query of ['', '?rater=', '?rater=r0', '?rater=Ann', '?rater=a-b']) assert.equal((await call(url + 'votes' + query)).status, 400, query);
       const post = (payload, headers = {}) => call(url + 'vote', { method: 'POST', body: JSON.stringify(payload), headers: { 'Content-Type': 'application/json', ...headers } });
-      assert.equal((await post({ pair: ids[0], choice: 'a', ms: 4200.4, hidden_ms: 1000.2 })).status, 200);
-      assert.equal((await post({ pair: ids[1], choice: 'tie', ms: 900 })).status, 200);
-      assert.equal((await post({ pair: ids[0], choice: 'b', ms: 1500 })).status, 200);
-      // Rejected: unknown pair, bad choice, bad time, not JSON, cross-origin, another Host.
-      assert.equal((await post({ pair: 'ffffffff', choice: 'a', ms: 1 })).status, 400);
-      assert.equal((await post({ pair: ids[0], choice: 'left', ms: 1 })).status, 400);
-      assert.equal((await post({ pair: ids[0], choice: 'a', ms: -5 })).status, 400);
-      assert.equal((await post({ pair: ids[0], choice: 'a', ms: 5, hidden_ms: 6 })).status, 400);
+      assert.equal((await post({ rater: 'ann', pair: ids[0], choice: 'a', ms: 4200.4, hidden_ms: 1000.2 })).status, 200);
+      assert.equal((await post({ rater: 'ann', pair: ids[1], choice: 'tie', ms: 900 })).status, 200);
+      assert.equal((await post({ rater: 'bob', pair: ids[1], choice: 'b', ms: 700 })).status, 200);
+      assert.equal((await post({ rater: 'ann', pair: ids[0], choice: 'b', ms: 1500 })).status, 200);
+      // Rejected: no rater, a rater that is not an id or is r0, unknown pair, bad choice, bad time, not JSON, cross-origin, another Host.
+      for (const rater of [undefined, '', 'r0', 'Ann', 'a b', '张三', 7, 'x'.repeat(33)]) assert.equal((await post({ rater, pair: ids[0], choice: 'a', ms: 1 })).status, 400, String(rater));
+      assert.equal((await post({ rater: 'ann', pair: 'ffffffff', choice: 'a', ms: 1 })).status, 400);
+      assert.equal((await post({ rater: 'ann', pair: ids[0], choice: 'left', ms: 1 })).status, 400);
+      assert.equal((await post({ rater: 'ann', pair: ids[0], choice: 'a', ms: -5 })).status, 400);
+      assert.equal((await post({ rater: 'ann', pair: ids[0], choice: 'a', ms: 5, hidden_ms: 6 })).status, 400);
       assert.equal((await call(url + 'vote', { method: 'POST', body: 'pair=x', headers: { 'Content-Type': 'application/x-www-form-urlencoded' } })).status, 400);
-      assert.equal((await post({ pair: ids[0], choice: 'a', ms: 1 }, { Origin: 'http://evil.example' })).status, 403);
+      assert.equal((await post({ rater: 'ann', pair: ids[0], choice: 'a', ms: 1 }, { Origin: 'http://evil.example' })).status, 403);
       assert.equal((await call(url, { headers: { Host: 'evil.example:' + address.port } })).status, 403);
       const lines = (await readFile(join(dir, 'votes.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
       assert.deepEqual(lines, [
-        { pair: ids[0], choice: 'a', ms: 4200, hidden_ms: 1000, at: '2026-10-05T12:00:00.000Z' },
-        { pair: ids[1], choice: 'tie', ms: 900, hidden_ms: null, at: '2026-10-05T12:00:01.000Z' },
-        { pair: ids[0], choice: 'b', ms: 1500, hidden_ms: null, at: '2026-10-05T12:00:02.000Z' },
+        { rater: 'ann', pair: ids[0], choice: 'a', ms: 4200, hidden_ms: 1000, at: '2026-10-05T12:00:00.000Z' },
+        { rater: 'ann', pair: ids[1], choice: 'tie', ms: 900, hidden_ms: null, at: '2026-10-05T12:00:01.000Z' },
+        { rater: 'bob', pair: ids[1], choice: 'b', ms: 700, hidden_ms: null, at: '2026-10-05T12:00:02.000Z' },
+        { rater: 'ann', pair: ids[0], choice: 'b', ms: 1500, hidden_ms: null, at: '2026-10-05T12:00:03.000Z' },
       ]);
-      // GET /votes gives the page what it needs to resume: both pairs rated, the revision last.
-      const { votes } = JSON.parse((await call(url + 'votes')).body);
-      assert.deepEqual(votes, lines);
+      // GET /votes gives the page what it needs to resume, and only the asking rater's votes: both pairs rated, the revision last.
+      const { votes } = JSON.parse((await call(url + 'votes?rater=ann')).body);
+      assert.deepEqual(votes, [lines[0], lines[1], lines[3]]);
       const latest = latestChoices(votes);
       assert.equal(latest.get(ids[0]), 'b');
       assert.equal(nextUnrated([{ id: ids[0] }, { id: ids[1] }], latest), -1);
+      assert.deepEqual(JSON.parse((await call(url + 'votes?rater=bob')).body).votes, [lines[2]]);
     } finally { await close(); }
-    // A second server on the same directory resumes from the same file.
+    // A second server on the same directory resumes from the same file, and
+    // from the votes other raters sent back (votes-<rater>.jsonl).
+    await writeFile(join(dir, 'votes-cy.jsonl'), JSON.stringify({ rater: 'cy', pair: ids[0], choice: 'tie', ms: 5, at: '2026-10-06T08:00:00.000Z' }) + '\n');
     const again = await startStudyServer({ studyDir: dir, port: 0 });
-    try { assert.equal(JSON.parse((await call(again.url + 'votes')).body).votes.length, 3); } finally { await again.close(); }
+    try {
+      assert.equal(JSON.parse((await call(again.url + 'votes?rater=ann')).body).votes.length, 3);
+      assert.deepEqual(JSON.parse((await call(again.url + 'votes?rater=cy')).body).votes.map(vote => [vote.rater, vote.choice]), [['cy', 'tie']]);
+    } finally { await again.close(); }
   });
 });
 
-test('parseVotes skips torn and invalid lines and counts them', () => {
-  const text = '{"pair":"p1","choice":"a","ms":5,"at":"t"}\n{"pair":"p2","choi\n{"pair":"p3","choice":"maybe"}\n\n{"pair":"p2","choice":"tie","ms":7}\n';
-  const { votes, malformed } = parseVotes(text);
-  assert.equal(malformed, 2);
-  assert.deepEqual(votes.map(vote => [vote.pair, vote.choice]), [['p1', 'a'], ['p2', 'tie']]);
+test('server: votes recorded before raters had names are r0, or the legacy rater named at start', async () => {
+  await withTemp(async dir => {
+    const { ids } = await handMadeStudy(dir);
+    await writeFile(join(dir, 'votes.jsonl'), [{ pair: ids[0], choice: 'a', ms: 9, at: '2026-10-01T00:00:00.000Z' }, { pair: ids[1], choice: 'b', ms: 9, at: '2026-10-01T00:00:01.000Z' }]
+      .map(line => JSON.stringify(line)).join('\n') + '\n');
+    const plain = await startStudyServer({ studyDir: dir, port: 0 });
+    try {
+      // r0 cannot be asked for (nobody can rate as r0), and the votes are nobody else's.
+      assert.equal((await call(plain.url + 'votes?rater=r0')).status, 400);
+      assert.deepEqual(JSON.parse((await call(plain.url + 'votes?rater=lls')).body).votes, []);
+    } finally { await plain.close(); }
+    await assert.rejects(startStudyServer({ studyDir: dir, port: 0, legacyRater: 'Not An Id' }), /legacy rater/);
+    const owner = await startStudyServer({ studyDir: dir, port: 0, legacyRater: 'lls', now: () => new Date(Date.UTC(2026, 9, 2)) });
+    try {
+      const { votes } = JSON.parse((await call(owner.url + 'votes?rater=lls')).body);
+      assert.deepEqual(votes.map(vote => [vote.rater, vote.pair, vote.choice]), [['lls', ids[0], 'a'], ['lls', ids[1], 'b']]);
+      // The owner goes on rating under the same name; the old lines are not rewritten.
+      const posted = await call(owner.url + 'vote', { method: 'POST', body: JSON.stringify({ rater: 'lls', pair: ids[0], choice: 'tie', ms: 3 }), headers: { 'Content-Type': 'application/json' } });
+      assert.equal(posted.status, 200);
+      const lines = (await readFile(join(dir, 'votes.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+      assert.deepEqual(lines.map(line => line.rater ?? null), [null, null, 'lls']);
+      assert.equal(latestChoices(JSON.parse((await call(owner.url + 'votes?rater=lls')).body).votes).get(ids[0]), 'tie');
+    } finally { await owner.close(); }
+  });
+});
+
+test('parseVotes skips torn and invalid lines and counts them; a vote without a rater gets the default', () => {
+  const text = '{"pair":"p1","choice":"a","ms":5,"at":"t"}\n{"pair":"p2","choi\n{"pair":"p3","choice":"maybe"}\n\n{"pair":"p2","choice":"tie","ms":7}\n' +
+    '{"rater":"ann","pair":"p4","choice":"b"}\n{"rater":"Ann!","pair":"p5","choice":"b"}\n{"rater":5,"pair":"p5","choice":"b"}\n{"rater":null,"pair":"p6","choice":"a"}\n';
+  const { votes, malformed, unnamed } = parseVotes(text);
+  assert.equal(malformed, 4);
+  assert.equal(unnamed, 3);
+  assert.deepEqual(votes.map(vote => [vote.rater, vote.pair, vote.choice]), [['r0', 'p1', 'a'], ['r0', 'p2', 'tie'], ['ann', 'p4', 'b'], ['r0', 'p6', 'a']]);
+  assert.deepEqual(parseVotes(text, { rater: 'cy' }).votes.map(vote => vote.rater), ['cy', 'cy', 'ann', 'cy']);
+});
+
+test('readVoteFiles merges votes.jsonl and votes-<rater>.jsonl in the order cast, once per vote', async () => {
+  await withTemp(async dir => {
+    const line = value => JSON.stringify(value);
+    const annLate = { rater: 'ann', pair: 'P2', choice: 'b', ms: 3, hidden_ms: null, at: '2026-10-03T00:00:00.000Z' };
+    await writeFile(join(dir, 'votes.jsonl'), [line({ pair: 'P1', choice: 'a', ms: 1, at: '2026-10-01T00:00:00.000Z' }), 'torn{',
+      line({ rater: 'lls', pair: 'P1', choice: 'b', ms: 2, at: '2026-10-04T00:00:00.000Z' })].join('\n') + '\n');
+    // A rater's file: their lines name them; a line without a rater is theirs by the file's name.
+    await writeFile(join(dir, 'votes-ann.jsonl'), [line({ rater: 'ann', pair: 'P1', choice: 'tie', ms: 4, at: '2026-10-02T00:00:00.000Z' }), line(annLate),
+      line({ pair: 'P3', choice: 'a', ms: 5, at: '2026-10-02T12:00:00.000Z' })].join('\n') + '\n');
+    // The same vote sent twice counts once.
+    await writeFile(join(dir, 'votes-copy.jsonl'), line(annLate) + '\n');
+    // Not read: not a rater id (upper case, a hyphen, the reserved r0), or not a votes file at all.
+    for (const name of ['votes-Bob.jsonl', 'votes-a-b.jsonl', 'votes-r0.jsonl', 'votes-.jsonl', 'votes.jsonl.bak', 'notes.jsonl']) await writeFile(join(dir, name), line({ rater: 'bob', pair: 'P1', choice: 'a' }) + '\n');
+    const read = await readVoteFiles(dir);
+    assert.equal(read.malformed, 1);
+    assert.equal(read.duplicates, 1);
+    assert.deepEqual(read.ignored, ['votes-.jsonl', 'votes-Bob.jsonl', 'votes-a-b.jsonl', 'votes-r0.jsonl']);
+    assert.deepEqual(read.files.map(file => [file.file, file.lines, file.valid_lines, file.malformed_lines, file.unnamed_lines, file.raters]), [
+      ['votes.jsonl', 3, 2, 1, 1, ['lls', 'r0']], ['votes-ann.jsonl', 3, 3, 0, 1, ['ann']], ['votes-copy.jsonl', 1, 1, 0, 0, ['ann']]]);
+    // Each file in its line order (ann's P3 stays last although its clock says earlier), files interleaved by time.
+    assert.deepEqual(read.votes.map(vote => [vote.rater, vote.pair, vote.choice]), [['r0', 'P1', 'a'], ['ann', 'P1', 'tie'], ['ann', 'P2', 'b'], ['ann', 'P3', 'a'], ['lls', 'P1', 'b']]);
+    // The owner's votes from before raters had names are theirs when they say so.
+    const owned = await readVoteFiles(dir, { legacyRater: 'lls' });
+    assert.deepEqual(owned.votes.filter(vote => vote.rater === 'lls').map(vote => [vote.pair, vote.choice]), [['P1', 'a'], ['P1', 'b']]);
+    assert.equal(owned.legacy_rater, 'lls');
+    await assert.rejects(readVoteFiles(dir, { legacyRater: 'LLS' }), /legacy rater/);
+    assert.deepEqual(await readVoteFiles(join(dir, 'missing')), { votes: [], malformed: 0, duplicates: 0, files: [], ignored: [], legacy_rater: 'r0' });
+  });
+});
+
+test('copies of a log, whole or in part, keep each file\'s order around the shared lines', async () => {
+  await withTemp(async dir => {
+    const line = value => JSON.stringify(value) + '\n';
+    const a = { rater: 'ann', pair: 'P1', choice: 'a', ms: 1, at: '2026-10-05T12:01:00.000Z' }, b = { rater: 'ann', pair: 'P1', choice: 'b', ms: 1, at: '2026-10-05T12:00:00.000Z' };
+    const latest = async () => latestChoices((await readVoteFiles(dir)).votes).get('P1');
+    // The full log is in a later file than a copy of its first line, and the other way round.
+    await writeFile(join(dir, 'votes-ann.jsonl'), line(a));
+    await writeFile(join(dir, 'votes-copy.jsonl'), line(a) + line(b));
+    assert.equal(await latest(), 'b');
+    assert.equal((await readVoteFiles(dir)).duplicates, 1);
+    await writeFile(join(dir, 'votes-ann.jsonl'), line(a) + line(b));
+    await writeFile(join(dir, 'votes-copy.jsonl'), line(a));
+    assert.equal(await latest(), 'b');
+    // A copy of only the later line.
+    await writeFile(join(dir, 'votes-copy.jsonl'), line(b));
+    assert.equal(await latest(), 'b');
+    // Files that contradict each other give way to the time stamps (b is earlier, so a is last).
+    await writeFile(join(dir, 'votes-copy.jsonl'), line(b) + line(a));
+    assert.equal(await latest(), 'a');
+    assert.equal((await readVoteFiles(dir)).votes.length, 2);
+    // ... and only among the votes on the contradiction: a newer revision elsewhere still comes last.
+    const c = { rater: 'ann', pair: 'P1', choice: 'tie', ms: 1, at: '2026-10-05T12:03:00.000Z' };
+    await writeFile(join(dir, 'votes.jsonl'), line(c));
+    assert.equal(await latest(), 'tie');
+    assert.deepEqual((await readVoteFiles(dir)).votes.map(vote => vote.choice), ['b', 'a', 'tie']);
+    // An order that does not contradict anything is kept around the contradiction: d after c in one file stays last.
+    const d = { rater: 'ann', pair: 'P1', choice: 'a', ms: 2, at: '2026-10-05T11:00:00.000Z' };
+    await writeFile(join(dir, 'votes.jsonl'), line(c) + line(d));
+    assert.deepEqual((await readVoteFiles(dir)).votes.map(vote => [vote.choice, vote.ms]), [['b', 1], ['a', 1], ['tie', 1], ['a', 2]]);
+  });
+});
+
+test('the same line twice in one file is two votes; its second time is a copy only of a second time elsewhere', async () => {
+  await withTemp(async dir => {
+    const line = value => JSON.stringify(value) + '\n';
+    // Revisions a, b, a with no time and no timing: the last a stands.
+    const a = { rater: 'ann', pair: 'P1', choice: 'a' }, b = { rater: 'ann', pair: 'P1', choice: 'b' };
+    await writeFile(join(dir, 'votes-ann.jsonl'), line(a) + line(b) + line(a));
+    let read = await readVoteFiles(dir);
+    assert.deepEqual([read.votes.map(vote => vote.choice), read.duplicates], [['a', 'b', 'a'], 0]);
+    assert.equal(latestChoices(read.votes).get('P1'), 'a');
+    // A whole copy of that log adds nothing; a copy of its first line only matches the first a.
+    await writeFile(join(dir, 'votes-copy.jsonl'), line(a) + line(b) + line(a));
+    read = await readVoteFiles(dir);
+    assert.deepEqual([read.votes.map(vote => vote.choice), read.duplicates], [['a', 'b', 'a'], 3]);
+    await writeFile(join(dir, 'votes-copy.jsonl'), line(a));
+    read = await readVoteFiles(dir);
+    assert.deepEqual([read.votes.map(vote => vote.choice), read.duplicates], [['a', 'b', 'a'], 1]);
+    assert.equal(analyzeStudy({ key: handKey(), votes: read.votes }).raters[0].votes.revisions, 2);
+  });
+});
+
+test('a revision counts even when the server clock stepped back, or the line has no time', async () => {
+  await withTemp(async dir => {
+    const line = value => JSON.stringify(value);
+    await writeFile(join(dir, 'votes.jsonl'), [line({ rater: 'ann', pair: 'P1', choice: 'a', ms: 1, at: '2026-10-05T12:01:00.000Z' }),
+      line({ rater: 'ann', pair: 'P1', choice: 'b', ms: 1, at: '2026-10-05T12:00:00.000Z' }),
+      line({ rater: 'ann', pair: 'P2', choice: 'a', ms: 1, at: '2026-10-05T12:02:00.000Z' }), line({ rater: 'ann', pair: 'P2', choice: 'tie', ms: 1 })].join('\n') + '\n');
+    await writeFile(join(dir, 'votes-bob.jsonl'), line({ rater: 'bob', pair: 'P1', choice: 'a', ms: 1, at: '2026-10-05T12:00:30.000Z' }) + '\n');
+    const { votes } = await readVoteFiles(dir);
+    const latest = latestChoices(votes.filter(vote => vote.rater === 'ann'));
+    assert.deepEqual([latest.get('P1'), latest.get('P2')], ['b', 'tie']);
+    const analysis = analyzeStudy({ key: handKey(), votes });
+    const ann = analysis.raters.find(item => item.rater === 'ann');
+    assert.equal(ann.votes.revisions, 2);
+    // P1: ann's revision b is what is compared with bob's a.
+    assert.deepEqual(analysis.between_raters.pairwise.map(row => [row.raters.join('-'), row.both_rated, row.same_choice.k]), [['ann-bob', 1, 0]]);
+  });
 });
 
 // ------------------------------------------------------------ analysis
@@ -492,11 +671,17 @@ test('analysis on a hand-computed example: last vote wins, agreement, Wilson, st
     { pair: 'R1', choice: 'b', ms: 7000 }, { pair: 'R3', choice: 'tie', ms: 8000 }, { pair: 'zzz', choice: 'a', ms: 9000 },
   ];
   const analysis = analyzeStudy({ key, votes, malformed: 1 });
-  assert.deepEqual(analysis.votes, { lines: 11, valid_lines: 10, malformed_lines: 1, unknown_pair_lines: 1, revisions: 1, pairs_total: 9, pairs_rated: 8,
+  // Votes without a rater (recorded before raters had names) are r0's: one rater, analysed as before.
+  assert.equal(analysis.schema, 'e3d-study-analysis-v2');
+  assert.deepEqual(analysis.raters.map(item => item.rater), ['r0']);
+  assert.deepEqual(analysis.votes, { files: null, ignored_files: [], legacy_rater: 'r0', lines: 11, valid_lines: 10, malformed_lines: 1, duplicate_lines: 0,
+    unknown_pair_lines: 1, raters: ['r0'], raters_only_unknown_pairs: [], raters_left_out: [], raters_not_found: [], left_out_lines: 0, pairs_total: 9, originals_total: 7 });
+  const rater = analysis.raters[0];
+  assert.deepEqual(rater.votes, { lines: 10, unknown_pair_lines: 1, revisions: 1, pairs_total: 9, pairs_rated: 8,
     pairs_unrated: 1, originals_total: 7, originals_rated: 6, ties: 1, median_ms: 4500, median_visible_ms: 4500 });
   // Visible time: P1 drops to 0, which is still below the median pair.
-  assert.equal(analyzeStudy({ key, votes: votes.map(vote => vote.pair === 'P6' ? { ...vote, hidden_ms: 6000 } : vote) }).votes.median_visible_ms, 3000);
-  const [headline, shape, detail] = analysis.agreement;
+  assert.equal(analyzeStudy({ key, votes: votes.map(vote => vote.pair === 'P6' ? { ...vote, hidden_ms: 6000 } : vote) }).raters[0].votes.median_visible_ms, 3000);
+  const [headline, shape, detail] = rater.agreement;
   // Decided originals: P1 agree, P2 agree, P3 agree (after the revision), P4 disagree, P6 disagree.
   assert.deepEqual([headline.overall.k, headline.overall.n, headline.overall.no_higher_side], [3, 5, 0]);
   near(headline.overall.low, 0.2307); near(headline.overall.high, 0.8824);
@@ -508,22 +693,126 @@ test('analysis on a hand-computed example: last vote wins, agreement, Wilson, st
   assert.deepEqual([detail.overall.k, detail.overall.n, detail.overall.no_higher_side], [3, 4, 1]);
   near(detail.overall.low, 0.3006); near(detail.overall.high, 0.9544);
   // The curve and tie rates.
-  assert.deepEqual(analysis.curve.map(row => [row.stratum, row.pairs, row.rated, row.ties, row.agreement.k, row.agreement.n]),
+  assert.deepEqual(rater.curve.map(row => [row.stratum, row.pairs, row.rated, row.ties, row.agreement.k, row.agreement.n]),
     [['0-3', 2, 1, 0, 0, 1], ['3-8', 1, 1, 1, 0, 0], ['8-15', 2, 2, 0, 1, 2], ['15-100', 2, 2, 0, 2, 2]]);
-  assert.equal(analysis.curve[1].tie_rate.p, 1);
-  assert.equal(analysis.curve[3].mean_gap, 25);
+  assert.equal(rater.curve[1].tie_rate.p, 1);
+  assert.equal(rater.curve[3].mean_gap, 25);
   // Side habit: A chosen in P1, P3, P4, P6 of five decided originals.
-  assert.deepEqual([analysis.side_preference_a.k, analysis.side_preference_a.n], [4, 5]);
+  assert.deepEqual([rater.side_preference_a.k, rater.side_preference_a.n], [4, 5]);
   // Self-consistency: P1 a then R1 b (swapped) is the same choice; P3 a then R3 tie is one tie.
-  const c = analysis.self_consistency;
+  const c = rater.self_consistency;
   assert.deepEqual([c.repeats, c.both_rated, c.same, c.opposite, c.both_tie, c.one_tie], [2, 2, 1, 0, 0, 1]);
   assert.deepEqual([c.same_share_of_decided.k, c.same_share_of_decided.n, c.exact_share.k, c.exact_share.n], [1, 1, 1, 2]);
   // Largest disagreements: P4 (gap 9) before P6 (gap 1).
-  assert.deepEqual(analysis.largest_disagreements.map(row => [row.pair, row.gap, row.delta_a_minus_b, row.choice]), [['P4', 9, -9, 'a'], ['P6', 1, -1, 'a']]);
-  assert.deepEqual(analysis.largest_disagreements[0].images, key.pairs[3].images);
+  assert.deepEqual(rater.largest_disagreements.map(row => [row.pair, row.gap, row.delta_a_minus_b, row.choice]), [['P4', 9, -9, 'a'], ['P6', 1, -1, 'a']]);
+  assert.deepEqual(rater.largest_disagreements[0].images, key.pairs[3].images);
   // Before the revision P3 was a disagreement: the first vote does not count.
   const firstOnly = analyzeStudy({ key, votes: votes.filter((_, i) => i !== 3) });
-  assert.deepEqual([firstOnly.agreement[0].overall.k, firstOnly.agreement[0].overall.n], [2, 5]);
+  assert.deepEqual([firstOnly.raters[0].agreement[0].overall.k, firstOnly.raters[0].agreement[0].overall.n], [2, 5]);
+  // One rater: nothing between raters, and the same analysis when the votes are named.
+  assert.deepEqual(analysis.between_raters.pairwise, []);
+  assert.equal(analysis.between_raters.fleiss, null);
+  assert.equal(analysis.between_raters.majority.pairs, 0);
+  const owned = analyzeStudy({ key, votes, malformed: 1, legacyRater: 'lls' });
+  assert.deepEqual(owned.raters.map(item => item.rater), ['lls']);
+  assert.deepEqual({ ...owned.raters[0], rater: 'r0' }, rater);
+  assert.match(analysisMarkdown(analysis), /## Between raters\n\nOne rater \(r0\): agreement between raters needs two or more/);
+});
+
+test('Cohen\'s and Fleiss\' kappa match textbook values', () => {
+  // Cohen (1960) as usually taught: 50 items, both yes 20, yes/no 5, no/yes 10, both no 15 -> po 0.7, pe 0.5, kappa 0.4.
+  const grant = [...Array(20).fill(['yes', 'yes']), ...Array(5).fill(['yes', 'no']), ...Array(10).fill(['no', 'yes']), ...Array(15).fill(['no', 'no'])];
+  const cohen = cohenKappa(grant, ['yes', 'no']);
+  assert.deepEqual([cohen.n, cohen.same], [50, 35]);
+  near(cohen.observed, 0.7, 1e-12); near(cohen.chance, 0.5, 1e-12); near(cohen.kappa, 0.4, 1e-12);
+  // Perfect agreement, chance agreement and an undefined kappa (one category throughout).
+  near(cohenKappa([['a', 'a'], ['b', 'b'], ['tie', 'tie']]).kappa, 1, 1e-12);
+  near(cohenKappa([['a', 'a'], ['a', 'b'], ['b', 'a'], ['b', 'b']]).kappa, 0, 1e-12);
+  assert.equal(cohenKappa([['a', 'a'], ['a', 'a']]).kappa, null);
+  assert.deepEqual(cohenKappa([]), { n: 0, same: 0, observed: null, chance: null, kappa: null });
+  assert.throws(() => cohenKappa([['a', 'maybe']]), /unknown category/);
+  // Fleiss (1971) as usually taught: 10 items, 14 raters, 5 categories -> P 0.378, Pe 0.213, kappa 0.210.
+  const fleiss = fleissKappa([[0, 0, 0, 0, 14], [0, 2, 6, 4, 2], [0, 0, 3, 5, 6], [0, 3, 9, 2, 0], [2, 2, 8, 1, 1], [7, 7, 0, 0, 0], [3, 2, 6, 3, 0], [2, 5, 3, 2, 2], [6, 5, 2, 1, 0], [0, 2, 2, 3, 7]]);
+  assert.deepEqual([fleiss.items, fleiss.raters_per_item], [10, 14]);
+  near(fleiss.observed, 0.378); near(fleiss.chance, 0.2128); near(fleiss.kappa, 0.2099);
+  near(fleiss.shares[2], 0.2786);
+  assert.throws(() => fleissKappa([[1, 1, 0], [2, 1, 0]]), /same number of ratings/);
+  assert.throws(() => fleissKappa([[1, 0, 0]]), /two or more/);
+  assert.equal(fleissKappa([]).kappa, null);
+});
+
+// Three raters on the hand-made key (see the comments for the hand computation).
+//   pair  higher (shape, detail)  ann  bob  cy
+//   P1    a (a, b)                a    a    a
+//   P2    b (b, b)                b    b    tie
+//   P3    a (b, a)                a    b    a
+//   P4    b (b, a)                tie  tie  b
+//   P5    a (a, a)                a    tie  -
+//   P6    b (a, equal)            b    a    b
+//   P7    b (b, b)                -    b    b
+function threeRaterVotes() {
+  const table = { P1: ['a', 'a', 'a'], P2: ['b', 'b', 'tie'], P3: ['a', 'b', 'a'], P4: ['tie', 'tie', 'b'], P5: ['a', 'tie', null], P6: ['b', 'a', 'b'], P7: [null, 'b', 'b'] };
+  const votes = [];
+  let second = 0;
+  for (const [index, rater] of ['ann', 'bob', 'cy'].entries()) {
+    for (const [pair, choices] of Object.entries(table)) {
+      if (choices[index]) votes.push({ rater, pair, choice: choices[index], ms: 1000, hidden_ms: 0, at: new Date(Date.UTC(2026, 9, 10, 0, 0, second++)).toISOString() });
+    }
+  }
+  return votes;
+}
+
+test('between raters: Cohen\'s kappa per two raters, Fleiss\' kappa, majority vote, by hand', () => {
+  const key = handKey();
+  // A first, revised vote of bob's on P3 (a, then b) and one for an unknown pair: the last vote counts, the unknown is skipped.
+  const votes = [{ rater: 'bob', pair: 'P3', choice: 'a', ms: 10, at: '2026-10-09T00:00:00.000Z' }, { rater: 'cy', pair: 'zzz', choice: 'a', ms: 10, at: '2026-10-09T00:00:00.000Z' }, ...threeRaterVotes()];
+  const analysis = analyzeStudy({ key, votes });
+  assert.deepEqual(analysis.votes.raters, ['ann', 'bob', 'cy']);
+  assert.deepEqual(analysis.raters.map(item => [item.rater, item.votes.pairs_rated, item.votes.revisions, item.votes.unknown_pair_lines, item.agreement[0].overall.k, item.agreement[0].overall.n]),
+    [['ann', 6, 0, 0, 5, 5], ['bob', 7, 1, 0, 3, 5], ['cy', 6, 0, 1, 5, 5]]);
+  const between = analysis.between_raters;
+  // ann-bob: 6 both rated, same on P1 P2 P4 (po 1/2); shares ann a 3 tie 1 b 2, bob 2 2 2 -> pe 1/3, kappa 1/4; both decided P1 P2 P3 P6, same side 2.
+  // ann-cy: 5 both rated (P1-P4, P6), same on P1 P3 P6 (po 3/5); shares 2 1 2 and 2 1 2 -> pe 9/25, kappa 3/8; both decided P1 P3 P6, all the same side.
+  // bob-cy: 6 both rated (P1-P4, P6, P7), same on P1 P7 (po 1/3); shares 2 1 3 and 2 1 3 -> pe 7/18, kappa -1/11; both decided P1 P3 P6 P7, same side 2.
+  assert.deepEqual(between.pairwise.map(row => [row.raters.join('-'), row.both_rated, row.same_choice.k, row.both_decided_same_side.k, row.both_decided_same_side.n]),
+    [['ann-bob', 6, 3, 2, 4], ['ann-cy', 5, 3, 3, 3], ['bob-cy', 6, 2, 2, 4]]);
+  near(between.pairwise[0].cohen_kappa, 1 / 4, 1e-12); near(between.pairwise[0].chance_agreement, 1 / 3, 1e-12);
+  near(between.pairwise[1].cohen_kappa, 3 / 8, 1e-12); near(between.pairwise[1].chance_agreement, 9 / 25, 1e-12);
+  near(between.pairwise[2].cohen_kappa, -1 / 11, 1e-12); near(between.pairwise[2].chance_agreement, 7 / 18, 1e-12);
+  // Fleiss over the 5 pairs all three rated (P1-P4, P6): counts a/tie/b 300, 012, 201, 021, 102;
+  // per pair agreement 1, 1/3, 1/3, 1/3, 1/3 -> P 7/15; shares 6/15, 3/15, 6/15 -> Pe 0.36; kappa (7/15 - 0.36) / 0.64 = 1/6.
+  assert.deepEqual([between.fleiss.raters, between.fleiss.pairs], [['ann', 'bob', 'cy'], 5]);
+  near(between.fleiss.observed, 7 / 15, 1e-12); near(between.fleiss.chance, 0.36, 1e-12); near(between.fleiss.kappa, 1 / 6, 1e-12);
+  assert.deepEqual(Object.keys(between.fleiss.shares), ['a', 'tie', 'b']);
+  near(between.fleiss.shares.tie, 0.2, 1e-12);
+  // Majority: P1 a, P2 b, P3 a, P4 tie, P5 none (a, tie), P6 b, P7 b (two raters).
+  const m = between.majority;
+  assert.deepEqual([m.pairs, m.raters_per_pair, m.decided, m.tie, m.no_majority], [7, { 2: 2, 3: 5 }, 5, 1, 1]);
+  // Headline: all five decided majorities agree; shape: P3 and P6 do not; detail: P1 does not, P6 has no higher side.
+  assert.deepEqual(m.agreement.map(row => [row.measure, row.overall.k, row.overall.n, row.overall.no_higher_side]),
+    [['score', 5, 5, 0], ['shape_score', 3, 5, 0], ['detail_score', 3, 4, 1]]);
+  assert.deepEqual(m.agreement[0].strata.map(row => [row.stratum, row.k, row.n]), [['0-3', 2, 2], ['3-8', 0, 0], ['8-15', 1, 1], ['15-100', 2, 2]]);
+  // A rater whose only votes are for another study's pairs is listed, not analysed or compared.
+  const stray = analyzeStudy({ key, votes: [...votes, { rater: 'zed', pair: 'other-study-1', choice: 'a', ms: 10, at: '2026-10-11T00:00:00.000Z' }] });
+  assert.deepEqual([stray.votes.raters, stray.votes.raters_only_unknown_pairs, stray.votes.unknown_pair_lines, stray.raters.length], [['ann', 'bob', 'cy'], ['zed'], 2, 3]);
+  assert.deepEqual(stray.between_raters, between);
+  assert.match(analysisMarkdown(stray), /\| raters whose votes are all for unknown pairs \(not analysed\) \| zed \|/);
+  assert.deepEqual(analyzeStudy({ key, votes: [...votes, { rater: 'zed', pair: 'other-study-1', choice: 'a' }], raters: ['ann', 'zed'] }).votes.raters_only_unknown_pairs, ['zed']);
+  // Two raters: no Fleiss; --raters picks them.
+  const two = analyzeStudy({ key, votes, raters: ['ann', 'cy', 'dan'] });
+  assert.deepEqual([two.votes.raters, two.votes.raters_left_out, two.votes.raters_not_found, two.votes.left_out_lines], [['ann', 'cy'], ['bob'], ['dan'], 8]);
+  assert.equal(two.between_raters.fleiss, null);
+  assert.deepEqual(two.between_raters.pairwise.map(row => row.raters), [['ann', 'cy']]);
+  // The markdown: a row per rater, the curve side by side with the majority, the section between raters.
+  const markdown = analysisMarkdown(analysis);
+  assert.match(markdown, /## Raters\n/);
+  assert.match(markdown, /\| stratum \| ann \| bob \| cy \| majority \|/);
+  assert.match(markdown, /## Between raters\n/);
+  assert.match(markdown, /\| ann – bob \| 6 \| 3 \(50\.0% \[[^|]*\]\) \| 0\.250 \| 33\.3% \| 2 \/ 4 /);
+  assert.match(markdown, /\| bob – cy \| 6 \| 2 \([^|]*\) \| -0\.091 \|/);
+  assert.match(markdown, /Fleiss' κ over ann, bob, cy, on the 5 original pairs every one of them rated: κ = 0\.167/);
+  assert.match(markdown, /### Majority vote\n\n[^\n]*7 pairs \(2 rated by 2, 5 rated by 3\); majority for A or B 5, for "cannot tell" 1, no majority 1\./);
+  for (const name of ['ann', 'bob', 'cy']) assert.match(markdown, new RegExp('## Rater ' + name + '\n'));
 });
 
 test('analyze writes analysis.md and analysis.json from votes.jsonl and key.json', async () => {
@@ -532,12 +821,78 @@ test('analyze writes analysis.md and analysis.json from votes.jsonl and key.json
     await writeFile(join(dir, 'votes.jsonl'), ['P1 a', 'P2 b', 'P4 a'].map(text => JSON.stringify({ pair: text.split(' ')[0], choice: text.split(' ')[1], ms: 10, at: 't' })).join('\n') + '\nnot json\n');
     const { analysis, files } = await writeAnalysis(dir);
     assert.equal(analysis.votes.malformed_lines, 1);
-    assert.deepEqual([analysis.agreement[0].overall.k, analysis.agreement[0].overall.n], [2, 3]);
+    assert.deepEqual(analysis.raters.map(item => item.rater), ['r0']);
+    assert.deepEqual([analysis.raters[0].agreement[0].overall.k, analysis.raters[0].agreement[0].overall.n], [2, 3]);
     const saved = JSON.parse(await readFile(join(dir, 'analysis.json'), 'utf8'));
-    assert.deepEqual(saved.agreement[0].overall, analysis.agreement[0].overall);
+    assert.deepEqual(saved.raters[0].agreement[0].overall, analysis.raters[0].agreement[0].overall);
     const markdown = await readFile(files[0], 'utf8');
+    assert.match(markdown, /\| votes\.jsonl \| 4 \| 3 \| 1 \| 3 \| r0 \|/);
+    assert.match(markdown, /r0 holds the votes in votes\.jsonl recorded before raters had names/);
     assert.match(markdown, /\| headline score \| 2 \/ 3 \| 66\.7% \[/);
     assert.match(markdown, /P\(rater picks the higher-scored\) against \|Δ\|/);
     assert.match(markdown, /\| P4 \| -9\.00 \| 50\.00 \| 59\.00 \| A \|/);
+    assert.match(markdown, /## Between raters\n\nOne rater \(r0\)/);
+
+    // Two more raters send back their files; the owner's old votes become theirs with --legacy-rater.
+    const sent = rater => threeRaterVotes().filter(vote => vote.rater === rater).map(vote => JSON.stringify(vote)).join('\n') + '\n';
+    await writeFile(join(dir, 'votes-bob.jsonl'), sent('bob'));
+    await writeFile(join(dir, 'votes-cy.jsonl'), sent('cy'));
+    await writeFile(join(dir, 'votes-Dan.jsonl'), sent('cy'));
+    const merged = (await writeAnalysis(dir, { legacyRater: 'ann' })).analysis;
+    assert.deepEqual(merged.votes.raters, ['ann', 'bob', 'cy']);
+    assert.deepEqual(merged.votes.ignored_files, ['votes-Dan.jsonl']);
+    assert.deepEqual(merged.raters.map(item => [item.rater, item.votes.pairs_rated]), [['ann', 3], ['bob', 7], ['cy', 6]]);
+    assert.equal(merged.between_raters.fleiss.pairs, 3);
+    const mergedMarkdown = await readFile(files[0], 'utf8');
+    assert.match(mergedMarkdown, /Not read [^\n]*votes-Dan\.jsonl/);
+    assert.match(mergedMarkdown, /Votes in votes\.jsonl without a rater count as ann's \(--legacy-rater\)/);
+    assert.match(mergedMarkdown, /\| votes-bob\.jsonl \| 7 \| 7 \| 0 \| 0 \| bob \|/);
+  });
+});
+
+test('export copies pairs.json and the images it names for a rater, nothing private', async t => {
+  await withTemp(async root => {
+    const dataRoot = join(root, 'data'), dir = studyDir(dataRoot, 'srv');
+    await mkdir(dir, { recursive: true });
+    const { ids } = await handMadeStudy(dir);
+    for (const role of ['a', 'b']) await writeFile(join(dir, 'images', imageName(ids[0], role, 'fl')), encodePNG(2, 2, new Uint8Array(12).fill(100), 3));
+    // Only the images pairs.json names, all of them: a named image missing on disk stops the export.
+    await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: join(root, 'early') }), /named in pairs\.json but missing/);
+    await assert.rejects(readdir(join(root, 'early')), /ENOENT/);
+    for (const id of ids) for (const view of STUDY_VIEWS) for (const role of ['r', 'a', 'b']) {
+      await writeFile(join(dir, 'images', imageName(id, role, view.id)), encodePNG(2, 2, new Uint8Array(12).fill(150), 3));
+    }
+    await writeFile(join(dir, 'votes.jsonl'), JSON.stringify({ rater: 'lls', pair: ids[0], choice: 'a', ms: 1, at: 't' }) + '\n');
+    await writeFile(join(dir, 'analysis.md'), '# secret\n');
+    const out = join(root, 'for-ann');
+    const summary = await exportStudy({ dataRoot, name: 'srv', out });
+    assert.deepEqual([summary.pairs, summary.images, summary.dir], [2, 2 * 3 * STUDY_VIEWS.length, studyDir(out, 'srv')]);
+    assert.deepEqual((await readdir(out)).sort(), ['README.txt', 'study']);
+    assert.deepEqual((await readdir(summary.dir)).sort(), ['images', 'pairs.json']);
+    assert.equal((await readdir(join(summary.dir, 'images'))).length, summary.images);
+    assert.ok(!(await readdir(join(summary.dir, 'images'))).includes('stray.png'));
+    assert.equal(await readFile(join(summary.dir, 'pairs.json'), 'utf8'), await readFile(join(dir, 'pairs.json'), 'utf8'));
+    const readme = await readFile(join(out, 'README.txt'), 'utf8');
+    assert.match(readme, /serve --name srv --data <这个文件夹>/);
+    assert.deepEqual(forbiddenIn(readme), []);
+    // The exported copy is a working study for the rater: the server needs nothing else.
+    const served = await startStudyServer({ studyDir: summary.dir, port: 0 });
+    try { assert.equal((await call(served.url + 'pairs.json')).status, 200); } finally { await served.close(); }
+    // Never over an existing directory, never into the repository outside .local/.
+    await assert.rejects(exportStudy({ dataRoot, name: 'srv', out }), /already exists/);
+    const repo = fileURLToPath(new URL('../../', import.meta.url));
+    // Should the guard ever fail, what it let through is removed again.
+    // Names no one else uses; should the guard ever fail, only what it let through under them is removed.
+    const probe = 'e3d-export-probe-' + randomUUID();
+    t.after(() => Promise.all([rm(join(repo, probe), { recursive: true, force: true }), rm(join(repo, 'v1', probe), { recursive: true, force: true })]));
+    await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: join(repo, probe) }), /inside the repository/);
+    await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: repo }), /inside the repository/);
+    // Nor through a symlinked alias of the repository (e.g. macOS /tmp for /private/tmp), or a symlink to a missing path.
+    await symlink(repo, join(root, 'alias'));
+    await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: join(root, 'alias', probe) }), /inside the repository/);
+    await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: join(root, 'alias', 'v1', probe, 'deeper') }), /inside the repository/);
+    await symlink(join(root, 'nowhere'), join(root, 'dangling'));
+    await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: join(root, 'dangling', 'sub') }), /symlink to a missing path/);
+    await assert.rejects(exportStudy({ dataRoot, name: 'srv', out: join(root, 'dangling') }), /symlink to a missing path|already exists/);
   });
 });

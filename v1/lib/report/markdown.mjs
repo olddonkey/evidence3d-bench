@@ -1,5 +1,5 @@
 import { VARIANTS } from '../contract.mjs';
-import { intervalText, signedText, attemptShareText, VARIANT_ORDER, CONFLICT_KINDS } from './aggregate.mjs';
+import { intervalText, signedText, attemptShareText, pText, allPairsNote, VARIANT_ORDER, CONFLICT_KINDS } from './aggregate.mjs';
 import { fractionLabel } from './html.mjs';
 import { timeMarkdown } from './time-chart.mjs';
 
@@ -27,6 +27,44 @@ const med = (value, { digits = 1, scale = 1, suffix = '' } = {}) => !value || !i
     (value.low_evidence ? ' †' : '');
 
 const verdicts = { a_higher: 'A higher', b_higher: 'B higher', not_separated: 'not separated', unsettled: 'unsettled', not_evaluated: 'not evaluated' };
+const separated = verdict => verdict === 'a_higher' || verdict === 'b_higher';
+const holm = (pair, note = '') => !pair.holm ? (pair.reference ? 'reference row' : 'not tested')
+  : (separated(pair.holm.verdict) ? 'separated' : 'not separated') + ' (adj. p ' + pText(pair.holm.p_adjusted) + ')' + (note ? '; ' + note : '');
+const correctionLine = correction => correction.comparisons
+  ? correction.separated + ' of ' + correction.comparisons + ' pairs separated after Holm (' + correction.separated_uncorrected + ' uncorrected)' : 'no testable pair';
+const effortText = effort => effort ?? 'no flag';
+
+// The two ladders: ranks, scores, each ladder's pairs with Holm over them, and
+// the effort pairs (top minus default, same client and model).
+function laddersMarkdown(board, set) {
+  const byKey = new Map(board.entries.filter(entry => entry.set === set.id).map(entry => [entry.key, entry]));
+  const lines = ['### Ladders', '', set.ladder_rule[0].toUpperCase() + set.ladder_rule.slice(1) + '.', ''], note = allPairsNote(set);
+  for (const ladder of set.ladders) {
+    lines.push('#### ' + ladder.label, '');
+    if (ladder.entries.length) {
+      lines.push(table(['#', 'Configuration', 'Score', 'Success'], ladder.entries.map(item => {
+        const entry = byKey.get(item.key);
+        return [item.rank, item.key, stat(entry.score), entry.success.valid + ' / ' + entry.success.attempts];
+      }), 2), '');
+    } else lines.push('No configuration of this set is on this ladder.', '');
+    if (ladder.missing.length) lines.push('In the roster for this ladder, no counted attempt in this set: ' + ladder.missing.join(', ') + '.', '');
+    if (ladder.pairwise.pairs.length) {
+      lines.push(table(['A', 'B', 'Objects', 'A − B', '95% bootstrap', '95% Student-t', 'Verdict (uncorrected)', 'Holm (m = ' + ladder.pairwise.correction.comparisons + ')'],
+        ladder.pairwise.pairs.map(pair => [pair.a, pair.b, pair.objects, fixed(pair.mean_difference, 1, true), pair.ci95 ? intervalText(pair.ci95) : 'n/a',
+          pair.t_ci95 ? intervalText(pair.t_ci95) : 'n/a', verdicts[pair.verdict] ?? pair.verdict, holm(pair, note(pair))]), 2), '', correctionLine(ladder.pairwise.correction) + '.', '');
+    }
+  }
+  if (set.effort.pairs.length) {
+    lines.push('#### Effort: top − default, same client and model', '', table(['System', 'Model', 'Default', 'Top', 'Objects', 'Top − default', '95% bootstrap', '95% Student-t',
+      'Won / tied / lost', 'Verdict (uncorrected)', 'Holm (m = ' + set.effort.correction.comparisons + ')'],
+    set.effort.pairs.map(pair => [pair.system, pair.model, effortText(pair.default_effort), effortText(pair.top_effort), pair.objects, fixed(pair.mean_difference, 1, true),
+      pair.ci95 ? intervalText(pair.ci95) : 'n/a', pair.t_ci95 ? intervalText(pair.t_ci95) : 'n/a', pair.won + ' / ' + pair.tied + ' / ' + pair.lost,
+      verdicts[pair.verdict] ?? pair.verdict, holm(pair, note(pair))]), 4), '', correctionLine(set.effort.correction) + '.', '');
+  }
+  for (const note of set.ladder_notes ?? []) lines.push('- ' + note);
+  if (set.ladder_notes?.length) lines.push('');
+  return lines;
+}
 
 function setMarkdown(board, set) {
   const entries = board.entries.filter(entry => entry.set === set.id);
@@ -36,20 +74,23 @@ function setMarkdown(board, set) {
     set.batches.join(', ') + (set.first_started_at ? '; attempts ran ' + set.first_started_at + ' to ' + set.last_finished_at : '') + '.', '');
   for (const warning of set.warnings) lines.push('> Warning: ' + warning, '');
 
+  lines.push(...laddersMarkdown(board, set));
   const variants = VARIANT_ORDER.filter(variant => entries.some(entry => entry.variants[variant]));
   lines.push('### Leaderboard', '', table(['#', 'Configuration', 'Score', ...variants, 'Shape', 'Detail', 'Success'],
-    entries.map(entry => [entry.rank, entry.key, stat(entry.score), ...variants.map(variant => stat(entry.variants[variant])), stat(entry.shape), stat(entry.detail),
+    entries.map(entry => [entry.reference ? 'ref' : entry.rank, entry.key, stat(entry.score), ...variants.map(variant => stat(entry.variants[variant])), stat(entry.shape), stat(entry.detail),
       entry.success.valid + ' / ' + entry.success.attempts]), 2), '');
-  lines.push('Mean over objects with a 95% bootstrap interval over objects; attempts averaged within a task, tasks within an object; failures count as 0. † fewer than 3 objects.', '');
+  lines.push('Mean over objects with a 95% bootstrap interval over objects; attempts averaged within a task, tasks within an object; failures count as 0. † fewer than 3 objects.' +
+    (set.reference_configurations?.length ? ' ref: reference row, not in the roster: not ranked, in no corrected family.' : ''), '');
   if (set.unranked.length) lines.push('Not ranked (every attempt excluded): ' + set.unranked.map(item => item.key + ' (' + item.excluded_attempts + ')').join(', ') + '.', '');
 
   const pairs = set.pairwise.pairs;
   lines.push('### Pairwise comparison', '');
   if (pairs.length) {
-    lines.push(table(['A', 'B', 'Objects', 'A − B', '95% bootstrap', '95% Student-t', 'A ahead', 'Won / tied / lost', 'Verdict'],
+    lines.push(correctionLine(set.pairwise.correction) + '.', '');
+    lines.push(table(['A', 'B', 'Objects', 'A − B', '95% bootstrap', '95% Student-t', 'A ahead', 'Won / tied / lost', 'Verdict (uncorrected)', 'Holm (m = ' + set.pairwise.correction.comparisons + ')'],
       pairs.map(pair => [pair.a, pair.b, pair.objects, fixed(pair.mean_difference, 1, true), pair.ci95 ? intervalText(pair.ci95) : 'n/a', pair.t_ci95 ? intervalText(pair.t_ci95) : 'n/a',
         isNumber(pair.share_a_higher) ? (100 * pair.share_a_higher).toFixed(pair.share_a_higher > 0.99 && pair.share_a_higher < 1 ? 2 : 0) + '%' : 'n/a',
-        pair.won + ' / ' + pair.tied + ' / ' + pair.lost, verdicts[pair.verdict] ?? pair.verdict]), 2), '');
+        pair.won + ' / ' + pair.tied + ' / ' + pair.lost, verdicts[pair.verdict] ?? pair.verdict, holm(pair)]), 2), '');
     for (const pair of pairs) lines.push('- ' + pair.statement);
     lines.push('');
     if (set.pairwise.multiple_comparisons) lines.push(set.pairwise.multiple_comparisons, '');
@@ -133,7 +174,10 @@ export function summaryMarkdown(board) {
   const tolerances = board.tolerances;
   const caveats = [
     'Task sets are never pooled. The dev set\'s objects were used to tune the scorer: its numbers are development measurements, not test results.',
-    'Pairwise intervals are not corrected for multiple comparisons; a pair counts as separated only when the bootstrap and the Student-t interval both exclude zero.',
+    'Pairwise intervals are not corrected for multiple comparisons; a pair counts as separated (uncorrected) only when the bootstrap and the Student-t interval both exclude zero. ' +
+      'The Holm column corrects within each table (family-wise 5%, paired t p-values): a pair stays separated when its adjusted p is below 0.05 and it is separated uncorrected.',
+    ...(board.roster ? ['Formal configurations and ladders from the roster ' + (board.roster.file ?? '(no file)') + (board.roster.sha256 ? ' (sha256 ' + board.roster.sha256.slice(0, 12) + ')' : '') +
+      (board.roster.decided_at ? ', decided ' + board.roster.decided_at : '') + '; other configurations are reference rows.'] : ['No roster given: every configuration is formal and the ladders are inferred from the recorded effort.']),
     'Failures (no valid model) count as 0; ' + plural(board.excluded.length, 'attempt') + ' with status ' + board.method.excluded_statuses.join(', ') +
       ' ' + (board.excluded.length === 1 ? 'was left out: it is not a sample.' : 'were left out: they are not samples.'),
     'Tolerance rows in the reports: ' + (tolerances.fractions.length ? tolerances.fractions.map(fractionLabel).join(', ') : 'none') + '; rows entering the shape score: ' +

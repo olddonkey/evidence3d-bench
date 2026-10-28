@@ -2,11 +2,13 @@ import { join, resolve } from 'node:path';
 import { writeJSON } from '../../../lib/io.mjs';
 import { layout, VARIANTS, CONFLICT_VARIANTS, PROTOCOL } from '../contract.mjs';
 import { collectRuns, DEFAULT_EXCLUDED_STATUSES, UNNAMED_SET, UNKNOWN_SET, UNKNOWN_ARCHETYPE, scorerIdentity } from './collect.mjs';
-import { finite, mean, median, spread, sampleSD, summarise, pairedBootstrap, tInterval, pooledSD, sdRange, detectableDifference, BOOTSTRAP_SAMPLES,
-  PAIRWISE_SAMPLES, LOW_EVIDENCE_OBJECTS, SMALL_SAMPLE_OBJECTS, TIE_TOLERANCE } from './stats.mjs';
+import { finite, mean, median, spread, sampleSD, summarise, pairedBootstrap, tInterval, tTestP, holmAdjust, pooledSD, sdRange, detectableDifference,
+  BOOTSTRAP_SAMPLES, PAIRWISE_SAMPLES, LOW_EVIDENCE_OBJECTS, SMALL_SAMPLE_OBJECTS, TIE_TOLERANCE, FAMILY_ALPHA } from './stats.mjs';
+import { LADDERS, LADDER_RULE, inferLadders, parseRoster, rosterProvenance } from './roster.mjs';
 import { timeCurve, T95_SHARE, T95_MIN_FINAL } from './curves.mjs';
 
-export const LEADERBOARD_SCHEMA = 'e3d-leaderboard-v2';
+// v3: ladders, Holm-corrected verdicts, reference rows (rank null) when a roster is given.
+export const LEADERBOARD_SCHEMA = 'e3d-leaderboard-v3';
 export const VARIANT_ORDER = Object.keys(VARIANTS);
 // Adjacent rungs of the evidence ladder (kept for readers of earlier
 // leaderboards); evidence_deltas covers every pair of variants present.
@@ -365,6 +367,8 @@ export function comparePair(a, b, { seed = 'e3d-pairwise', samples = PAIRWISE_SA
     share_b_higher: boot?.share_b_higher ?? null,
     samples: boot?.samples ?? null,
     t_ci95: tInterval(differences),
+    // Two-sided paired t test; the corrected verdicts adjust this p-value.
+    p_t: tTestP(differences),
     won, tied: differences.length - won - lost, lost,
     excludes_zero: excludesZero(boot?.ci95 ?? null),
     small_sample: perObject.length < SMALL_SAMPLE_OBJECTS,
@@ -403,6 +407,100 @@ export function pairStatement(row) {
   }
   if (row.small_sample) text += ' Only ' + row.objects + ' objects: at this size the bootstrap interval runs too narrow.';
   return text;
+}
+
+// ------------------------------------------------------ multiple comparisons
+//
+// A table of pairwise verdicts makes many claims at once: with 66 pairs at
+// 95 % each, one or more false separations are likely even if no configuration
+// differed. Each family is therefore corrected on its own, by Holm's step-down
+// method at family-wise FAMILY_ALPHA on the two-sided paired t p-value:
+//   all            every pair of formal configurations of a set (the pairwise table);
+//   default, top   the pairs of one ladder;
+//   effort         top minus default effort of one client and model.
+// A pair is separated after correction when its Holm-adjusted p is below
+// FAMILY_ALPHA and its uncorrected verdict already separates it (both 95 %
+// intervals exclude zero), so correction only ever removes separations. A
+// pair with fewer than two objects is untestable and is not counted in m. The
+// same pair can stay separated in a small family and not in a large one: the
+// larger table makes more claims, and every table states its m.
+
+const SEPARATED = new Set(['a_higher', 'b_higher']);
+
+// -> one entry per row, in order: { family, comparisons, p_adjusted, verdict }, null when untestable.
+export function correctFamily(rows, family) {
+  const tested = rows.map(row => row.verdict !== 'not_evaluated' && finite(row.p_t) ? row.p_t : null);
+  const adjusted = holmAdjust(tested), comparisons = tested.filter(finite).length;
+  return rows.map((row, index) => adjusted[index] === null ? null : { family, comparisons, p_adjusted: adjusted[index],
+    verdict: adjusted[index] < FAMILY_ALPHA && SEPARATED.has(row.verdict) ? row.verdict : 'not_separated' });
+}
+
+function familySummary(rows, family) {
+  const tested = rows.filter(row => row.holm);
+  return { family, method: 'holm', alpha: FAMILY_ALPHA, test: 'paired t test, two-sided', comparisons: tested.length,
+    separated_uncorrected: tested.filter(row => SEPARATED.has(row.verdict)).length, separated: tested.filter(row => SEPARATED.has(row.holm.verdict)).length };
+}
+
+// A p-value as printed: three decimals, below 0.001 as a bound.
+export const pText = p => !finite(p) ? 'n/a' : p < 0.001 ? '< 0.001' : '= ' + p.toFixed(3);
+
+export function holmSentence(row) {
+  if (!row.holm) return '';
+  const after = SEPARATED.has(row.holm.verdict) ? 'still separated' : SEPARATED.has(row.verdict) ? 'no longer separated' : 'not separated';
+  return ' After Holm\'s correction over the ' + row.holm.comparisons + ' pairs of this table (adjusted p ' + pText(row.holm.p_adjusted) + '): ' + after + '.';
+}
+
+// For a set: pair -> a note when the same pair, in the table of every formal
+// configuration, is corrected to the other verdict (a smaller family corrects
+// less, so a ladder can separate what the large table does not), else ''.
+export function allPairsNote(set) {
+  const holms = new Map();
+  for (const pair of set.pairwise.pairs) if (pair.holm) holms.set(pair.a + '|' + pair.b, pair.holm).set(pair.b + '|' + pair.a, pair.holm);
+  return pair => {
+    const other = pair.holm ? holms.get(pair.a + '|' + pair.b) : null;
+    if (!other || other === pair.holm || SEPARATED.has(other.verdict) === SEPARATED.has(pair.holm.verdict)) return '';
+    return (SEPARATED.has(other.verdict) ? 'separated' : 'not separated') + ' in the table of all ' + other.comparisons + ' pairs (adj. p ' + pText(other.p_adjusted) + ')';
+  };
+}
+
+// A pair without its per-object rows, for the ladder and effort tables.
+const slimPair = pair => ({ a: pair.a, b: pair.b, objects: pair.objects, tasks: pair.tasks, mean_difference: pair.mean_difference, ci95: pair.ci95,
+  t_ci95: pair.t_ci95, p_t: pair.p_t, won: pair.won, tied: pair.tied, lost: pair.lost, verdict: pair.verdict, small_sample: pair.small_sample,
+  low_evidence: pair.low_evidence });
+
+// The same comparison read the other way round, B - A.
+const flip = ci => ci ? [-ci[1], -ci[0]] : null;
+const OPPOSITE = { a_higher: 'b_higher', b_higher: 'a_higher' };
+const reversed = pair => ({ ...pair, a: pair.b, b: pair.a, mean_difference: finite(pair.mean_difference) ? -pair.mean_difference : pair.mean_difference,
+  ci95: flip(pair.ci95), t_ci95: flip(pair.t_ci95), won: pair.lost, lost: pair.won, verdict: OPPOSITE[pair.verdict] ?? pair.verdict });
+
+// The two ladders of one set and the effort pairs between them. `ranked` is
+// in score order, so a ladder's pairs keep the pairwise table's orientation.
+function setLadders(ranked, pairs, roster, cells) {
+  const byKeys = new Map(pairs.map(pair => [pair.a + '|' + pair.b, pair]));
+  const pairOf = (a, b) => byKeys.has(a + '|' + b) ? slimPair(byKeys.get(a + '|' + b)) : reversed(slimPair(byKeys.get(b + '|' + a)));
+  const corrected = (rows, family) => {
+    correctFamily(rows, family).forEach((holm, index) => { rows[index].holm = holm; });
+    return { pairs: rows, correction: familySummary(rows, family) };
+  };
+  const members = new Map();
+  const ladders = LADDERS.map(ladder => {
+    const on = ranked.filter(entry => !entry.reference && entry.ladders.includes(ladder.id));
+    members.set(ladder.id, on);
+    const rows = [];
+    for (let i = 0; i < on.length; i++) for (let j = i + 1; j < on.length; j++) rows.push(pairOf(on[i].key, on[j].key));
+    return { id: ladder.id, label: ladder.label, entries: on.map((entry, index) => ({ key: entry.key, rank: index + 1 })),
+      // Listed in the roster for this ladder, but no counted attempt in this set.
+      missing: roster ? roster.configurations.filter(item => item.ladders.includes(ladder.id) && !cells.has(item.key)).map(item => item.key) : [],
+      pairwise: corrected(rows, ladder.id) };
+  });
+  const effort = [];
+  for (const top of members.get('top')) {
+    const base = members.get('default').find(entry => entry.system === top.system && entry.model === top.model);
+    if (!base || base.key === top.key) continue;
+    effort.push({ system: top.system, model: top.model, default_effort: base.effort, top_effort: top.effort, ...pairOf(top.key, base.key) });
+  }
+  return { ladders, effort: corrected(effort, 'effort') };
 }
 
 // --------------------------------------------------------------- variance
@@ -646,7 +744,13 @@ function describeSet(id, taskIds, setFiles) {
   return { kind, development, text, listed_in: listedIn, ...(facts ? { set_file: facts } : {}) };
 }
 
-export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = new Date(), excludeStatuses = DEFAULT_EXCLUDED_STATUSES, plannedObjects = PLANNED_OBJECTS } = {}) {
+// `roster` (roster.mjs parseRoster / readRoster) names the formal
+// configurations and their ladders; without one every configuration is formal
+// and the ladders are inferred from the recorded effort.
+export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = new Date(), excludeStatuses = DEFAULT_EXCLUDED_STATUSES, plannedObjects = PLANNED_OBJECTS,
+  roster = null } = {}) {
+  // A roster read as plain JSON is validated here.
+  if (roster && !(roster.keys instanceof Map)) roster = parseRoster(roster);
   const problems = [...(collected.problems ?? [])];
   const batchById = new Map((collected.batches ?? []).map(batch => [batch.id, batch]));
   // Attempts assembled by hand (tests, calibration) may carry no set or archetype.
@@ -671,7 +775,15 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
     const categoryIds = detailCategories(counted);
     const ranked = [...cells].map(([key, attempts]) => cellEntry(key, set, attempts, seed, { deltaPairs, archetypes: archetypeIds, categories: categoryIds }));
     ranked.sort((a, b) => (b.score.mean ?? -Infinity) - (a.score.mean ?? -Infinity) || a.key.localeCompare(b.key));
-    ranked.forEach((entry, index) => { entry.rank = index + 1; });
+    // Formal configurations are ranked; reference rows (not in the roster) keep
+    // their place in score order for the pairwise orientation but get no rank.
+    const placement = roster ? null : inferLadders(ranked.map(({ key, system, model, effort }) => ({ key, system, model, effort })));
+    let rank = 0;
+    for (const entry of ranked) {
+      entry.reference = roster ? !roster.keys.has(entry.key) : false;
+      entry.ladders = roster ? roster.keys.get(entry.key)?.ladders ?? [] : placement.ladders.get(entry.key);
+      entry.rank = entry.reference ? null : ++rank;
+    }
     for (const entry of ranked) {
       entry.provenance_conflicts = disagreements(entry.batches.map(id => batchById.get(id)).filter(Boolean),
         [...CONFIGURATION_FIELDS, ['scorer', 'scorer stamped in the reports'], ['report_protocol', 'report protocol']]);
@@ -688,9 +800,18 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
     for (let i = 0; i < ranked.length; i++) {
       for (let j = i + 1; j < ranked.length; j++) {
         const pairSeed = seed + '/pairwise/' + (set === UNNAMED_SET ? '' : set + '/') + ranked[i].key + '|' + ranked[j].key;
-        pairs.push(comparePair({ key: ranked[i].key, attempts: cells.get(ranked[i].key) }, { key: ranked[j].key, attempts: cells.get(ranked[j].key) }, { seed: pairSeed }));
+        const pair = comparePair({ key: ranked[i].key, attempts: cells.get(ranked[i].key) }, { key: ranked[j].key, attempts: cells.get(ranked[j].key) }, { seed: pairSeed });
+        pair.reference = ranked[i].reference || ranked[j].reference;
+        pairs.push(pair);
       }
     }
+    // Holm over every pair of formal configurations; a pair with a reference row
+    // keeps its uncorrected verdict and belongs to no family.
+    const formalPairs = pairs.filter(pair => !pair.reference);
+    correctFamily(formalPairs, 'all').forEach((holm, index) => { formalPairs[index].holm = holm; formalPairs[index].statement += holmSentence(formalPairs[index]); });
+    for (const pair of pairs) pair.holm ??= null;
+    const correction = familySummary(formalPairs, 'all');
+    const { ladders, effort } = setLadders(ranked, pairs, roster, cells);
     // Comparisons within a set are only fair if every configuration saw the
     // same tool kit and protocol and was scored by the same scorer.
     const setBatches = [...new Set(inSet.map(attempt => attempt.batch))].map(id => batchById.get(id)).filter(Boolean);
@@ -706,7 +827,8 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
     sets.push({
       id: set, named: set !== UNNAMED_SET && set !== UNKNOWN_SET,
       description: describeSet(set, new Set(inSet.map(attempt => attempt.task_id)), collected.setFiles),
-      configurations: ranked.map(entry => entry.key),
+      configurations: ranked.filter(entry => !entry.reference).map(entry => entry.key),
+      reference_configurations: ranked.filter(entry => entry.reference).map(entry => entry.key),
       objects: new Set(inSet.map(attempt => attempt.object)).size,
       variants: VARIANT_ORDER.filter(variant => counted.some(attempt => attempt.variant === variant)),
       variant_pairs: deltaPairs.map(([high, low]) => high + '-' + low),
@@ -719,20 +841,32 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
       last_finished_at: inSet.map(attempt => attempt.finished_at).filter(Boolean).sort().at(-1) ?? null,
       unranked, warnings,
       tolerances: toleranceSummary(inSet.filter(attempt => !attempt.excluded)),
+      ladder_rule: roster ? LADDER_RULE.roster : LADDER_RULE.inferred,
+      ladder_notes: placement?.notes ?? [],
+      ladders,
+      effort,
       pairwise: {
         pairs,
         comparisons: pairs.length,
+        correction,
         multiple_comparisons: pairs.length > 1
-          ? pairs.length + ' pairs, each with its own 95% interval and no correction for multiple comparisons: if no configuration truly differed, ' +
-            'the chance that at least one interval would still exclude zero is about ' + Math.round(100 * (1 - 0.95 ** pairs.length)) +
-            '% (1 - 0.95^' + pairs.length + ', for independent pairs).'
+          ? pairs.length + ' pairs, each with its own 95% interval: if no configuration truly differed, the chance that at least one uncorrected interval ' +
+            'would still exclude zero is about ' + Math.round(100 * (1 - 0.95 ** pairs.length)) + '% (1 - 0.95^' + pairs.length + ', for independent pairs). ' +
+            'Holm\'s correction over the ' + correction.comparisons + ' testable pairs of formal configurations (family-wise ' + Math.round(100 * FAMILY_ALPHA) + '%) keeps ' +
+            correction.separated + ' of the ' + correction.separated_uncorrected + ' pairs separated without correction' +
+            (pairs.length > formalPairs.length ? '; the ' + (pairs.length - formalPairs.length) + ' pairs with a reference row are not corrected.' : '.')
           : null,
       },
       variance: setVariance(ranked, cells, pairs, plannedObjects),
     });
-    entries.push(...ranked);
+    entries.push(...ranked.filter(entry => !entry.reference), ...ranked.filter(entry => entry.reference));
   }
 
+  // A roster entry no batch ran is usually a misspelt system, model or effort.
+  if (roster) {
+    const ran = new Set(all.map(cellKey));
+    for (const item of roster.configurations) if (!ran.has(item.key)) problems.push('roster ' + (roster.file ?? '') + ' lists ' + item.key + ', which no attempt in these batches ran');
+  }
   const tasks = new Map();
   for (const attempt of all) {
     if (!tasks.has(attempt.task_id)) {
@@ -757,6 +891,7 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
     protocol: PROTOCOL,
     generated_at: now.toISOString(),
     batches: collected.batches ?? [],
+    roster: rosterProvenance(roster),
     method: {
       score: 'report.score as computed by the scorer: (shape_score + detail.score) / 2 (DESIGN.md section 9); attempts without a valid report count as 0',
       tolerances: 'tolerance rows reported: ' + (tolerances.fractions.length ? tolerances.fractions.map(fraction => fraction * 100 + '%').join(', ') : 'none') +
@@ -765,7 +900,13 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
       ci95: 'percentile bootstrap over objects (' + BOOTSTRAP_SAMPLES + ' resamples, seeded with "' + seed + '"); null with fewer than 2 objects',
       pairwise: 'per pair, on the tasks both configurations ran: per-object mean score of A minus that of B; 95% percentile bootstrap over objects (' +
         PAIRWISE_SAMPLES + ' resamples, seeded) and a Student-t interval of the per-object differences; separated only when both exclude zero, unsettled when they disagree; ' +
-        'share of resamples with A ahead; objects won / tied / lost. Intervals are not corrected for multiple comparisons.',
+        'share of resamples with A ahead; objects won / tied / lost. Intervals are not corrected for multiple comparisons; the corrected verdict is.',
+      correction: 'Holm\'s step-down method at family-wise ' + Math.round(100 * FAMILY_ALPHA) + '% on the two-sided paired t p-value, within each family: all pairs of ' +
+        'formal configurations of a set; the pairs of one ladder; the effort pairs (top minus default effort, same client and model). Separated after correction = ' +
+        'Holm-adjusted p < ' + FAMILY_ALPHA + ' and separated uncorrected (bootstrap and Student-t 95% intervals both exclude zero). Pairs with fewer than 2 objects ' +
+        'are not counted in a family; pairs with a reference row are in none',
+      ladders: 'two system ladders (client + model + effort) per set: ' + LADDERS.map(ladder => ladder.id + ' (' + ladder.label.toLowerCase() + ')').join(' and ') + '; ' +
+        (roster ? LADDER_RULE.roster : LADDER_RULE.inferred) + '; a ladder ranks its configurations by the same score as the leaderboard',
       sets: 'tasks are grouped by the optional `set` of their truth.json ("' + UNNAMED_SET + '" when absent, "' + UNKNOWN_SET +
         '" when truth.json is missing); results from different sets are never pooled',
       low_evidence: 'flagged when fewer than ' + LOW_EVIDENCE_OBJECTS + ' objects back the number',
@@ -808,9 +949,9 @@ export const reportName = batches => (batches?.length ? batches.join('+') : 'all
 
 // -> leaderboard object. Also written as JSON to `outFile`, by default
 // <data>/reports/<batches>/leaderboard.json; outFile: null writes nothing.
-export async function aggregate({ dataRoot, batches, outFile, seed, now, excludeStatuses = DEFAULT_EXCLUDED_STATUSES, plannedObjects } = {}) {
+export async function aggregate({ dataRoot, batches, outFile, seed, now, excludeStatuses = DEFAULT_EXCLUDED_STATUSES, plannedObjects, roster } = {}) {
   const collected = await collectRuns({ dataRoot, batches, excludeStatuses });
-  const board = buildLeaderboard(collected, { seed, now, excludeStatuses, plannedObjects });
+  const board = buildLeaderboard(collected, { seed, now, excludeStatuses, plannedObjects, roster });
   const target = outFile === undefined ? join(layout(resolve(dataRoot)).reports, reportName(batches), 'leaderboard.json') : outFile;
   if (target) await writeJSON(target, board);
   return board;
