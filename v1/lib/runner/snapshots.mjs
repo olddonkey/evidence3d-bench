@@ -213,6 +213,16 @@ export function scoredSnapshots(records, { scores = new Map(), final = null, sco
   });
 }
 
+// A snapshot record as the clock made it, from its entry in result.json
+// (scoredSnapshots added the status and the score). `error` there is a
+// storage error only for a lost snapshot; otherwise it is the scorer's.
+function recordOf(item) {
+  const record = { t: item.t, name: item.name, at_seconds: item.at_seconds, read_seconds: item.read_seconds, present: item.present };
+  for (const key of ['bytes', 'sha256', 'complete', 'file', 'same_as', 'problem']) if (item[key] !== undefined) record[key] = item[key];
+  if (item.status === 'lost') record.error = item.error ?? 'not stored';
+  return record;
+}
+
 // `cli rescore` for one attempt's snapshots: every distinct snapshot is scored
 // again by `score` (glb bytes -> report, in process; a throw is retried as in
 // the runner), the earlier reports kept as snapshots/score.previous-<n>/. Returns the new records for result.json,
@@ -220,7 +230,9 @@ export function scoredSnapshots(records, { scores = new Map(), final = null, sco
 // infrastructure error, a broken boundary).
 export async function rescoreSnapshots({ attemptDir, batchDir, result, finalReport, score }) {
   if (!Array.isArray(result?.snapshots) || result.status === 'infra_error' || result.integrity_problems?.length) return null;
-  const records = await readSnapshotIndex(attemptDir);
+  // The records come from result.json, the attempt's completed record, not
+  // from snapshots/index.json, which a write error may have left behind.
+  const records = result.snapshots.map(recordOf);
   if (!records.length) return null;
   const finalSha = typeof result.artifact?.sha256 === 'string' ? result.artifact.sha256 : null;
   const final = finalReport && finalSha ? { sha256: finalSha, score: scoreOf(finalReport), valid: finalReport.valid !== false,

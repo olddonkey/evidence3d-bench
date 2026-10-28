@@ -209,7 +209,8 @@ runner stopped during snapshot scoring leaves the attempt unrecorded, and the ne
 stops a snapshot worker it left running, then scores the final file and the snapshots
 again (from `snapshots/index.json`, rewritten after every tick; an index that could not
 be written is retried at the next tick and when the attempt ends, and costs no snapshot).
-`v1/cli.mjs rescore` scores the snapshots again with the final file.
+`v1/cli.mjs rescore` scores the snapshots again with the final file, going by the records in
+`result.json` (not the index, which a write error may have left short).
 
 `result.json` carries `snapshot_interval_seconds` and `snapshots[]`, one per tick:
 `{ t, name, at_seconds and read_seconds (when the read that was kept began and ended,

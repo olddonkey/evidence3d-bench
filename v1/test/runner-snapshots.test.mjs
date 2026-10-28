@@ -392,11 +392,14 @@ test('rescore scores every distinct snapshot again and keeps the earlier reports
   const records = [{ t: 300, name: 't0300', present: true, sha256: sha(fakeGLB('A')), file: 'snapshots/t0300.glb', complete: true },
     { t: 600, name: 't0600', present: true, sha256: sha(fakeGLB('A')), file: 'snapshots/t0300.glb', same_as: 't0300', complete: true },
     { t: 900, name: 't0900', present: true, sha256: sha(fakeGLB('C')), file: 'snapshots/t0900.glb', complete: true }];
-  await writeFile(join(attemptDir, 'snapshots', 'index.json'), JSON.stringify({ snapshots: records }));
+  // An index.json left behind by a write error: only the first tick. The rescore goes by result.json.
+  await writeFile(join(attemptDir, 'snapshots', 'index.json'), JSON.stringify({ snapshots: records.slice(0, 1) }));
   const scored = [];
   // The first call throws: the snapshot is scored again.
   const score = async bytes => { scored.push(markerOf(bytes)); if (scored.length === 1) throw new Error('hiccup'); return { schema: 'e3d-report-v1', valid: true, score: SCORES[markerOf(bytes)] + 1 }; };
-  const result = { status: 'completed', snapshots: [], artifact: { sha256: sha(fakeGLB('C')) }, report: TASK + '/a1/score/report.json', integrity_problems: [] };
+  const stale = new Map([[sha(fakeGLB('A')), { status: 'scored', score: 30, valid: true, report: 'old.json' }]]);
+  const result = { status: 'completed', snapshots: scoredSnapshots(records, { scores: stale, final: { sha256: sha(fakeGLB('C')), score: 90, valid: true, report: 'old-final.json' } }),
+    artifact: { sha256: sha(fakeGLB('C')) }, report: TASK + '/a1/score/report.json', integrity_problems: [] };
   const out = await rescoreSnapshots({ attemptDir, batchDir, result, finalReport: { valid: true, score: 91 }, score });
   assert.deepEqual(scored, ['A', 'A'], 'one content, scored again after a throw; none for the final file');
   assert.deepEqual(out.map(item => [item.t, item.score, item.score_of ?? null]), [[300, 31, null], [600, 31, 't0300'], [900, 91, 'final']]);
@@ -404,4 +407,10 @@ test('rescore scores every distinct snapshot again and keeps the earlier reports
   assert.ok(await exists(join(attemptDir, 'snapshots', 'score.previous-1', 't0300.json')));
   assert.equal(await rescoreSnapshots({ attemptDir, batchDir, result: { ...result, status: 'infra_error' }, finalReport: null, score }), null);
   assert.equal(await rescoreSnapshots({ attemptDir, batchDir, result: { status: 'completed' }, finalReport: null, score }), null, 'no snapshots recorded');
+  // A snapshot the runner could not store stays lost; one the scorer failed on is scored again.
+  const failed = scoredSnapshots([{ ...records[0], t: 1200, name: 't1200', file: undefined, sha256: sha(fakeGLB('B')), error: 'snapshot not written: ENOSPC' },
+    { ...records[0], t: 1500, name: 't1500', file: 'snapshots/t0300.glb', same_as: undefined }], { scores: new Map([[sha(fakeGLB('A')), { status: 'score_error', score: null, valid: null, error: 'boom' }]]) });
+  assert.deepEqual(failed.map(item => [item.status, item.error]), [['lost', 'snapshot not written: ENOSPC'], ['score_error', 'boom']]);
+  const again = await rescoreSnapshots({ attemptDir, batchDir, result: { ...result, snapshots: failed }, finalReport: { valid: true, score: 91 }, score });
+  assert.deepEqual(again.map(item => [item.t, item.status, item.score]), [[1200, 'lost', null], [1500, 'scored', 31]]);
 });
