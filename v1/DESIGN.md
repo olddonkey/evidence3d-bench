@@ -128,7 +128,7 @@ truth/<task-id>/truth.json                which object/variant/evidence the task
 runs/<batch-id>/…                         generation attempts and their scores
 reports/<name>/…                          aggregated results
 sets/<name>.json                          private sets (test, memory): seeds, never in git
-study/<name>/…                            a human-agreement study: pairs, key, images, votes
+study/<name>/…                            a human-agreement study: pairs, key, images, votes (per rater)
 real-sources/<source>/…                   photographs of real buildings (never in git)
 ```
 
@@ -317,10 +317,14 @@ selects pairs of valid submissions for the same task, stratified by score gap
 identical cameras and neutral shading, each submission in the pose the scorer
 fitted; writes `pairs.json` (public: opaque ids and image names only) and
 `key.json` (private: attempts, scores, strata). `serve` is a rating page on
-127.0.0.1 that appends votes to `votes.jsonl`. `analyze` reports, over the
-original pairs, how often the rater chose the higher-scored submission (Wilson
-95 %), per stratum and per score component, the tie rate, the self-consistency on
-repeats and the largest disagreements. Details: `v1/lib/study/README.md`.
+127.0.0.1 that asks the rater's name and appends votes, each with its rater, to
+`votes.jsonl`; `export` copies the public part for a rater on another machine,
+whose votes come back as `votes-<rater>.jsonl`. `analyze` reports per rater,
+over the original pairs, how often the rater chose the higher-scored submission
+(Wilson 95 %), per stratum and per score component, the tie rate, the
+self-consistency on repeats and the largest disagreements; and between raters,
+Cohen's κ for every two raters, Fleiss' κ for three or more, and the majority
+vote's agreement with the score. Details: `v1/lib/study/README.md`.
 
 ### I. Real buildings — `v1/lib/real/**`, `v1/real/<source>/`, `v1/scripts/real.mjs`
 

@@ -5,6 +5,19 @@
 // The rater's choice per key: left / 1 for A, down / 0 for "cannot tell", right / 2 for B.
 export const KEY_CHOICES = Object.freeze({ ArrowLeft: 'a', 1: 'a', ArrowDown: 'tie', 0: 'tie', ArrowRight: 'b', 2: 'b' });
 
+// A rater is named by an id of lower-case letters and digits; it is stored with
+// every vote and names the rater's file (votes-<id>.jsonl). r0 stands for the
+// votes recorded before raters were named, so nobody can take it.
+export const RATER_PATTERN = /^[a-z0-9]{1,32}$/;
+export const LEGACY_RATER = 'r0';
+export const isRater = id => typeof id === 'string' && RATER_PATTERN.test(id) && id !== LEGACY_RATER;
+
+// What the rater typed -> their id (trimmed, lower case), or null if it is not one.
+export function raterId(text) {
+  const id = String(text ?? '').trim().toLowerCase();
+  return isRater(id) ? id : null;
+}
+
 // Latest choice per pair: a later line replaces an earlier one (a revision).
 export function latestChoices(votes) {
   const latest = new Map();
@@ -46,8 +59,34 @@ export function progress(pairs, latest) {
   return { rated: pairs.filter(pair => latest.has(pair.id)).length, total: pairs.length };
 }
 
+// Time on a pair that does not count as looking at it: while the page is
+// hidden (another tab, a covered window) or the name form is open. The reasons
+// can overlap (the form open, then another tab); their union counts once.
+// Times are the caller's clock (performance.now() on the page).
+export function pauseClock() {
+  const reasons = new Set();
+  let since = null, total = 0;
+  return {
+    pause(reason, now) {
+      if (!reasons.size) since = now;
+      reasons.add(reason);
+    },
+    resume(reason, now) {
+      if (!reasons.delete(reason) || reasons.size) return;
+      total += now - since;
+      since = null;
+    },
+    // A new pair is shown at `now`: count afresh; a reason still in force goes on counting.
+    restart(now) {
+      total = 0;
+      since = reasons.size ? now : null;
+    },
+    excluded(now) { return total + (since === null ? 0 : now - since); },
+  };
+}
+
 // Time on a pair: all of it (ms), and the part during which the page was
-// hidden (another tab, a covered window), so the analysis can leave that out.
+// hidden or the name form open (pauseClock), so the analysis can leave that out.
 export function elapsed(shownAt, now, hiddenMs) {
   const ms = Math.max(0, Math.round(now - shownAt));
   return { ms, hidden_ms: Math.min(ms, Math.max(0, Math.round(hiddenMs))) };

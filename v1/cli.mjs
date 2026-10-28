@@ -155,7 +155,7 @@ try {
       '  node v1/scripts/run.mjs prepare|preflight|run …      (generation runner)',
       '  node v1/scripts/landmarks.mjs new-set|build-set|check (memory tasks: named landmark twins, variants m2 m3)',
       '  node v1/scripts/real.mjs prepare|build|verify|coverage (real buildings, variants r2 r4)',
-      '  node v1/scripts/study.mjs prepare|serve|analyze       (blind human-agreement study)', '',
+      '  node v1/scripts/study.mjs prepare|serve|analyze|export (blind human-agreement study, several raters)', '',
       'All commands accept --data DIR (default .local/v1).',
     ].join('\n'));
   }
