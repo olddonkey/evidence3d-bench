@@ -18,6 +18,11 @@ import { writeReport, aggregate } from '../lib/report/index.mjs';
 // (plus its one live request, here to the mock), run, a scored result, and
 // the report over the batch. The loop, the sandbox and the file tools are the
 // real ones; only the model and the scorer are stand-ins.
+
+// The shell tool runs under /usr/bin/sandbox-exec, and prepare refuses to
+// freeze an API batch without it; only macOS has it, so elsewhere these are skipped.
+const MACOS_ONLY = process.platform !== 'darwin' && 'macOS only: needs Seatbelt (/usr/bin/sandbox-exec)';
+
 const REPO = fileURLToPath(new URL('../..', import.meta.url));
 const readJSON = async path => JSON.parse(await readFile(path, 'utf8'));
 const exists = path => lstat(path).then(() => true, () => false);
@@ -67,7 +72,7 @@ export async function apiBatch(t, { protocol = 'anthropic', script = null, tasks
 }
 
 for (const protocol of ['anthropic', 'openai']) {
-  test(`api-${protocol}: prepare, a model-free preflight, a run and a scored result with usage, turns and tools`, async t => {
+  test(`api-${protocol}: prepare, a model-free preflight, a run and a scored result with usage, turns and tools`, { skip: MACOS_ONLY }, async t => {
     const { batchDir, manifest, mock, key, deps, dataRoot } = await apiBatch(t, { protocol, tokenBudget: 500000, toolBudget: 50 });
     assert.equal(manifest.system, 'api-' + protocol); assert.equal(manifest.rules.api_keys, true);
     assert.equal(manifest.harness.key_present, true); assert.equal(manifest.harness.base_url, mock.url);
@@ -115,7 +120,7 @@ async function passPreflight(batchDir) {
   await writeFile(join(batchDir, 'preflight.json'), JSON.stringify({ schema: 'e3d-preflight-v1', passed: true, manifest_sha256: manifestHash(manifest), checks: [] }));
 }
 
-test('api: a rate limit too long for the loop holds the batch until the stated time, then the attempt runs again without using up the cap', async t => {
+test('api: a rate limit too long for the loop holds the batch until the stated time, then the attempt runs again without using up the cap', { skip: MACOS_ONLY }, async t => {
   const { batchDir, deps, mock, key } = await apiBatch(t, { protocol: 'anthropic', script: [{ status: 429, retry_after: 3, echo_key: true }, ...buildSteps(GLB.toString('base64'))] });
   await passPreflight(batchDir);
   const events = [];
@@ -135,7 +140,7 @@ test('api: a rate limit too long for the loop holds the batch until the stated t
   for (const file of await everyFile(batchDir)) assert.ok(!file.text.includes(key), 'the key is in ' + file.path);
 });
 
-test('api: a rejected key stops the batch for a human, with advice about the variable; once fixed the attempt runs again', async t => {
+test('api: a rejected key stops the batch for a human, with advice about the variable; once fixed the attempt runs again', { skip: MACOS_ONLY }, async t => {
   const { batchDir, deps, mock } = await apiBatch(t, { protocol: 'openai', script: [{ status: 401 }] });
   await passPreflight(batchDir);
   const stopped = await execute({ batchDir, deps }).catch(error => error);
@@ -149,7 +154,7 @@ test('api: a rejected key stops the batch for a human, with advice about the var
   assert.deepEqual([result.status, result.try, result.tries[0].reason], ['completed', 2, 'auth']);
 });
 
-test('api: an exhausted budget is a scored sample (budget_exhausted), a full context a failure, and the report reads the batch', async t => {
+test('api: an exhausted budget is a scored sample (budget_exhausted), a full context a failure, and the report reads the batch', { skip: MACOS_ONLY }, async t => {
   const steps = buildSteps(GLB.toString('base64'));
   // house-a builds its model, then keeps calling tools until its 6 calls are used up;
   // house-b fills its context.
@@ -176,7 +181,7 @@ test('api: an exhausted budget is a scored sample (budget_exhausted), a full con
   assert.deepEqual([batch.counted, batch.excluded, batch.status_counts.budget_exhausted], [2, 0, 1]);
 });
 
-test('api: without the key, preflight still proves the boundary but stops for a human, and run exits 3', async t => {
+test('api: without the key, preflight still proves the boundary but stops for a human, and run exits 3', { skip: MACOS_ONLY }, async t => {
   const { batchDir, deps, mock } = await apiBatch(t, { protocol: 'anthropic', withKey: false, script: [] });
   const report = await preflight({ batchDir, deps });
   assert.equal(report.passed, false); assert.deepEqual(report.failed, []);
@@ -192,7 +197,7 @@ test('api: without the key, preflight still proves the boundary but stops for a 
   assert.equal(await exists(join(batchDir, 'house-a-t1', 'a1', 'started.json')), false, 'nothing was launched');
 });
 
-test('api: prepare refuses settings that do not apply, and freezes only whether the key was set', async t => {
+test('api: prepare refuses settings that do not apply, and freezes only whether the key was set', { skip: MACOS_ONLY }, async t => {
   const dir = await scratch(t), dataRoot = join(dir, 'data');
   await makeDataRoot(dataRoot, ['house-a-t1']);
   const base = { tasks: ['house-a-t1'], dataRoot, deps: { installTools: fakeInstallTools, env: { ANTHROPIC_API_KEY: 'sk-test-e3d-prepare-0123456789' } } };

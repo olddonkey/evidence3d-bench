@@ -30,6 +30,10 @@ import { textSource } from '../lib/runner/hostsleep.mjs';
 // preflight's tool calls), and every Grok shape below was captured from the
 // real CLI unless marked otherwise.
 
+// The shell wrapper execs /usr/bin/sandbox-exec, which only macOS has; elsewhere
+// the tests that start it are skipped rather than failed.
+const MACOS_ONLY = process.platform !== 'darwin' && 'macOS only: needs Seatbelt (/usr/bin/sandbox-exec)';
+
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const readJSON = async path => JSON.parse(await readFile(path, 'utf8'));
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -527,7 +531,7 @@ test('the deny cover matches exactly the paths outside its roots, whether Grok c
   assert.deepEqual(rules.slice(-3), ['WebFetch', 'WebSearch', 'MCPTool(*)']);
 });
 
-test('the shell wrapper runs every command inside the profile: no writes to the read-only parts, no links, no home, no network', async t => {
+test('the shell wrapper runs every command inside the profile: no writes to the read-only parts, no links, no home, no network', { skip: MACOS_ONLY }, async t => {
   const dir = await realpath(await scratch(t)), attemptDir = join(dir, 'a1'), ws = join(attemptDir, 'workspace');
   for (const sub of ['input', 'output', 'tmp']) await mkdir(join(ws, sub), { recursive: true });
   await writeFile(join(ws, 'input', 'task.json'), '{}');
@@ -700,7 +704,7 @@ test('preflight\'s grok evaluation, replayed on the passing live session: every 
 
 // ---------------------------------------------------------------- preflight end to end
 
-test('grok preflight end to end: an unconfined grok fails on evidence; the wrapper and refusing file tools pass every check', async t => {
+test('grok preflight end to end: an unconfined grok fails on evidence; the wrapper and refusing file tools pass every check', { skip: MACOS_ONLY }, async t => {
   for (const confine of [false, true]) {
     const dir = await scratch(t), dataRoot = join(dir, 'data'), home = await fakeHome(dir);
     await makeDataRoot(dataRoot, ['house-a-t1']);
@@ -742,7 +746,7 @@ test('grok preflight end to end: an unconfined grok fails on evidence; the wrapp
 
 // ---------------------------------------------------------------- execution
 
-test('execute runs a grok attempt through the frozen wrapper, agent and rules, and records its usage and cost', async t => {
+test('execute runs a grok attempt through the frozen wrapper, agent and rules, and records its usage and cost', { skip: MACOS_ONLY }, async t => {
   const { dir, home, record, batchDir, manifest, deps } = await grokBatch(t, { sequence: [{ artifact: 'glb', events: SESSION }] });
   assert.deepEqual([manifest.harness.login, manifest.harness.effort, manifest.harness.effort_levels, manifest.harness.grok_home],
     ['grok.com', 'low', ['low', 'medium', 'high', 'xhigh'], join(home, '.grok')]);
