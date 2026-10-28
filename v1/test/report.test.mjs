@@ -7,7 +7,7 @@ import { rng } from '../lib/rng.mjs';
 import { decodePNG } from '../lib/png.mjs';
 import { aggregate, buildLeaderboard, writeReport, bootstrapMean, conflictShare, normaliseUsage, comparePair, pairedBootstrap, tInterval,
   studentQuantile, chiSquareQuantile, sdRange, pooledSD, detectableDifference, pickRepresentatives, variantPairs, summaryMarkdown, attemptShareText,
-  varianceStatement, variantFamily, CONFLICT_KINDS, LADDER } from '../lib/report/index.mjs';
+  varianceStatement, variantFamily, probeErrors, categoryScore, detailCategories, spread, CONFLICT_KINDS, LADDER } from '../lib/report/index.mjs';
 import { writeSampleRuns, syntheticDesign, SAMPLE_ATTEMPTS } from '../lib/report/sample-runs.mjs';
 
 const near = (actual, expected, tolerance = 1e-9) => assert.ok(Math.abs(actual - expected) <= tolerance, actual + ' is not within ' + tolerance + ' of ' + expected);
@@ -888,7 +888,7 @@ test('memory tasks (m2, m3): their own evidence-against-memory share, labelled a
     assert.match(index, /<strong>Memory<\/strong>: on m2 \/ m3 tasks/);
     assert.match(index, /m3 &minus; m2 is what scaled drawings add on a named landmark/);
     const markdown = await readFile(join(outDir, 'summary.md'), 'utf8');
-    assert.match(markdown, /\| Configuration \| Conflict \(closer to photographed\) \| Memory \(closer to the evidence\) \| Frame offset/);
+    assert.match(markdown, /\| Configuration \| Conflict \(closer to photographed\) \| Memory \(closer to the evidence\) \|\n/);
     assert.match(markdown, /\| codex \/ gpt-demo \/ high \| 67% \(no interval\) † \| 67% \(no interval\) † \|/);
     assert.match(markdown, /Memory: on m2 \/ m3 tasks/);
     const m2 = await readFile(join(outDir, 'tasks', 'demo-house-c-m2.html'), 'utf8');
@@ -910,4 +910,112 @@ test('memory tasks (m2, m3): their own evidence-against-memory share, labelled a
     assert.ok(!/>Memory<\/th>/.test(await readFile(join(root, 'site', 'index.html'), 'utf8')));
     assert.ok(!/Memory \(closer/.test(await readFile(join(root, 'site', 'summary.md'), 'utf8')));
   });
+});
+
+test('diagnostics: named-dimension errors, detail by category, frame and scale medians, valid attempts only', async () => {
+  // One report by hand: probes the evidence shows and that hit the truth count;
+  // a missed probe has no error; an unevidenced probe and one whose ray misses
+  // the truth are left out, as in the scorer's probe_summary.
+  const report = { global: { diagonal_m: 20 }, probes: [
+    { id: 'a', truth_m: 3, measured_m: 3.1, error_m: 0.1, evidenced: true, missed: false },
+    { id: 'b', truth_m: 5, measured_m: 5.5, error_m: 0.5, evidenced: true, missed: false },
+    { id: 'c', truth_m: 4, measured_m: 3.7, evidenced: true },
+    { id: 'd', truth_m: 6, measured_m: null, error_m: null, evidenced: true, missed: true },
+    { id: 'e', truth_m: 2, measured_m: 9, error_m: 7, evidenced: false, missed: false },
+    { id: 'f', truth_m: null, measured_m: null, error_m: null, evidenced: true, missed: false },
+  ] };
+  const probes = probeErrors(report);
+  assert.deepEqual([probes.evaluated, probes.missed], [4, 1]);
+  near(probes.median_m, 0.3, 1e-12);
+  near(probes.median_fraction, 0.015, 1e-12);
+  near(probes.missed_share, 0.25);
+  assert.equal(probeErrors({ probes: [] }), null);
+  assert.equal(probeErrors({ detail: {} }), null);
+  const allMissed = probeErrors({ global: { diagonal_m: 10 }, probes: [{ id: 'a', truth_m: 1, measured_m: null, evidenced: true, missed: true }] });
+  assert.deepEqual([allMissed.median_m, allMissed.median_fraction, allMissed.missed_share], [null, null, 1]);
+  near(categoryScore({ detail: { categories: [{ id: 'roof', f: 0.42 }] } }, 'roof'), 42);
+  assert.equal(categoryScore({ detail: { categories: [{ id: 'roof', f: 0.42 }] } }, 'ornament'), undefined);
+  assert.equal(categoryScore({ detail: { score: null, categories: [] } }, 'roof'), undefined);
+  // Categories in DESIGN.md order, unknown ones after by name; invalid reports add none.
+  assert.deepEqual(detailCategories([
+    { valid: true, report: { detail: { categories: [{ id: 'zinc', f: 0.1 }, { id: 'ornament', f: 0.2 }, { id: 'massing', f: 0.3 }, { id: 'roof', f: null }] } } },
+    { valid: false, report: { detail: { categories: [{ id: 'entrance', f: 0 }] } } }]), ['massing', 'ornament', 'zinc']);
+  assert.deepEqual(spread([3, 1, 2, NaN]), { median: 2, iqr: [1.5, 2.5] });
+  assert.deepEqual(spread([5]), { median: 5, iqr: null });
+  assert.deepEqual(spread([]), { median: null, iqr: null });
+
+  await withData({ withModels: false, withInputs: false }, async (dataRoot, info, root) => {
+    const board = await aggregate({ dataRoot, outFile: null, now: NOW });
+    const codex = board.entries.find(entry => entry.key === CODEX), claude = board.entries.find(entry => entry.key === CLAUDE);
+    // The main score is untouched by the diagnostics.
+    near(codex.score.mean, (130 / 3 + 15 + 90) / 3);
+    assert.deepEqual(board.sets[0].detail_categories, ['massing', 'roof', 'openings', 'entrance', 'attachments'].map(id => ({ id, objects: 3 })));
+    // Synthetic probe errors are 10, 40, 5, 20 and 30 cm (PROBE_ERROR_STEPS): median 20. With groups
+    // dropped the 30 cm probe misses: median 15, one of five missed. Codex, valid attempts only:
+    // object a = (t1 15 + t2 15 + c1 20) / 3 = 16.67, b = t1 15 (its t2 is invalid), c = t2 20.
+    const cm = codex.probe_error.cm;
+    near(cm.median, 50 / 3);
+    near(cm.mean, (50 / 3 + 15 + 20) / 3);
+    near(cm.iqr[0], (15 + 50 / 3) / 2);
+    near(cm.iqr[1], (50 / 3 + 20) / 2);
+    assert.deepEqual([cm.objects, cm.tasks, cm.attempts], [3, 5, 5], 'the timeout and the invalid model are no samples here; the score counts them as 0');
+    assert.equal(codex.score.attempts, 7);
+    near(codex.probe_error.missed.mean, (0.4 / 3 + 0.2 + 0) / 3);
+    assert.deepEqual(codex.probe_error.probes, { evaluated: 25, missed: 3, attempts: 5 });
+    const diagonal = JSON.parse(await readFile(join(dataRoot, 'runs', 'demo-codex', 'demo-house-c-t2', 'a1', 'score', 'report.json'), 'utf8')).global.diagonal_m;
+    near(codex.probe_error.diagonal_pct.median, 50 / 3 / diagonal, 1e-9);
+    near(claude.probe_error.cm.median, 17.5);
+    assert.equal(claude.probe_error.cm.low_evidence, true);
+    // Detail by category, valid attempts only (detail F per group is score / 120 + 0.05 * (index % 3), 0 when dropped).
+    // attachments (the canopy, index 4): a = (t1 dropped 0 + t2 0.55 + c1 0.4667) / 3, b = 0.30, c = 0.80.
+    near(codex.detail_categories.attachments.mean, 100 * ((0 + 0.55 + 50 / 120 + 0.05) / 3 + 0.30 + 0.80) / 3);
+    // massing (the body, index 0): a = (1/3 + 1/2 + 5/12) / 3, b = 0.25, c = 0.75.
+    near(codex.detail_categories.massing.mean, 100 * ((1 / 3 + 1 / 2 + 5 / 12) / 3 + 0.25 + 0.75) / 3);
+    assert.equal(codex.detail_categories.massing.attempts, 5);
+    assert.equal(codex.detail.attempts, 7, 'the detail column still counts failures as 0');
+    assert.ok(codex.detail_categories.massing.ci95);
+    // Frame and scale: the means and intervals as before, now with the median and IQR over objects.
+    // |yaw| per valid codex attempt: a-t1 4, a-t2 6, b-t1 7, c-t2 10, a-c1 4 -> objects 14/3, 7, 10.
+    const yaw = codex.frame_error.yaw_deg;
+    near(yaw.mean, (14 / 3 + 7 + 10) / 3);
+    near(yaw.median, 7);
+    near(yaw.iqr[0], (14 / 3 + 7) / 2);
+    near(yaw.iqr[1], 8.5);
+    assert.equal(codex.frame_error.offset_fraction.attempts, 5);
+    near(codex.scale_error_pct.median, 4, 1e-6);
+    assert.equal(codex.scale_error_pct.iqr, null, 'one object: no range');
+    assert.match(board.method.diagnostics, /valid attempts only/);
+
+    const outDir = join(root, 'site');
+    await writeReport({ dataRoot, outDir, size: 48, now: NOW });
+    const index = await readFile(join(outDir, 'index.html'), 'utf8');
+    assert.match(index, /<h3>Detail by category<\/h3>/);
+    assert.match(index, />attachments<small>3 objects<\/small><\/th>/);
+    assert.match(index, /<td class="num" title="n = 3 objects, 5 att\.; valid attempts whose report scored a group of this category[^"]*">48\.0<small>\[/);
+    assert.match(index, /<h3>Named dimensions, frame and scale<\/h3>/);
+    assert.match(index, />Probe error<small>median, cm<\/small><\/th>/);
+    assert.match(index, />16\.7<small>IQR 15\.8&ndash;18\.3<\/small><small>n = 3 objects, 5 att\.<\/small><\/td>/);
+    assert.match(index, /title="median over objects; n = 3 objects, 5 att\.; mean 17\.2 \[/);
+    assert.match(index, />7\.0°<small>IQR 5\.8&ndash;8\.5<\/small>/);
+    assert.match(index, />4\.0%<span class="dagger">&dagger;<\/span><small>no IQR<\/small><small>n = 1 object, 1 att\.<\/small>/);
+    assert.match(index, /<h3>Evidence use and cost<\/h3>/);
+    assert.ok(!/Evidence use, frame and cost/.test(index));
+    const markdown = await readFile(join(outDir, 'summary.md'), 'utf8');
+    assert.match(markdown, /### Detail by category\n\n\| Configuration \| massing \(3 objects\) \| roof \(3 objects\) \| openings \(3 objects\) \| entrance \(3 objects\) \| attachments \(3 objects\) \|/);
+    assert.match(markdown, /### Named dimensions, frame and scale\n\n\| Configuration \| Probe error \(cm\) \| Probe error \(% of D\) \| Probes missed \| Frame offset \(% of D\) \| Frame yaw \| Scale error \(metric tasks\) \|/);
+    assert.match(markdown, /\| codex \/ gpt-demo \/ high \| 16\.7 \(IQR 15\.8–18\.3\) \| [0-9.]+% \(IQR [0-9.]+–[0-9.]+\) \| 11% \[/);
+    assert.match(markdown, /\| 7\.0° \(IQR 5\.8–8\.5\) \| 4\.0% \(no IQR\) † \|/);
+  });
+
+  // Reports without probes or detail categories (older or hand-made): nothing to show, nothing invented.
+  const attempt = (object, score) => ({ batch: 'b', task_id: object + '-t2', attempt: 1, system: 's', model: 'm', effort: null, status: 'ok', excluded: false, valid: true,
+    score, object, variant: 't2', scale_evidence: 'none', usage: null, wall_seconds: null, cost_usd: null,
+    report: { valid: true, score, alignment: { frame_error: { offset_fraction: 0.01, offset_m: 0.2, yaw_deg: -3 } }, detail: { score: 0 }, shape: { scale: 1 } } });
+  const bare = buildLeaderboard({ attempts: [attempt('x', 10), attempt('y', 30)], batches: [], problems: [] }, { now: NOW });
+  assert.deepEqual(bare.sets[0].detail_categories, []);
+  assert.deepEqual(bare.entries[0].detail_categories, {});
+  assert.deepEqual([bare.entries[0].probe_error.cm.median, bare.entries[0].probe_error.cm.objects], [null, 0]);
+  assert.deepEqual(bare.entries[0].probe_error.probes, { evaluated: 0, missed: 0, attempts: 0 });
+  near(bare.entries[0].frame_error.yaw_deg.median, 3);
+  assert.equal(summaryMarkdown(bare).includes('### Detail by category'), false);
 });

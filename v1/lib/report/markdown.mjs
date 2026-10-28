@@ -20,6 +20,11 @@ function table(head, rows, left = 1) {
 const stat = (value, { digits = 1, signed = false, scale = 1, suffix = '' } = {}) => !value || !isNumber(value.mean) ? 'n/a'
   : fixed(value.mean * scale, digits, signed) + suffix + ' ' + (value.ci95 ? ci(value.ci95.map(bound => bound * scale), digits, signed) : '(no interval)') + (value.low_evidence ? ' †' : '');
 
+// A diagnostic: "1.2 (IQR 0.8–2.0)", the median over objects, plus a dagger below 3 objects.
+const med = (value, { digits = 1, scale = 1, suffix = '' } = {}) => !value || !isNumber(value.median) ? 'n/a'
+  : fixed(value.median * scale, digits) + suffix + ' ' + (value.iqr ? '(IQR ' + fixed(value.iqr[0] * scale, digits) + '–' + fixed(value.iqr[1] * scale, digits) + ')' : '(no IQR)') +
+    (value.low_evidence ? ' †' : '');
+
 const verdicts = { a_higher: 'A higher', b_higher: 'B higher', not_separated: 'not separated', unsettled: 'unsettled', not_evaluated: 'not evaluated' };
 
 function setMarkdown(board, set) {
@@ -82,11 +87,24 @@ function setMarkdown(board, set) {
     lines.push('### By archetype', '', table(['Configuration', ...set.archetypes.map(item => item.id + ' (' + plural(item.objects, 'object') + ')')],
       entries.map(entry => [entry.key, ...set.archetypes.map(item => stat(entry.archetypes?.[item.id]))])), '');
   }
+  if (set.detail_categories?.length) {
+    lines.push('### Detail by category', '', table(['Configuration', ...set.detail_categories.map(item => item.id + ' (' + plural(item.objects, 'object') + ')')],
+      entries.map(entry => [entry.key, ...set.detail_categories.map(item => stat(entry.detail_categories?.[item.id]))])), '');
+    lines.push('Per detail category, 100 × the mean F of its groups; valid attempts only (failures are in Success, so these run higher than Detail). ' +
+      'Mean over objects with a 95% bootstrap interval.', '');
+  }
+  lines.push('### Named dimensions, frame and scale', '', table(['Configuration', 'Probe error (cm)', 'Probe error (% of D)', 'Probes missed', 'Frame offset (% of D)',
+    'Frame yaw', 'Scale error (metric tasks)'],
+    entries.map(entry => [entry.key, med(entry.probe_error?.cm), med(entry.probe_error?.diagonal_pct, { digits: 2, suffix: '%' }),
+      stat(entry.probe_error?.missed, { scale: 100, digits: 0, suffix: '%' }), med(entry.frame_error.offset_fraction, { scale: 100, suffix: '%' }),
+      med(entry.frame_error.yaw_deg, { suffix: '°' }), med(entry.scale_error_pct, { suffix: '%' })])), '');
+  lines.push('Valid attempts only. Median over objects with the interquartile range of the per-object values (a description of spread, not an interval); ' +
+    'probes missed is a mean with its 95% bootstrap interval. Probe error: per attempt, the median absolute error of the evidenced named dimensions (probe rays) ' +
+    'that hit the submission; D is the truth\'s bounding-box diagonal. Scale error: |fitted scale − 1| on metric tasks.', '');
   // Memory tasks (m2, m3) get their own column, and a line on what it means, only in a set that has them.
   const memory = (set.variants ?? []).some(variant => CONFLICT_KINDS.find(kind => kind.id === 'memory').variants.includes(variant));
-  lines.push('### Conflict and frame', '', table(['Configuration', 'Conflict (closer to photographed)', ...(memory ? ['Memory (closer to the evidence)'] : []), 'Frame offset', 'Scale error (metric tasks)'],
-    entries.map(entry => [entry.key, stat(entry.conflict, { scale: 100, digits: 0, suffix: '%' }), ...(memory ? [stat(entry.memory, { scale: 100, digits: 0, suffix: '%' })] : []),
-      stat(entry.frame_error.offset_fraction, { scale: 100, suffix: '%' }), stat(entry.scale_error_pct, { suffix: '%' })])), '');
+  lines.push('### Conflict', '', table(['Configuration', 'Conflict (closer to photographed)', ...(memory ? ['Memory (closer to the evidence)'] : [])],
+    entries.map(entry => [entry.key, stat(entry.conflict, { scale: 100, digits: 0, suffix: '%' }), ...(memory ? [stat(entry.memory, { scale: 100, digits: 0, suffix: '%' })] : [])])), '');
   if (memory) {
     lines.push('Memory: on m2 / m3 tasks (a named landmark whose surveyed proportions differ from its published figures), the share of contested probes closer to the ' +
       'surveyed object the evidence shows than to the structure as published; low means the model built what it remembered.', '');

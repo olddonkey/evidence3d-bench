@@ -1,7 +1,7 @@
 import { VARIANTS } from '../contract.mjs';
 import { UNNAMED_SET, UNKNOWN_SET } from './collect.mjs';
 import { intervalText, attemptShareText, VARIANT_ORDER, CONFLICT_KINDS } from './aggregate.mjs';
-import { esc, num, percent, statCell, sdCell, slug, fractionLabel, page, NOT_EVALUATED } from './html.mjs';
+import { esc, num, percent, statCell, medianCell, sdCell, slug, fractionLabel, page, NOT_EVALUATED } from './html.mjs';
 
 // index.html: per task set the leaderboard, the pairwise comparison, where the
 // noise is, the breakdowns and the task index; then provenance, excluded
@@ -41,25 +41,51 @@ function scoreTable(entries) {
 // Memory tasks get their own column only in a set that has them.
 const hasMemory = set => (set.variants ?? []).some(variant => CONFLICT_KINDS.find(kind => kind.id === 'memory').variants.includes(variant));
 
-function diagnosticsTable(entries, set) {
+function evidenceCostTable(entries, set) {
   const memory = hasMemory(set);
   return entryTable(entries,
     '<th class="num" title="share of contested probes closer to the as-photographed state">Conflict</th>' +
       (memory ? '<th class="num" title="memory tasks: share of contested probes closer to the surveyed object the evidence shows than to the published figures">Memory</th>' : '') +
-      '<th class="num" title="alignment offset as % of the truth diagonal">Frame offset</th><th class="num" title="absolute alignment yaw">Frame yaw</th>' +
-      '<th class="num" title="|fitted scale - 1| on metric tasks">Scale error</th><th class="num">Median wall</th><th class="num">Tokens / att.</th><th class="num">Cost / att.</th>',
+      '<th class="num">Median wall</th><th class="num">Tokens / att.</th><th class="num">Cost / att.</th>',
     entry => [
       statCell(entry.conflict, { scale: 100, digits: 0, suffix: '%' }),
       ...(memory ? [statCell(entry.memory, { scale: 100, digits: 0, suffix: '%' })] : []),
-      statCell(entry.frame_error.offset_fraction, { scale: 100, digits: 1, suffix: '%' }),
-      statCell(entry.frame_error.yaw_deg, { digits: 1, suffix: '°' }),
-      statCell(entry.scale_error_pct, { digits: 1, suffix: '%' }),
       '<td class="num">' + (isNumber(entry.wall_seconds.median) ? num(entry.wall_seconds.median / 60, 1, { suffix: ' min' }) : NOT_EVALUATED) +
         '<small>n = ' + entry.wall_seconds.attempts + '</small></td>',
       '<td class="num">' + (isNumber(entry.tokens.mean_total) ? esc(Math.round(entry.tokens.mean_total).toLocaleString('en-US')) : NOT_EVALUATED) +
         '<small>' + entry.tokens.attempts_reporting + ' / ' + entry.tokens.attempts + ' reported</small></td>',
       '<td class="num">' + (isNumber(entry.cost_usd.mean) ? num(entry.cost_usd.mean, 2, { suffix: ' $' }) : NOT_EVALUATED) +
         '<small>' + entry.cost_usd.attempts_reporting + ' / ' + entry.attempts + ' reported</small></td>',
+    ]);
+}
+
+// Where a delivered model loses its detail score: one column per category the
+// set's reports scored.
+function categoryTable(entries, set) {
+  if (!set.detail_categories?.length) return '<p class="muted">No detail categories in the reports.</p>';
+  return entryTable(entries,
+    set.detail_categories.map(item => '<th class="num" title="100 &times; the mean F of the ' + esc(item.id) + ' groups, valid attempts only">' + esc(item.id) +
+      '<small>' + plural(item.objects, 'object') + '</small></th>').join(''),
+    entry => set.detail_categories.map(item => statCell(entry.detail_categories?.[item.id])));
+}
+
+// Named dimensions, frame and scale: medians over objects, the interquartile
+// range under them.
+function errorTable(entries) {
+  return entryTable(entries,
+    '<th class="num" title="per attempt, the median absolute error of the named dimensions (probe rays) the evidence shows">Probe error<small>median, cm</small></th>' +
+      '<th class="num" title="the same as a percentage of the truth diagonal D">Probe error<small>median, % of D</small></th>' +
+      '<th class="num" title="share of evidenced probes whose ray hit nothing on the submission">Probes missed<small>mean</small></th>' +
+      '<th class="num" title="distance from the frame&rsquo;s correct place to the submission&rsquo;s centre, % of the truth diagonal">Frame offset<small>median, % of D</small></th>' +
+      '<th class="num" title="absolute yaw the scorer had to turn the submission">Frame yaw<small>median</small></th>' +
+      '<th class="num" title="|fitted scale &minus; 1| on metric tasks">Scale error<small>median, metric tasks</small></th>',
+    entry => [
+      medianCell(entry.probe_error?.cm, { digits: 1 }),
+      medianCell(entry.probe_error?.diagonal_pct, { digits: 2, suffix: '%' }),
+      statCell(entry.probe_error?.missed, { scale: 100, digits: 0, suffix: '%' }),
+      medianCell(entry.frame_error.offset_fraction, { scale: 100, digits: 1, suffix: '%' }),
+      medianCell(entry.frame_error.yaw_deg, { digits: 1, suffix: '°' }),
+      medianCell(entry.scale_error_pct, { digits: 1, suffix: '%' }),
     ]);
 }
 
@@ -320,11 +346,26 @@ Under each mean: the bootstrap interval, then the Student-t interval, which is t
 <h3>By archetype</h3>
 ${archetypeTable(entries, set)}
 <p class="legend">Mean score over the objects of each archetype (from the ground-truth model), same averaging as the leaderboard. With few objects per archetype these are descriptions, not comparisons.</p>
-<h3>Evidence use, frame and cost</h3>
-${diagnosticsTable(entries, set)}
+<h3>Detail by category</h3>
+${categoryTable(entries, set)}
+<p class="legend">Per detail category of the scorer&rsquo;s report, 100 &times; the mean F of its groups; a report&rsquo;s detail score is the mean of these over its categories.
+Valid attempts only: a failure has no model to diagnose and shows in Success, so these run higher than the Detail column, which counts failures as 0.
+A category appears where the evidence shows at least one of its groups well enough to score it; the count under each heading is the objects with such a group.
+Same averaging and interval as the leaderboard.</p>
+<h3>Named dimensions, frame and scale</h3>
+${errorTable(entries)}
+<p class="legend">Valid attempts only; attempts are averaged within a task and tasks within an object, as everywhere. Each cell is the <strong>median over objects</strong>,
+with the interquartile range of the per-object values under it: a description of the spread, not an interval. These errors are skewed (one model turned round adds 180&deg; to its object),
+so the median is the typical value; the mean and its 95% interval are in each cell&rsquo;s tooltip and in leaderboard.json.
+<strong>Probe error</strong>: per attempt, the median absolute error of the named dimensions the scorer measures with rays (ridge height, wall positions, canopy height &hellip;)
+that the evidence shows and that hit the submission, in centimetres and as a percentage of the truth&rsquo;s bounding-box diagonal D.
+<strong>Probes missed</strong>: the share of those probes whose ray hit nothing on the submission (mean over objects, with its interval).
+<strong>Frame offset</strong>: how far from the frame&rsquo;s correct place the submission put the object&rsquo;s centre; <strong>frame yaw</strong>: how far the scorer had to turn it.
+<strong>Scale error</strong>: |fitted scale &minus; 1| on metric tasks, a right shape at the wrong size.</p>
+<h3>Evidence use and cost</h3>
+${evidenceCostTable(entries, set)}
 <p class="legend"><strong>Conflict</strong>: on c1 tasks (drawings out of date), the share of contested probes closer to the as-photographed building.${hasMemory(set)
     ? '\n<strong>Memory</strong>: on m2 / m3 tasks (a named landmark whose surveyed proportions differ from its published figures), the share of contested probes closer to the surveyed object the evidence shows than to the structure as published; low means the model built what it remembered.' : ''}
-Frame and scale errors use valid attempts only; scale error is |fitted scale &minus; 1| on metric tasks.
 Tokens are input (including cached reads) + output as recorded in result.json; cost is whatever the harness reported (Claude Code: its list-price estimate) and stays n/a when not reported.</p>
 <h3>Tasks</h3>
 ${taskIndexTable(entries, tasks)}

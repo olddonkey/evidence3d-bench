@@ -44,6 +44,14 @@ export function median(values) {
   return quantile(list, 0.5);
 }
 
+// Median and interquartile range (linear-interpolated quartiles) of one value
+// per object: a description of the spread, not an interval for the median.
+// No range from a single value.
+export function spread(values) {
+  const list = values.filter(finite).sort((a, b) => a - b);
+  return { median: quantile(list, 0.5), iqr: list.length >= 2 ? [quantile(list, 0.25), quantile(list, 0.75)] : null };
+}
+
 // Means of `samples` resamples (with replacement) of `list`, sorted.
 function resampleMeans(list, seed, samples) {
   const random = rng(seed), n = list.length, means = new Float64Array(samples);

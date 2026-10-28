@@ -32,6 +32,23 @@ export function statCell(stat, { digits = 1, signed = false, suffix = '', scale 
     '<small>' + ci + '</small>' + extra + '<small>' + esc(n) + '</small></td>';
 }
 
+// A diagnostic (aggregate `diagnostic`) as a cell: the median over objects, the
+// interquartile range of the per-object values and n; the mean and its
+// interval go in the tooltip.
+export function medianCell(stat, { digits = 1, suffix = '', scale = 1 } = {}) {
+  if (!stat || !isNumber(stat.median)) {
+    const n = stat?.objects ? ' (n = ' + stat.objects + ')' : '';
+    return '<td class="num">' + NOT_EVALUATED + (n ? '<small>' + esc(n) + '</small>' : '') + '</td>';
+  }
+  const plain = value => (value * scale).toFixed(digits);
+  const iqr = stat.iqr ? 'IQR ' + num(stat.iqr[0] * scale, digits) + '&ndash;' + num(stat.iqr[1] * scale, digits) : 'no IQR';
+  const n = 'n = ' + stat.objects + ' object' + (stat.objects === 1 ? '' : 's') + (isNumber(stat.attempts) ? ', ' + stat.attempts + ' att.' : '');
+  const mean = isNumber(stat.mean) ? 'mean ' + plain(stat.mean) + suffix + (stat.ci95 ? ' [' + plain(stat.ci95[0]) + ', ' + plain(stat.ci95[1]) + ']' : '') : null;
+  const title = 'median over objects; ' + n + (mean ? '; ' + mean : '') + (stat.basis ? '; ' + stat.basis : '') + (stat.low_evidence ? '; LOW EVIDENCE: fewer than 3 objects' : '');
+  return '<td class="num' + (stat.low_evidence ? ' low' : '') + '" title="' + esc(title) + '">' + num(stat.median * scale, digits, { suffix }) +
+    (stat.low_evidence ? '<span class="dagger">&dagger;</span>' : '') + '<small>' + iqr + '</small><small>' + esc(n) + '</small></td>';
+}
+
 // A standard deviation (aggregate sdEntry) as a cell: value, 95 % range, df.
 export function sdCell(entry, { digits = 1, note = '' } = {}) {
   if (!entry || !isNumber(entry.sd)) return '<td class="num">' + NOT_EVALUATED + (note ? '<small>' + esc(note) + '</small>' : '') + '</td>';
