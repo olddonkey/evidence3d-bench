@@ -1,4 +1,5 @@
 import { esc, num, NOT_EVALUATED } from './html.mjs';
+import { ON_TIME_SECONDS } from './curves.mjs';
 
 // The score-over-time section (curves.mjs): an inline SVG line chart, one line
 // per configuration, and the same numbers as a table; and the table alone for
@@ -90,13 +91,15 @@ export function timeSection(entries) {
         '<td class="num">' + (isNumber(curve.t95.median_seconds) ? num(minutes(curve.t95.median_seconds), 1, { suffix: ' min' }) + '<small>IQR ' + minuteLabel(curve.t95.q1_seconds) + '–' +
           minuteLabel(curve.t95.q3_seconds) + '</small>' : NOT_EVALUATED) + '<small>n = ' + curve.t95.attempts + (curve.t95.low_final ? ', ' + curve.t95.low_final + ' below ' + curve.t95.min_final : '') + '</small></td>' +
         '<td class="num">' + curve.snapshots + (curve.score_errors ? '<small class="bad">' + curve.score_errors + ' not scored (scorer failed or not stored)</small>' : '') +
-          (curve.not_scored ? '<small>' + curve.not_scored + ' not scored</small>' : '') + '</td></tr>';
+          (curve.not_scored ? '<small>' + curve.not_scored + ' not scored</small>' : '') +
+          (curve.late ? '<small>' + curve.late + ' read late</small>' : '') + '</td></tr>';
     }).join('\n') + '</tbody></table></div>';
   const over = withCurve.length > SERIES_SLOTS ? '<p class="legend">The chart shows ' + SERIES_SLOTS + ' configurations (by name); the table has all ' + withCurve.length + '.</p>' : '';
   const interval = [...new Set(withCurve.map(entry => entry.time_curve.interval_seconds).flat())].map(minuteLabel).join(', ');
   return chart(withCurve, colour) + over + table + missing +
     '<p class="legend">While an attempt runs, the runner copies its <code>output/model.glb</code> every ' + interval + ' min (outside the sandbox) and scores the copies afterwards; the leaderboard still scores only the final file. ' +
     'At each tick an attempt counts its final score once it has ended, before that its last snapshot&rsquo;s score (0 while it had no valid model); ' +
+    'a snapshot counts from its tick when the runner read it within ' + ON_TIME_SECONDS + ' s of it, otherwise from the next tick after its read (<em>read late</em>, counted per configuration); ' +
     'an attempt whose last snapshot has no score because the scorer failed on it (also when the runner scored it again) or the runner could not store it is left out of that tick and counted as <em>missing</em>. ' +
     'Attempts, tasks and objects are averaged as for the score, ' +
     'so the last column of the curve is the leaderboard score. <strong>95% of final</strong>: per attempt with a final score of at least 10, the minutes to its first snapshot at 95% of that score ' +
@@ -114,9 +117,11 @@ export function timeMarkdown(entries) {
     return [entry.key, ...ticks.map(t => isNumber(byTick.get(t)?.mean) ? byTick.get(t).mean.toFixed(1) + (byTick.get(t).missing ? ' (' + byTick.get(t).missing + ' missing)' : '') : 'n/a'),
       t95Text(entry.time_curve.t95)];
   });
+  const late = withCurve.filter(entry => entry.time_curve.late).map(entry => entry.key + ' ' + entry.time_curve.late);
   return ['### Score over time', '',
     '| ' + head.map(cell).join(' | ') + ' |', '|' + head.map((_, i) => i ? ' ---: |' : ' --- |').join(''), ...rows.map(row => '| ' + row.map(cell).join(' | ') + ' |'), '',
     'Mean score at each tick (minutes after the CLI started), from snapshots of output/model.glb: an attempt counts its final score once ended, before that its last snapshot\'s score ' +
-      '(left out as missing when the scorer failed on that snapshot); ' +
+      '(left out as missing when the scorer failed on that snapshot); a snapshot read more than ' + ON_TIME_SECONDS + ' s after its tick counts from the next tick' +
+      (late.length ? ' (read late: ' + late.join(', ') + ')' : '') + '; ' +
       'averaged like the score, so the last column is the leaderboard score. 95% of final: median minutes to the first snapshot at 95% of an attempt\'s final score (final ≥ 10).', ''].join('\n');
 }

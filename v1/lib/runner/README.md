@@ -190,8 +190,9 @@ must still be the file that was read. A file replaced meanwhile (the model's own
 rename, or a swap) or caught mid-write (a GLB whose header length is not what was read)
 is read again, up to 4 times 0.75 s apart; a symlink, hard link, non-regular or
 oversized file, or a replaced `output/`, is recorded as refused and scores 0, as the
-final read would. A tick the runner reaches late is read late: each record keeps when
-its copy was taken, and the report uses that time, not the tick.
+final read would. Each record keeps when its read began and ended (`at_seconds`,
+`read_seconds`). The report counts a snapshot at its tick when the read ended within
+10 s of it, and from `read_seconds` (so from the next tick) when it was read later.
 
 After the final file is scored, the attempt's snapshots are scored in one worker process
 (`score-worker.mjs` with a `snapshots` job: the task is loaded once, no error maps are

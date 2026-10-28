@@ -8,8 +8,9 @@ import { finite, median, quantile } from './stats.mjs';
 //   - its final score (failures 0, as on the leaderboard) once it has ended
 //     (wall_seconds <= T) or T has reached its wall-clock limit;
 //   - before that, the score of its last snapshot taken at or before T (taken:
-//     when the runner had read it, which can be after the tick it was due at
-//     on a busy runner): 0 when there was no output/model.glb yet, or one the
+//     at its tick when the runner had read it within ON_TIME_SECONDS of it,
+//     else when the read ended, so a late one counts from the next tick on;
+//     see snapshotAt): 0 when there was no output/model.glb yet, or one the
 //     runner refused, or one the scorer judged invalid;
 //   - missing (null) when that snapshot has no score through no fault of the
 //     model: the scorer failed on it, also on the runner's retries
@@ -23,13 +24,25 @@ import { finite, median, quantile } from './stats.mjs';
 // point at the wall-clock limit is the leaderboard score.
 //
 // Time to 95 %: per attempt whose final score is at least T95_MIN_FINAL, when
-// its first snapshot with a score of at least T95_SHARE of the final score was
-// taken, or its end (wall_seconds) when no snapshot got there, the final file
+// its first snapshot with a score of at least T95_SHARE of the final score
+// counts from (snapshotAt), or its end (wall_seconds) when no snapshot got there, the final file
 // being the snapshot at the end; the median over those attempts (not weighted
 // by object). Attempts below T95_MIN_FINAL are counted, not used: 95 % of almost
 // nothing says nothing about speed.
 export const T95_SHARE = 0.95;
 export const T95_MIN_FINAL = 10;
+
+// A snapshot read within this many seconds after its tick (the read itself,
+// and the wait for a model caught mid-write) belongs to that tick. One read
+// later, on a busy runner, is the attempt's state when the read ended, not
+// at its tick: it counts from the next tick after that, and is counted as
+// late (docs/V1-ROUND4-PLAN.md, section 7).
+export const ON_TIME_SECONDS = 10;
+
+// When a snapshot counts from: its tick `t`, or `read` (seconds after the
+// spawn at which its read ended) when that is more than ON_TIME_SECONDS
+// later. collect.mjs stores it as the point's `at`, with `late`.
+export const snapshotAt = (t, read) => finite(read) && read - t > ON_TIME_SECONDS ? read : t;
 
 // When a snapshot was taken (collect.mjs: `at`; the tick for older data).
 const takenAt = point => finite(point.at) ? point.at : point.t;
@@ -95,5 +108,6 @@ export function timeCurve(attempts, metric) {
     snapshots: snapshots.length,
     score_errors: snapshots.filter(point => point.status === 'score_error' || point.status === 'lost').length,
     not_scored: snapshots.filter(point => point.status === 'not_scored').length,
+    late: snapshots.filter(point => point.late).length, on_time_seconds: ON_TIME_SECONDS,
   };
 }
