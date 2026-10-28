@@ -110,13 +110,14 @@ node v1/cli.mjs report --batches A,B,C --out .local/v1/reports/NAME --roster v1/
   "configurations": [
     { "system": "codex", "model": "gpt-6-astra", "effort": "high", "ladder": "default" },
     { "system": "codex", "model": "gpt-6-astra", "effort": "max", "ladder": "top" },
-    { "system": "claude-code", "model": "claude-haiku-4-5", "effort": null, "ladder": "default" }
+    { "system": "claude-code", "model": "claude-haiku-4-5-20251001", "effort": null, "ladder": "default" }
   ]
 }
 ```
 
 - `effort: null` is a run without an effort flag (the client's default). The
-  key is `system / model / effort` exactly as `result.json` records it.
+  key is `system / model / effort` exactly as `result.json` records it,
+  including any date suffix (`claude-haiku-4-5-20251001`).
 - `ladder` is `"default"`, `"top"`, a list of both (a model with one effort
   level), or absent (a formal configuration on no ladder). A client and model
   may appear on a ladder once.
@@ -128,7 +129,8 @@ node v1/cli.mjs report --batches A,B,C --out .local/v1/reports/NAME --roster v1/
   listed after the ranked rows, never ranked, in no corrected family. Their
   pairs keep their uncorrected numbers (folded on the page).
 - The leaderboard records the roster (`board.roster`: file relative to the
-  working directory, sha256, round, decided_at, configurations).
+  repository root, or its name alone when it lies outside, whatever the
+  working directory; sha256, round, decided_at, configurations).
 - `v1/rounds/round3.roster.json` reproduces the ladders of
   `docs/V1-ROUND3.md` §5 (default: high, Haiku without a flag; top: max for
   Astra, gpt-6.1-sol and Opus). It was written after that round's data, to
@@ -177,7 +179,12 @@ uncorrected intervals, which stay as they were.
   m in its header; each pair's sentence says whether it is still separated.
 - A pair can be separated on a ladder and not in the table of every
   configuration: the larger table makes more claims and corrects harder.
-  Each table states its own m.
+  Each table states its own m, and where a ladder or effort pair is corrected
+  the other way in the table of all pairs, its Holm cell says so
+  (`allPairsNote`). Round 3 `test-final`: Astra max vs gpt-6.1-sol max is
+  separated on the top ladder (3 pairs) and not among all pairs. A claim
+  about a ladder cites the ladder's family; a claim about the whole table
+  cites the table's.
 - On synthetic data with ten equal configurations (45 pairs, 10 objects),
   the uncorrected table showed at least one false separation in 75 % of 40
   trials, the Holm column in none (`report-ladders.test.mjs` checks a smaller

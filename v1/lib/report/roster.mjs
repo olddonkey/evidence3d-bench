@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // Which configurations a round ranks, and on which ladder. A configuration is
 // a system ladder entry: client + model + effort. Effort moves a model about as
@@ -71,10 +72,17 @@ export function parseRoster(data, { file = null, sha256 = null } = {}) {
     file, sha256, configurations, keys };
 }
 
-// The file is recorded relative to the working directory (the repository root
-// when run as documented), so no absolute local path enters the leaderboard.
+// The file is recorded relative to the repository root, or by its name alone
+// when it lies outside, whatever the working directory: no absolute or
+// machine-specific path enters the leaderboard (the sha256 identifies it).
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
+export function rosterPath(file) {
+  const inRepo = relative(REPO_ROOT, resolve(file));
+  return inRepo && !inRepo.startsWith('..') && !isAbsolute(inRepo) ? inRepo.split(sep).join('/') : basename(file);
+}
+
 export async function readRoster(file) {
-  const bytes = await readFile(file), shown = relative(process.cwd(), resolve(file)) || file;
+  const bytes = await readFile(file), shown = rosterPath(file);
   let data;
   try { data = JSON.parse(bytes.toString('utf8')); } catch (error) { throw new Error('roster ' + shown + ': ' + error.message); }
   return parseRoster(data, { file: shown, sha256: createHash('sha256').update(bytes).digest('hex') });

@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { rng } from '../lib/rng.mjs';
-import { buildLeaderboard, writeReport, summaryMarkdown, correctFamily, holmAdjust, tTestP, tInterval, parseRoster, readRoster, inferLadders, studentQuantile,
-  FAMILY_ALPHA } from '../lib/report/index.mjs';
+import { buildLeaderboard, writeReport, summaryMarkdown, correctFamily, holmAdjust, tTestP, tInterval, parseRoster, readRoster, rosterPath, inferLadders, studentQuantile,
+  allPairsNote, FAMILY_ALPHA } from '../lib/report/index.mjs';
 import { writeSampleRuns } from '../lib/report/sample-runs.mjs';
 
 const near = (actual, expected, tolerance = 1e-9) => assert.ok(Math.abs(actual - expected) <= tolerance, actual + ' is not within ' + tolerance + ' of ' + expected);
@@ -164,10 +165,41 @@ test('the Round 3 roster reproduces the ladders of docs/V1-ROUND3.md and matches
   assert.match(roster.sha256, /^[a-f0-9]{64}$/);
   const onLadder = id => roster.configurations.filter(item => item.ladders.includes(id)).map(item => item.key);
   assert.equal(roster.configurations.length, 12, '12 configurations, 66 pairs');
+  // The keys exactly as the Round 3 result.json files record them (Haiku with its date suffix).
+  assert.deepEqual(roster.configurations.map(item => item.key).sort(), [
+    'claude-code / claude-haiku-4-5-20251001 / -', 'claude-code / claude-opus-5-5 / high', 'claude-code / claude-opus-5-5 / max',
+    'codex / gpt-5.6-luna / high', 'codex / gpt-6-astra / high', 'codex / gpt-6-astra / max', 'codex / gpt-6-sol / high', 'codex / gpt-6.1-sol / high',
+    'codex / gpt-6.1-sol / max', 'grok / grok-4.6 / high', 'grok / grok-4.7 / high', 'grok / grok-4.7-build-fast / high']);
   assert.deepEqual(onLadder('top'), ['codex / gpt-6-astra / max', 'codex / gpt-6.1-sol / max', 'claude-code / claude-opus-5-5 / max']);
   assert.equal(onLadder('default').length, 9);
   const { ladders } = inferLadders(roster.configurations);
   for (const item of roster.configurations) assert.deepEqual(ladders.get(item.key), item.ladders, item.key);
+});
+
+test('the roster file is recorded relative to the repository root, whatever the working directory, or by name outside it', () => {
+  const inRepo = fileURLToPath(new URL('../rounds/round3.roster.json', import.meta.url)), cwd = process.cwd();
+  try {
+    process.chdir(tmpdir());
+    assert.equal(rosterPath(inRepo), 'v1/rounds/round3.roster.json');
+    assert.equal(rosterPath(join(tmpdir(), 'somewhere', 'round9.roster.json')), 'round9.roster.json');
+  } finally { process.chdir(cwd); }
+  assert.equal(rosterPath('v1/rounds/round3.roster.json'), 'v1/rounds/round3.roster.json');
+});
+
+test('a ladder pair notes when the table of all pairs corrects it the other way', () => {
+  const holm = (verdict, p, comparisons) => ({ family: 'x', comparisons, p_adjusted: p, verdict });
+  const set = { pairwise: { pairs: [
+    { a: 'A', b: 'B', verdict: 'a_higher', holm: holm('not_separated', 0.088, 66) },
+    { a: 'A', b: 'C', verdict: 'a_higher', holm: holm('a_higher', 0.001, 66) },
+    { a: 'B', b: 'C', verdict: 'a_higher', reference: true, holm: null },
+  ] } };
+  const note = allPairsNote(set);
+  assert.equal(note({ a: 'A', b: 'B', verdict: 'a_higher', holm: holm('a_higher', 0.0098, 3) }), 'not separated in the table of all 66 pairs (adj. p = 0.088)');
+  // Read the other way round (an effort pair is top minus default): the same pair.
+  assert.equal(note({ a: 'B', b: 'A', verdict: 'b_higher', holm: holm('b_higher', 0.0098, 3) }), 'not separated in the table of all 66 pairs (adj. p = 0.088)');
+  assert.equal(note({ a: 'A', b: 'C', verdict: 'a_higher', holm: holm('a_higher', 0.0005, 3) }), '', 'same verdict: no note');
+  assert.equal(note({ a: 'B', b: 'C', verdict: 'a_higher', holm: holm('a_higher', 0.01, 3) }), '', 'not corrected in the large table: no note');
+  assert.equal(note(set.pairwise.pairs[0]), '', 'the pair itself');
 });
 
 test('with a roster: reference rows are listed, unranked and in no family; the uncorrected numbers do not move', () => {
@@ -234,6 +266,7 @@ test('the page and summary.md show both ladders, the Holm column and the referen
     const rosterFile = join(root, 'roster.json');
     await writeFile(rosterFile, JSON.stringify({ schema: 'e3d-roster-v1', round: 'demo', configurations: [{ system: 'codex', model: 'gpt-demo', effort: 'high', ladder: 'default' }] }));
     const roster = await readRoster(rosterFile);
+    assert.equal(roster.file, 'roster.json', 'outside the repository: the name alone');
     const result = await writeReport({ dataRoot, batches: ['demo-codex', 'demo-claude'], outDir: join(root, 'out'), now: NOW, roster });
     const index = await readFile(result.index, 'utf8'), summary = await readFile(result.summary, 'utf8');
     for (const text of ['<h3>Ladders</h3>', 'Each client’s default effort', 'Each client’s top effort', '>Holm<small>m = ', 'Reference rows', 'reference row']) {

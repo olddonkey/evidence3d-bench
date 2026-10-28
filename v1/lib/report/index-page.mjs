@@ -1,6 +1,6 @@
 import { VARIANTS } from '../contract.mjs';
 import { UNNAMED_SET, UNKNOWN_SET } from './collect.mjs';
-import { intervalText, attemptShareText, pText, VARIANT_ORDER, CONFLICT_KINDS } from './aggregate.mjs';
+import { intervalText, attemptShareText, pText, allPairsNote, VARIANT_ORDER, CONFLICT_KINDS } from './aggregate.mjs';
 import { esc, num, percent, statCell, sdCell, slug, fractionLabel, page, NOT_EVALUATED } from './html.mjs';
 
 // index.html: per task set the two ladders, the leaderboard, the pairwise
@@ -100,11 +100,12 @@ const intervalCell = pair => '<td class="num">' + interval(pair.ci95) +
   (pair.t_ci95 ? '<small title="Student-t interval of the per-object differences">t ' + interval(pair.t_ci95) + '</small>' : '') + '</td>';
 const verdictCell = pair => '<td class="' + (separated(pair.verdict) ? 'good' : pair.verdict === 'unsettled' ? 'low' : 'na') + '">' + esc(verdictText[pair.verdict] ?? pair.verdict) +
   '<small>' + esc(verdictNote[pair.verdict] ?? '') + (pair.small_sample && pair.verdict !== 'not_evaluated' ? '; only ' + pair.objects + ' objects' : '') + '</small></td>';
-// The corrected verdict: separated or not after Holm within the pair's family.
-const holmCell = pair => !pair.holm ? '<td class="na">' + (pair.reference ? 'reference row' : 'not tested') + '</td>'
+// The corrected verdict: separated or not after Holm within the pair's family;
+// `note` says when the table of all pairs corrects the same pair the other way.
+const holmCell = (pair, note = '') => !pair.holm ? '<td class="na">' + (pair.reference ? 'reference row' : 'not tested') + '</td>'
   : '<td class="' + (separated(pair.holm.verdict) ? 'good' : 'na') + '" title="Holm over the ' + pair.holm.comparisons + ' testable pairs of this table">' +
     (separated(pair.holm.verdict) ? 'separated' : separated(pair.verdict) ? 'not separated<small>separated only uncorrected</small>' : 'not separated') +
-    '<small>adj. p ' + esc(pText(pair.holm.p_adjusted)) + '</small></td>';
+    '<small>adj. p ' + esc(pText(pair.holm.p_adjusted)) + '</small>' + (note ? '<small class="low">' + esc(note) + '</small>' : '') + '</td>';
 const holmHead = correction => '<th title="Holm&rsquo;s step-down correction at family-wise 5% on the paired t p-value, over the testable pairs of this table">Holm' +
   '<small>m = ' + correction.comparisons + '</small></th>';
 const correctionLine = correction => correction.comparisons
@@ -149,7 +150,7 @@ const HOLM_LEGEND = '<strong>Holm</strong>: the same verdict corrected for the n
 
 // A ladder's own pairs: the leaderboard's pairwise rows restricted to it, with
 // Holm over the ladder's pairs. `effort` rows are top minus default.
-function ladderPairs(rows, correction, { effort = false } = {}) {
+function ladderPairs(rows, correction, { effort = false, note = () => '' } = {}) {
   if (!rows.length) return '';
   const name = pair => effort ? '' : '<td>' + esc(pair.a) + '</td><td>' + esc(pair.b) + '</td>';
   return '<div class="scroll"><table><thead><tr>' + (effort ? '<th>System</th><th>Model</th><th>Default</th><th>Top</th>' : '<th>A</th><th>B</th>') +
@@ -158,13 +159,13 @@ function ladderPairs(rows, correction, { effort = false } = {}) {
     rows.map(pair => '<tr>' + (effort ? '<td>' + esc(pair.system) + '</td><td>' + esc(pair.model) + '</td><td>' + (pair.default_effort === null ? NOT_EVALUATED : esc(pair.default_effort)) +
       '</td><td>' + esc(pair.top_effort) + '</td>' : name(pair)) + '<td class="num">' + pair.objects + '</td><td class="num' + (pair.low_evidence ? ' low' : '') + '"><strong>' +
       num(pair.mean_difference, 1, { signed: true }) + '</strong></td>' + intervalCell(pair) + '<td class="num">' + pair.won + ' / ' + pair.tied + ' / ' + pair.lost + '</td>' +
-      verdictCell(pair) + holmCell(pair) + '</tr>').join('\n') + '</tbody></table></div>';
+      verdictCell(pair) + holmCell(pair, note(pair)) + '</tr>').join('\n') + '</tbody></table></div>';
 }
 
 const sentence = text => text ? text[0].toUpperCase() + text.slice(1) : '';
 
 function laddersSection(board, set) {
-  const byKey = new Map(board.entries.filter(entry => entry.set === set.id).map(entry => [entry.key, entry]));
+  const byKey = new Map(board.entries.filter(entry => entry.set === set.id).map(entry => [entry.key, entry])), note = allPairsNote(set);
   const parts = set.ladders.map(ladder => {
     const entries = ladder.entries.map(item => byKey.get(item.key)), ranks = new Map(ladder.entries.map(item => [item.key, item.rank]));
     const missing = ladder.missing.length ? '<p class="legend low">In the roster for this ladder but with no counted attempt in this set: ' + ladder.missing.map(esc).join(', ') + '.</p>' : '';
@@ -173,7 +174,7 @@ function laddersSection(board, set) {
     const pairs = new Map(ladder.pairwise.pairs.map(pair => [pair.a + '|' + pair.b, pair]));
     const next = (entry, index) => {
       const pair = index + 1 < entries.length ? pairs.get(entry.key + '|' + entries[index + 1].key) : null;
-      return pair ? '<td class="num">' + num(pair.mean_difference, 1, { signed: true }) + '<small>' + interval(pair.t_ci95) + ' t</small></td>' + holmCell(pair)
+      return pair ? '<td class="num">' + num(pair.mean_difference, 1, { signed: true }) + '<small>' + interval(pair.t_ci95) + ' t</small></td>' + holmCell(pair, note(pair))
         : '<td class="num"></td><td></td>';
     };
     const table = entryTable(entries, '<th class="num">Score</th><th class="num" title="attempts with a valid score report">Success</th>' +
@@ -183,18 +184,19 @@ function laddersSection(board, set) {
       return [statCell(entry.score), '<td class="num">' + percent(entry.success.rate) + '<small>' + entry.success.valid + ' / ' + entry.success.attempts + ' att.</small></td>', next(entry, index)];
     }, { rankOf: entry => ranks.get(entry.key) });
     const all = ladder.pairwise.pairs.length > 1 ? '<details class="more"><summary>All ' + ladder.pairwise.pairs.length + ' pairs of this ladder</summary>' +
-      ladderPairs(ladder.pairwise.pairs, ladder.pairwise.correction) + '</details>' : '';
+      ladderPairs(ladder.pairwise.pairs, ladder.pairwise.correction, { note }) + '</details>' : '';
     return '<h4>' + esc(ladder.label) + ' <small>' + plural(entries.length, 'configuration') + ' · ' + esc(correctionLine(ladder.pairwise.correction)) + '</small></h4>' +
       table + missing + all;
   });
   const effort = set.effort.pairs.length ? '<h4>Effort: top &minus; default, same client and model <small>' + esc(correctionLine(set.effort.correction)) + '</small></h4>' +
-    ladderPairs(set.effort.pairs, set.effort.correction, { effort: true }) : '';
+    ladderPairs(set.effort.pairs, set.effort.correction, { effort: true, note }) : '';
   const notes = set.ladder_notes?.length ? '<ul>' + set.ladder_notes.map(note => '<li>' + esc(note) + '</li>').join('') + '</ul>' : '';
   return parts.join('\n') + effort + '<p class="legend">Every row is a system: client, model and effort together. Effort moves a model about as much as the gap between ' +
     'models, so a model ladder compares each client at the same footing: its default effort, or the highest effort the round asked it for. ' + esc(sentence(set.ladder_rule)) + '.' +
     ' Ranks, scores and intervals are the leaderboard&rsquo;s (variant breakdowns there). <strong>Gap to next</strong>: per object, this configuration minus the next one ' +
     'down the ladder; its Holm verdict corrects over all pairs of the ladder (m in the header), and the folded table lists them all. ' +
-    'Each table&rsquo;s Holm column corrects over that table&rsquo;s own pairs.</p>' + notes;
+    'Each table&rsquo;s Holm column corrects over that table&rsquo;s own pairs; where the table of all pairs, correcting over more, reaches the other verdict ' +
+    'for the same pair, the cell says so.</p>' + notes;
 }
 
 // ---------------------------------------------------------------- variance

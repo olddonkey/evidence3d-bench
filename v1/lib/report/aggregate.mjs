@@ -381,6 +381,19 @@ export function holmSentence(row) {
   return ' After Holm\'s correction over the ' + row.holm.comparisons + ' pairs of this table (adjusted p ' + pText(row.holm.p_adjusted) + '): ' + after + '.';
 }
 
+// For a set: pair -> a note when the same pair, in the table of every formal
+// configuration, is corrected to the other verdict (a smaller family corrects
+// less, so a ladder can separate what the large table does not), else ''.
+export function allPairsNote(set) {
+  const holms = new Map();
+  for (const pair of set.pairwise.pairs) if (pair.holm) holms.set(pair.a + '|' + pair.b, pair.holm).set(pair.b + '|' + pair.a, pair.holm);
+  return pair => {
+    const other = pair.holm ? holms.get(pair.a + '|' + pair.b) : null;
+    if (!other || other === pair.holm || SEPARATED.has(other.verdict) === SEPARATED.has(pair.holm.verdict)) return '';
+    return (SEPARATED.has(other.verdict) ? 'separated' : 'not separated') + ' in the table of all ' + other.comparisons + ' pairs (adj. p ' + pText(other.p_adjusted) + ')';
+  };
+}
+
 // A pair without its per-object rows, for the ladder and effort tables.
 const slimPair = pair => ({ a: pair.a, b: pair.b, objects: pair.objects, tasks: pair.tasks, mean_difference: pair.mean_difference, ci95: pair.ci95,
   t_ci95: pair.t_ci95, p_t: pair.p_t, won: pair.won, tied: pair.tied, lost: pair.lost, verdict: pair.verdict, small_sample: pair.small_sample,

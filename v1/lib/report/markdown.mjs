@@ -1,5 +1,5 @@
 import { VARIANTS } from '../contract.mjs';
-import { intervalText, signedText, attemptShareText, pText, VARIANT_ORDER, CONFLICT_KINDS } from './aggregate.mjs';
+import { intervalText, signedText, attemptShareText, pText, allPairsNote, VARIANT_ORDER, CONFLICT_KINDS } from './aggregate.mjs';
 import { fractionLabel } from './html.mjs';
 
 // summary.md: the same numbers as index.html in plain Markdown, to paste into
@@ -22,8 +22,8 @@ const stat = (value, { digits = 1, signed = false, scale = 1, suffix = '' } = {}
 
 const verdicts = { a_higher: 'A higher', b_higher: 'B higher', not_separated: 'not separated', unsettled: 'unsettled', not_evaluated: 'not evaluated' };
 const separated = verdict => verdict === 'a_higher' || verdict === 'b_higher';
-const holm = pair => !pair.holm ? (pair.reference ? 'reference row' : 'not tested')
-  : (separated(pair.holm.verdict) ? 'separated' : 'not separated') + ' (adj. p ' + pText(pair.holm.p_adjusted) + ')';
+const holm = (pair, note = '') => !pair.holm ? (pair.reference ? 'reference row' : 'not tested')
+  : (separated(pair.holm.verdict) ? 'separated' : 'not separated') + ' (adj. p ' + pText(pair.holm.p_adjusted) + ')' + (note ? '; ' + note : '');
 const correctionLine = correction => correction.comparisons
   ? correction.separated + ' of ' + correction.comparisons + ' pairs separated after Holm (' + correction.separated_uncorrected + ' uncorrected)' : 'no testable pair';
 const effortText = effort => effort ?? 'no flag';
@@ -32,7 +32,7 @@ const effortText = effort => effort ?? 'no flag';
 // the effort pairs (top minus default, same client and model).
 function laddersMarkdown(board, set) {
   const byKey = new Map(board.entries.filter(entry => entry.set === set.id).map(entry => [entry.key, entry]));
-  const lines = ['### Ladders', '', set.ladder_rule[0].toUpperCase() + set.ladder_rule.slice(1) + '.', ''];
+  const lines = ['### Ladders', '', set.ladder_rule[0].toUpperCase() + set.ladder_rule.slice(1) + '.', ''], note = allPairsNote(set);
   for (const ladder of set.ladders) {
     lines.push('#### ' + ladder.label, '');
     if (ladder.entries.length) {
@@ -45,7 +45,7 @@ function laddersMarkdown(board, set) {
     if (ladder.pairwise.pairs.length) {
       lines.push(table(['A', 'B', 'Objects', 'A − B', '95% bootstrap', '95% Student-t', 'Verdict (uncorrected)', 'Holm (m = ' + ladder.pairwise.correction.comparisons + ')'],
         ladder.pairwise.pairs.map(pair => [pair.a, pair.b, pair.objects, fixed(pair.mean_difference, 1, true), pair.ci95 ? intervalText(pair.ci95) : 'n/a',
-          pair.t_ci95 ? intervalText(pair.t_ci95) : 'n/a', verdicts[pair.verdict] ?? pair.verdict, holm(pair)]), 2), '', correctionLine(ladder.pairwise.correction) + '.', '');
+          pair.t_ci95 ? intervalText(pair.t_ci95) : 'n/a', verdicts[pair.verdict] ?? pair.verdict, holm(pair, note(pair))]), 2), '', correctionLine(ladder.pairwise.correction) + '.', '');
     }
   }
   if (set.effort.pairs.length) {
@@ -53,7 +53,7 @@ function laddersMarkdown(board, set) {
       'Won / tied / lost', 'Verdict (uncorrected)', 'Holm (m = ' + set.effort.correction.comparisons + ')'],
     set.effort.pairs.map(pair => [pair.system, pair.model, effortText(pair.default_effort), effortText(pair.top_effort), pair.objects, fixed(pair.mean_difference, 1, true),
       pair.ci95 ? intervalText(pair.ci95) : 'n/a', pair.t_ci95 ? intervalText(pair.t_ci95) : 'n/a', pair.won + ' / ' + pair.tied + ' / ' + pair.lost,
-      verdicts[pair.verdict] ?? pair.verdict, holm(pair)]), 4), '', correctionLine(set.effort.correction) + '.', '');
+      verdicts[pair.verdict] ?? pair.verdict, holm(pair, note(pair))]), 4), '', correctionLine(set.effort.correction) + '.', '');
   }
   for (const note of set.ladder_notes ?? []) lines.push('- ' + note);
   if (set.ladder_notes?.length) lines.push('');
