@@ -198,8 +198,9 @@ After the final file is scored, the attempt's snapshots are scored in one worker
 drawn), one per distinct content; a snapshot with the final file's content takes its
 score, unless that report is the scorer's failure. A snapshot the scorer fails on (it
 throws, the worker crashes or times out before reaching it, or the report says
-`scorer_failed: true`: an internal error the scorer caught itself, as opposed to
-`valid: false` alone, an invalid model scored 0) is scored again from the same stored file, up to 2 times
+`scorer_failed: true` or, as `v1/lib/score` reports an internal error it caught,
+`valid: false` with an error starting `Scorer error: `; `valid: false` otherwise
+is an invalid model, scored 0) is scored again from the same stored file, up to 2 times
 (`SNAPSHOT_SCORE_RETRIES`; nothing is generated again), each retry in a worker of its
 own, so a file that crashes the scorer every time cannot hold up the others; the failed
 tries' reports are kept as `t0300.try-1.json`, … . **The attempt's score is still the final file's alone.** With concurrency 1 this
@@ -212,6 +213,8 @@ runner stopped during snapshot scoring leaves the attempt unrecorded, and the ne
 stops a snapshot worker it left running, then scores the final file and the snapshots
 again (from `snapshots/index.json`, rewritten after every tick; an index that could not
 be written is retried at the next tick and when the attempt ends, and costs no snapshot).
+A tick due while the CLI ran that the restarted runner finds no record of (the index
+could not be written or read) is recorded as `lost`, missing on the curve, not 0.
 `v1/cli.mjs rescore` scores the snapshots again with the final file, going by the records in
 `result.json` (not the index, which a write error may have left short).
 
@@ -222,7 +225,8 @@ from the spawn), present, bytes, sha256, complete
 `status` is `absent` (no `model.glb` yet: score 0), `refused` (score 0, with `problem`),
 `scored` (the scorer's score, 0 for an invalid model; `score_of` names the snapshot,
 or `final`, whose scoring it shares), `score_error` (the scorer failed on it, and on its
-retries: score null, `tries` in all), `lost` (read but not stored: score null) or
+retries: score null, `tries` in all), `lost` (read but not stored, or its record lost
+with the index: score null) or
 `not_scored`. The report counts a `score_error` or `lost` snapshot as missing, not as 0:
 a scorer failure is not the model's performance. The report turns them
 into a score-over-time curve and the median time to 95 % of the final score

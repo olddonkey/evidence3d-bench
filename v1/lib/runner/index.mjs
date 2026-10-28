@@ -749,7 +749,7 @@ async function runAttempt({ batchDir, manifest, task, attempt, adapter, deps, lo
     summary = adapter.parse(events);
     retryLost = recovered.service_retry_seconds ?? null;
     if (snapshotSeconds) {
-      snapshotRecords = await readSnapshotIndex(dir);
+      snapshotRecords = await readSnapshotIndex(dir, { intervalSeconds: snapshotSeconds, wallSeconds: invocation.wall_seconds, ranSeconds: recovered.wall_seconds });
       // A snapshot scorer the dead runner left running would compete with the
       // scoring below, or outlive it if that is cut short too.
       await stopLeftoverWorker(join(dir, 'snapshots', 'score'));

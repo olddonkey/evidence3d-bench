@@ -34,8 +34,13 @@ export const SNAPSHOT_SCORE_RETRIES = 2;
 // A report that records the scorer's failure rather than judging the file:
 // score-worker.mjs writes { scorer_failed: true, error } when the scorer
 // threw, and a scorer that catches its own internal error marks its report
-// the same way (valid: false alone means an invalid model, scored 0).
-export const scorerFailed = report => report?.scorer_failed === true;
+// the same way. The scorer in v1/lib/score does not mark it yet (that changes
+// its source hash; round-4 plan, section 11): its scoreSoup reports a caught
+// internal error as valid: false with an error starting SCORER_ERROR_PREFIX,
+// which counts too. valid: false otherwise means an invalid model, scored 0.
+export const SCORER_ERROR_PREFIX = 'Scorer error: ';
+export const scorerFailed = report => report?.scorer_failed === true ||
+  (report?.valid === false && typeof report.error === 'string' && report.error.startsWith(SCORER_ERROR_PREFIX));
 
 export const snapshotName = t => 't' + String(t).padStart(4, '0');
 
@@ -172,9 +177,24 @@ export function snapshotClock({ attemptDir, workspace, intervalSeconds, wallSeco
 }
 
 // What a restarted runner finds of an attempt's snapshots (the generation
-// ended under the previous runner; only scoring is left).
-export async function readSnapshotIndex(attemptDir) {
-  try { return (await readJSON(join(attemptDir, 'snapshots', 'index.json'))).snapshots ?? []; } catch { return []; }
+// ended under the previous runner; only scoring is left): the records in
+// snapshots/index.json, and a `lost` record for every tick due while the CLI
+// ran (`ranSeconds` after its spawn) that the index does not have, because
+// the index could not be written or cannot be read. Those ticks are the
+// runner's loss, missing on the curve, not a model without output.
+export async function readSnapshotIndex(attemptDir, { intervalSeconds, wallSeconds, ranSeconds } = {}) {
+  let records = [], problem = null;
+  try {
+    const index = await readJSON(join(attemptDir, 'snapshots', 'index.json'));
+    if (Array.isArray(index?.snapshots)) records = index.snapshots.filter(record => Number.isFinite(record?.t));
+    else problem = 'snapshots/index.json has no snapshot list';
+  } catch (error) { problem = 'snapshots/index.json could not be read (' + (error.code ?? error.message) + ')'; }
+  const have = new Set(records.map(record => record.t));
+  const ran = Number.isFinite(ranSeconds) ? ranSeconds : wallSeconds;
+  for (const t of snapshotTicks(intervalSeconds, wallSeconds)) {
+    if (t < ran && !have.has(t)) records.push({ t, name: snapshotName(t), present: null, error: 'snapshot record lost: ' + (problem ?? 'not in snapshots/index.json') });
+  }
+  return records.sort((a, b) => a.t - b.t);
 }
 
 // The files to score: one per distinct content, none for content the final
@@ -197,7 +217,8 @@ export function snapshotJobs(records, finalSha = null) {
 //                the scorer's score, 0 for an invalid model
 //   score_error  the scorer failed on it, and on each retry (`tries` in all):
 //                score null; the report leaves the attempt out of that tick
-//   lost         read but not stored (a write error of the runner): score
+//   lost         read but not stored (a write error of the runner), or its
+//                record lost with index.json (readSnapshotIndex): score
 //                null, left out like a score_error
 //   not_scored   the attempt's snapshots were not scored (an infrastructure
 //                error or a broken boundary): score null
@@ -207,9 +228,10 @@ export function scoredSnapshots(records, { scores = new Map(), final = null, sco
   return records.map(record => {
     const base = { t: record.t, name: record.name, at_seconds: record.at_seconds, read_seconds: record.read_seconds, present: record.present, ...(record.bytes !== undefined ? { bytes: record.bytes } : {}),
       ...(record.sha256 ? { sha256: record.sha256, complete: record.complete } : {}), ...(record.file ? { file: record.file } : {}), ...(record.same_as ? { same_as: record.same_as } : {}) };
+    // A storage error first: a record a restarted runner lost does not know whether a file was there.
+    if (record.error) return { ...base, status: 'lost', score: null, valid: null, error: record.error };
     if (!record.present) return { ...base, status: 'absent', score: 0, valid: false, ...(record.problem ? { problem: record.problem } : {}) };
     if (record.problem) return { ...base, status: 'refused', score: 0, valid: false, problem: record.problem };
-    if (record.error) return { ...base, status: 'lost', score: null, valid: null, error: record.error };
     if (!scored) return { ...base, status: 'not_scored', score: null, valid: null };
     if (final && record.sha256 === final.sha256) return { ...base, status: 'scored', score: final.score, valid: final.valid, score_of: 'final', report: final.report };
     const found = scores.get(record.sha256);
