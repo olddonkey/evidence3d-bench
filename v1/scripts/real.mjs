@@ -21,7 +21,8 @@ try {
   if (command === 'build') {
     const { buildRealObject } = await import('../lib/real/build.mjs');
     print(await buildRealObject({ source: resolve(need('source')), sourcesRoot: resolve(need('sources-root')), dataRoot,
-      set: options.set, id: options.id, variants: options.variants ? options.variants.split(',') : undefined, log }));
+      set: options.set, id: options.id, variants: options.variants ? options.variants.split(',') : undefined,
+      promptVersion: options['task-prompt'] === undefined ? undefined : Number(options['task-prompt']), log }));
   } else if (command === 'prepare') {
     const { preparePhotographs } = await import('../lib/real/build.mjs');
     print(await preparePhotographs({ source: resolve(need('source')), pack: resolve(need('pack')), sourcesRoot: resolve(need('sources-root')), log }));
@@ -51,7 +52,7 @@ try {
     console.log([
       'Evidence3D v1 — real-building tier', '',
       '  node v1/scripts/real.mjs prepare --source DIR --pack REFERENCE_PACK --sources-root DIR   (crop and clean the photographs)',
-      '  node v1/scripts/real.mjs build   --source DIR --sources-root DIR [--set NAME] [--id ID] [--variants r2,r4] [--data DIR]',
+      '  node v1/scripts/real.mjs build   --source DIR --sources-root DIR [--set NAME] [--id ID] [--variants r2,r4] [--task-prompt N] [--data DIR]',
       '  node v1/scripts/real.mjs verify  --source DIR --sheets SHEET_DIR [--out DIR] [--data DIR]',
       '  node v1/scripts/real.mjs coverage --task ID [--data DIR]      (share of the truth surface the evidence shows, by facing and item)',
     ].join('\n'));

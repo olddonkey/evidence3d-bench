@@ -37,6 +37,12 @@ the mean of the shape score and the detail score. Small features are judged
 separately at their own scale, named dimensions are measured with rays,
 colours are compared, and error pictures are drawn.
 
+Contestants are told this in the task prompt's "How it is scored" paragraph
+(version 2, `v1/lib/pack.mjs`; sets built before it have version 1, written for
+1.0.0). When a definition here changes, give the prompt a new version for the sets
+built after the change: `v1/test/task-prompt.test.mjs` fails until the latest
+version names the current `SCORER_VERSION`.
+
 ## Every number in the report
 
 **`valid`, `error`, `score`.** `score` = (`shape_score` + `detail.score`) / 2,
@@ -132,7 +138,9 @@ even on a metric task, and that scale. On a metric task, `shape.f` high but
   size. `scored` is false (with `reason`) when under half of the group is shown
   by the evidence (`evidenced_fraction`). `precision`/`recall`/`f` are as
   above but at `tau_m`, inside the group's own box, and a match also needs the
-  two surfaces to face the same way (within 45°). `local_offset_m` is the
+  two surfaces to lie the same way (normals within 45°, up to sign:
+  `PointGrid.anyFacing` compares |cos|, so a reversed winding still matches;
+  only attribution, Departure 2, uses the sign). `local_offset_m` is the
   small shift (at most 2 % of D) the scorer allowed the group, `local_offset`
   the shift vector; `frame_offset_m` is how far the group's own frame (fitted to
   the rest of the object) moved it from the global fit.
