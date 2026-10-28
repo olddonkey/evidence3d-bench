@@ -66,6 +66,9 @@ function alternateFor(variant) {
     : { id: 'before-canopy', contested_probes: ['canopy-top'], note: 'The drawings predate the entrance canopy.' };
 }
 
+// Multiples of `probeError` for the probes of a synthetic report, in probe order.
+export const PROBE_ERROR_STEPS = [1, 4, 0.5, 2, 3];
+
 function report({ taskId, object, variant, model, soup, score, alignment, detailF = 0.5, probeError = 0.1, contested = null, missingGroups = [],
   thresholds = [0.01, 0.02, 0.05], shapeFractions = null, scorer = null }) {
   const diagonal = Math.hypot(...soup.bounds.max.map((value, i) => value - soup.bounds.min[i]));
@@ -78,13 +81,18 @@ function report({ taskId, object, variant, model, soup, score, alignment, detail
   });
   const categories = [...new Set(groups.filter(group => group.scored).map(group => group.category))]
     .map(id => ({ id, f: groups.filter(group => group.scored && group.category === id).reduce((sum, group, _, list) => sum + group.f / list.length, 0) }));
+  // Probe errors differ per probe (PROBE_ERROR_STEPS x probeError), so a
+  // report's median error is not its mean; with groups missing, the last
+  // probe's ray misses the submission.
   const probes = model.probes.map((probe, i) => {
     const hit = raycast(soup, probe.origin, probe.direction);
-    const truth = hit ? hit.distance : null, miss = missingGroups.length && i === model.probes.length - 1;
-    return { id: probe.id, label: probe.label, truth_m: truth, measured_m: miss ? null : truth + probeError * (i % 2 ? 1 : -1),
-      error_m: miss ? null : probeError, evidenced: true };
+    const truth = hit ? hit.distance : null, miss = truth !== null && missingGroups.length > 0 && i === model.probes.length - 1;
+    const error = probeError * PROBE_ERROR_STEPS[i % PROBE_ERROR_STEPS.length];
+    return { id: probe.id, label: probe.label, truth_m: truth, measured_m: miss || truth === null ? null : truth + error * (i % 2 ? 1 : -1),
+      error_m: miss || truth === null ? null : error, evidenced: true, missed: miss };
   });
-  const evaluated = probes.filter(probe => probe.measured_m !== null);
+  const evaluated = probes.filter(probe => probe.truth_m !== null), hits = evaluated.filter(probe => !probe.missed);
+  const meanError = hits.length ? hits.reduce((sum, probe) => sum + probe.error_m, 0) / hits.length : null;
   const rowF = fraction => Math.min(1, f * (fraction / 0.02) ** 0.3);
   return {
     schema: REPORT_SCHEMA, protocol: PROTOCOL, task_id: taskId, object, variant, valid: true, error: null, score,
@@ -100,7 +108,7 @@ function report({ taskId, object, variant, model, soup, score, alignment, detail
     strict: { f: f * 0.4 }, shape: { f: Math.min(1, f * 1.05), scale: VARIANTS[variant].scale === 'metric' ? 1.04 : alignment.scale },
     detail: { score: 100 * categories.reduce((sum, category) => sum + category.f, 0) / Math.max(1, categories.length), categories, groups },
     probes,
-    probe_summary: { evaluated: evaluated.length, missed: probes.length - evaluated.length, mean_error_m: probeError, mean_error_fraction: probeError / diagonal },
+    probe_summary: { evaluated: evaluated.length, missed: evaluated.length - hits.length, mean_error_m: meanError, mean_error_fraction: meanError === null ? null : meanError / diagonal },
     alternates: contested ? [{ id: alternateFor(variant).id, f: f * 0.8, closer_to_primary_fraction: contested.filter(side => side === 'primary').length / contested.length,
       contested: contested.map((side, i) => ({ probe: model.probes[i % model.probes.length].id, primary_m: 2.6, alternate_m: 3.4,
         measured_m: side === 'primary' ? 2.65 : side === 'alternate' ? 3.35 : 3.0, closer_to: side })) }] : [],
