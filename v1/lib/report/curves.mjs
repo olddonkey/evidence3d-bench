@@ -10,8 +10,9 @@ import { finite, median, quantile } from './stats.mjs';
 //   - before that, the score of its last snapshot taken at or before T (taken:
 //     at its tick when the runner had read it within ON_TIME_SECONDS of it,
 //     else when the read ended, so a late one counts from the next tick on;
-//     see snapshotAt): 0 when there was no output/model.glb yet, or one the
-//     runner refused, or one the scorer judged invalid;
+//     see snapshotAt; last: the latest read, see currentSnapshot): 0 when
+//     there was no output/model.glb yet, or one the runner refused, or one
+//     the scorer judged invalid;
 //   - missing (null) when that snapshot has no score through no fault of the
 //     model: the scorer failed on it, also on the runner's retries
 //     (score_error), or the runner could not store it (lost). The attempt is
@@ -50,20 +51,34 @@ const ended = (attempt, t) => (finite(attempt.wall_limit_seconds) && t >= attemp
 
 const MISSING = new Set(['score_error', 'lost']);
 
+// The attempt's snapshot at time T: of those that count from T or earlier,
+// the one read last, which is the one of the highest tick (the runner reads
+// the ticks in order). A late read that counts from after a newer, on-time
+// one never replaces it. null before the first.
+function currentSnapshot(attempt, T) {
+  let current = null;
+  for (const point of attempt.snapshots.points) if (takenAt(point) <= T && (!current || point.t > current.t)) current = point;
+  return current;
+}
+
 export function scoreAt(attempt, t) {
   if (ended(attempt, t) || !attempt.snapshots) return attempt.score;
-  let value = 0;
-  for (const point of attempt.snapshots.points) if (takenAt(point) <= t) value = finite(point.score) ? point.score : MISSING.has(point.status) ? null : 0;
-  return value;
+  const point = currentSnapshot(attempt, t);
+  return !point ? 0 : finite(point.score) ? point.score : MISSING.has(point.status) ? null : 0;
 }
 
 // Seconds after the start at which the attempt first reached T95_SHARE of its
-// final score; null when its final score is below T95_MIN_FINAL.
+// final score: the first time a snapshot at that share became its current one
+// (currentSnapshot), else its end; null when its final score is below T95_MIN_FINAL.
 export function timeToShare(attempt, { share = T95_SHARE, minFinal = T95_MIN_FINAL } = {}) {
   if (!finite(attempt.score) || attempt.score < minFinal) return null;
   const end = finite(attempt.wall_seconds) ? attempt.wall_seconds : attempt.wall_limit_seconds ?? null;
-  const hit = (attempt.snapshots?.points ?? []).find(point => finite(point.score) && point.score >= share * attempt.score && (end === null || takenAt(point) < end));
-  return hit ? takenAt(hit) : end;
+  const times = [...new Set((attempt.snapshots?.points ?? []).map(takenAt))].filter(time => end === null || time < end).sort((a, b) => a - b);
+  const hit = times.find(time => {
+    const point = currentSnapshot(attempt, time);
+    return finite(point?.score) && point.score >= share * attempt.score;
+  });
+  return hit ?? end;
 }
 
 // The ticks of a set of attempts: every multiple of each interval up to the

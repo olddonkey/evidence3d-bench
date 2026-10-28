@@ -93,6 +93,14 @@ test('a snapshot read on time counts at its tick; one read late counts from the 
   assert.match(board.method.time_curve, /within 10 s/);
 });
 
+test('an older snapshot read late never replaces a newer one already counted', () => {
+  // Every 10 s: t10 read late (21 s, counts from 21), t20 read on time (21.1 s, counts from 20), t30 read late (45 s).
+  const points = [[30, 85, 45], [10, 40, 21], [20, 80, 21.1]].map(([t, value, read]) => [t, value, 'scored', snapshotAt(t, read)]);
+  const a = attempt({ score: 84, wall: 100, limit: 120, interval: 10, points });
+  assert.deepEqual([10, 20, 21, 30, 40, 50].map(t => scoreAt(a, t)), [0, 80, 80, 80, 80, 85], 't10 is never the state: t20 was read after it');
+  assert.equal(timeToShare(a), 20, '80 >= 0.95 x 84 from 20 s; the older 40 read at 21 s does not undo it');
+});
+
 test('time to 95%: the first snapshot at 95% of the final score, else the end; low finals are left out', () => {
   assert.equal(timeToShare(attempt({ score: 80, wall: 1700, points: [[300, 20], [600, 76], [900, 60], [1200, 79]] })), 600, '76 >= 0.95 x 80; a later dip does not matter');
   assert.equal(timeToShare(attempt({ score: 80, wall: 1700, points: [[300, 20], [600, 70]] })), 1700, 'no snapshot got there: the end');

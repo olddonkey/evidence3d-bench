@@ -224,9 +224,9 @@ async function findModel(result, attemptDir, problems) {
 // The score-over-time snapshots the runner recorded (runner/snapshots.mjs),
 // reduced to tick, when the copy counts from (`at`: its tick, or the end of
 // its read when that came more than ON_TIME_SECONDS after the tick, then
-// marked `late`; curves.mjs, snapshotAt), score and status, in the order
-// they count from; null when the batch took none. With integrity problems
-// every point is 0.
+// marked `late`; curves.mjs, snapshotAt), score and status, in tick order
+// (the order they were read in); null when the batch took none. With
+// integrity problems every point is 0.
 function snapshotSeries(result, { integrity = false } = {}) {
   if (!Array.isArray(result.snapshots) || !finite(result.snapshot_interval_seconds) || result.snapshot_interval_seconds <= 0) return null;
   const scoreOf = item => integrity ? 0 : finite(item.score) ? item.score : null;
@@ -235,8 +235,7 @@ function snapshotSeries(result, { integrity = false } = {}) {
     return { t: item.t, at, score: scoreOf(item), status: text(item.status), ...(at !== item.t ? { late: true } : {}) };
   };
   return { interval_seconds: result.snapshot_interval_seconds,
-    points: result.snapshots.filter(item => finite(item?.t)).map(point)
-      .sort((a, b) => a.at - b.at || a.t - b.t) };
+    points: result.snapshots.filter(item => finite(item?.t)).map(point).sort((a, b) => a.t - b.t) };
 }
 
 function setOf(truth, taskId, problems) {

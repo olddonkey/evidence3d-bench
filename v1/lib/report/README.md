@@ -290,7 +290,9 @@ snapshots*), `curves.mjs` computes per configuration:
   averaging and bootstrap as `entry.score`, where an attempt counts its final
   score once it has ended (`wall_seconds <= t`, or t at its
   `wall_limit_seconds`) and, before that, the score of its last snapshot taken
-  at or before t: 0 with no `model.glb` yet, a refused file or an invalid model.
+  at or before t (of those, the one read last, so an older snapshot read late
+  never replaces a newer one): 0 with no `model.glb` yet, a refused file or an
+  invalid model.
   A snapshot counts from its tick when the runner's read of it ended
   (`read_seconds`) at most 10 s after the tick (`ON_TIME_SECONDS`: the read and
   the wait for a model caught mid-write); one read later, on a busy runner,
