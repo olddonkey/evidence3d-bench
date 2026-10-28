@@ -16,9 +16,11 @@
 import { open, lstat, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import { glbComplete } from './snapshots.mjs';
 
 const OPEN_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+const REPLACED = { present: true, problem: 'output/model.glb was replaced while it was read', retry: true };
 const sameNode = (a, b) => a.dev === b.dev && a.ino === b.ino;
 
 // Opened without following a symlink and without blocking (a FIFO would hang
@@ -26,7 +28,7 @@ const sameNode = (a, b) => a.dev === b.dev && a.ino === b.ino;
 // within the byte budget) and read from it; then model.glb must still be the
 // file that was read. A file replaced meanwhile (an atomic rename by the
 // model, or a swap) is read again by the runner (`retry`).
-async function read({ dev, ino, maxBytes }) {
+async function read({ dev, ino, maxBytes }, { afterRead } = {}) {
   const here = await lstat('.', { bigint: true });
   if (!sameNode(here, { dev: BigInt(dev), ino: BigInt(ino) })) return { present: true, problem: 'output/ is not the directory the attempt started with', retry: true };
   let handle;
@@ -39,6 +41,8 @@ async function read({ dev, ino, maxBytes }) {
   try {
     const before = await handle.stat({ bigint: true });
     if (!before.isFile()) return { present: true, problem: 'artifact is not a regular file' };
+    // No link left: the file was renamed over or removed since it was opened.
+    if (before.nlink === 0n) return REPLACED;
     if (before.nlink !== 1n) return { present: true, problem: 'artifact has ' + before.nlink + ' hard links' };
     if (before.size > BigInt(maxBytes)) return { present: true, bytes: Number(before.size), problem: 'artifact is ' + before.size + ' bytes, over the ' + maxBytes + ' byte budget' };
     const data = Buffer.alloc(Number(before.size));
@@ -48,23 +52,33 @@ async function read({ dev, ino, maxBytes }) {
       if (!bytesRead) break;
       got += bytesRead;
     }
+    await afterRead?.();
     const after = await handle.stat({ bigint: true });
     const named = await lstat('model.glb', { bigint: true }).catch(() => null);
+    // Replaced first: the old file of an atomic rename has no link left, which is not a hard link.
+    if (after.nlink === 0n || !named || !sameNode(named, after)) return REPLACED;
     if (after.nlink !== 1n) return { present: true, problem: 'artifact has ' + after.nlink + ' hard links' };
-    if (!named || !sameNode(named, after)) return { present: true, problem: 'output/model.glb was replaced while it was read', retry: true };
     const bytes = data.subarray(0, got);
     return { present: true, problem: null, data: bytes, bytes: got, sha256: createHash('sha256').update(bytes).digest('hex'), complete: glbComplete(bytes),
       stable: got === data.length && after.size === before.size && after.mtimeNs === before.mtimeNs };
   } finally { await handle.close().catch(() => {}); }
 }
 
-const job = JSON.parse(process.argv[2]);
-const found = await read(job);
-if (found.data) {
-  if (job.dest && !(job.known ?? []).includes(found.sha256)) {
-    try { await writeFile(job.dest, found.data, { flag: 'wx' }); found.written = true; }
-    catch (error) { found.write_error = error.message; }
+// What a reader standing in output/ finds. The runner's tests call it
+// directly, from a process whose working directory they set, with
+// `afterRead` to change the file between the read and the checks after it.
+export async function readHere(job, hooks = {}) {
+  const found = await read(job, hooks);
+  if (found.data) {
+    if (job.dest && !(job.known ?? []).includes(found.sha256)) {
+      try { await writeFile(job.dest, found.data, { flag: 'wx' }); found.written = true; }
+      catch (error) { found.write_error = error.message; }
+    }
+    delete found.data;
   }
-  delete found.data;
+  return found;
 }
-process.stdout.write(JSON.stringify(found) + '\n');
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  process.stdout.write(JSON.stringify(await readHere(JSON.parse(process.argv[2]))) + '\n');
+}

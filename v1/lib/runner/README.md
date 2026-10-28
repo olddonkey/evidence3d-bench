@@ -197,9 +197,10 @@ After the final file is scored, the attempt's snapshots are scored in one worker
 (`score-worker.mjs` with a `snapshots` job: the task is loaded once, no error maps are
 drawn), one per distinct content; a snapshot with the final file's content takes its
 score. A snapshot the scorer fails on (it throws, or the worker crashes or times out
-before reaching it) is scored again from the same stored file in a fresh worker, up to
-2 times (`SNAPSHOT_SCORE_RETRIES`; nothing is generated again), the failed tries' reports
-kept as `t0300.try-1.json`, … . **The attempt's score is still the final file's alone.** With concurrency 1 this
+before reaching it) is scored again from the same stored file, up to 2 times
+(`SNAPSHOT_SCORE_RETRIES`; nothing is generated again), each retry in a worker of its
+own, so a file that crashes the scorer every time cannot hold up the others; the failed
+tries' reports are kept as `t0300.try-1.json`, … . **The attempt's score is still the final file's alone.** With concurrency 1 this
 happens before the next attempt launches, so it never overlaps a contestant; it costs
 about one scoring (25–100 s) per distinct snapshot, at most 5 for a 30-minute attempt
 (the worker's time limit is the scoring limit per snapshot, for all of them).

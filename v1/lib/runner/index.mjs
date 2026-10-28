@@ -540,8 +540,9 @@ const MAX_TIMER_SECONDS = Math.floor((2 ** 31 - 1) / 1000);
 // maps. Content already scored (an earlier snapshot, the final artifact) is
 // not scored again. A snapshot the scorer failed on (it threw, or the worker
 // died or timed out before reaching it) is scored again, from the same stored
-// file, in a fresh worker, up to SNAPSHOT_SCORE_RETRIES times; one that still
-// fails is a score_error, which the report leaves out of that tick as missing.
+// file, each in a worker of its own, up to SNAPSHOT_SCORE_RETRIES times; one
+// that still fails is a score_error, which the report leaves out of that tick
+// as missing.
 // Returns the records as result.json carries them (scoredSnapshots), or
 // { aborted } / { frozen } like scoreArtifact: then nothing is recorded and a
 // later run scores the attempt again.
@@ -552,15 +553,13 @@ async function scoreSnapshots({ manifest, task, dir, batchDir, records, final, d
     if (drift.length) return { frozen: drift };
     const paths = layout(manifest.data_root), scoreDir = join(dir, 'snapshots', 'score');
     await freshScoreDir(scoreDir);
-    let pending = jobs;
-    for (let round = 0; pending.length && round <= SNAPSHOT_SCORE_RETRIES; round++) {
-      const suffix = round ? '.retry-' + round : '', job = join(scoreDir, 'job' + suffix + '.json');
-      // The failed try's report is kept beside the next one (t0300.try-1.json, ...).
-      if (round) for (const item of pending) await rename(join(scoreDir, item.name + '.json'), join(scoreDir, item.name + '.try-' + round + '.json')).catch(() => {});
+    // One worker for a set of snapshots; what it did not score comes back as failed.
+    const score = async (batch, round, suffix) => {
+      const job = join(scoreDir, 'job' + suffix + '.json');
       await writeJSON(job, { module: scorerModulePath(deps), taskDir: paths.task(task.id), truthDir: paths.truth(task.id), dataRoot: manifest.data_root,
-        snapshots: pending.map(item => ({ name: item.name, glb: join(dir, item.file), out: join(scoreDir, item.name + '.json') })) });
+        snapshots: batch.map(item => ({ name: item.name, glb: join(dir, item.file), out: join(scoreDir, item.name + '.json') })) });
       // The scorer's allowance per snapshot, for all of them; within what a timer can hold.
-      const seconds = Math.min((deps.scoreSeconds ?? 1800) * pending.length, MAX_TIMER_SECONDS);
+      const seconds = Math.min((deps.scoreSeconds ?? 1800) * batch.length, MAX_TIMER_SECONDS);
       const run = await captureProcess(process.execPath, [join(HERE, 'score-worker.mjs'), job], { cwd: scoreDir, seconds,
         env: childEnvironment(), stdoutPath: join(scoreDir, 'worker' + suffix + '.stdout.log'), stderrPath: join(scoreDir, 'worker' + suffix + '.stderr.log'), signal: control.signal,
         onSpawn: pid => { control.pids.set(scoreDir, pid); writeJSONSync(join(scoreDir, 'worker.json'), { pid, started: startTimeOf(pid) }); } });
@@ -570,7 +569,7 @@ async function scoreSnapshots({ manifest, task, dir, batchDir, records, final, d
       // unscored; whatever it finished counts.
       const failure = run.exit_code !== 0 ? 'snapshot scorer failed (exit ' + run.exit_code + (run.timed_out ? ', timed out' : '') + '): ' + run.stderr.trim().split('\n').slice(-3).join(' | ') : null;
       const failed = [];
-      for (const item of pending) {
+      for (const item of batch) {
         const path = join(scoreDir, item.name + '.json');
         const report = await readJSON(path).catch(() => null);
         if (!report || report.scorer_failed) {
@@ -578,6 +577,21 @@ async function scoreSnapshots({ manifest, task, dir, batchDir, records, final, d
           scores.set(item.sha256, { status: 'score_error', score: null, valid: null, tries: round + 1, error: report?.error ?? failure ?? 'the scorer wrote no report' });
         } else scores.set(item.sha256, { status: 'scored', score: scoreOf(report), valid: report.valid !== false, ...(report.valid === false && report.error ? { error: report.error } : {}),
           ...(round ? { tries: round + 1 } : {}), report: relative(batchDir, path) });
+      }
+      return { failed };
+    };
+    // The first round scores every snapshot in one worker. A retry gives each
+    // failed snapshot a worker of its own: a file that crashes or hangs the
+    // scorer every time cannot keep the snapshots after it from being scored.
+    let pending = jobs;
+    for (let round = 0; pending.length && round <= SNAPSHOT_SCORE_RETRIES; round++) {
+      const failed = [];
+      for (const batch of round ? pending.map(item => [item]) : [pending]) {
+        // The failed try's report is kept beside the next one (t0300.try-1.json, ...).
+        if (round) await rename(join(scoreDir, batch[0].name + '.json'), join(scoreDir, batch[0].name + '.try-' + round + '.json')).catch(() => {});
+        const done = await score(batch, round, round ? '.retry-' + round + '.' + batch[0].name : '');
+        if (done.aborted) return { aborted: true };
+        failed.push(...done.failed);
       }
       pending = failed;
     }

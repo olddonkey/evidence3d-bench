@@ -11,6 +11,7 @@ import { DEFAULT_BUDGET } from '../lib/contract.mjs';
 import { objectHash } from '../../lib/io.mjs';
 import { prepare, execute, manifestHash } from '../lib/runner/index.mjs';
 import { startTimeOf } from '../lib/runner/process.mjs';
+import { readHere } from '../lib/runner/snapshot-read.mjs';
 import { snapshotTicks, snapshotName, glbComplete, readSnapshot, outputIdentity, snapshotClock, snapshotJobs, scoredSnapshots, rescoreSnapshots,
   DEFAULT_SNAPSHOT_SECONDS } from '../lib/runner/snapshots.mjs';
 
@@ -42,7 +43,8 @@ const markerOf = bytes => { try { return JSON.parse(bytes.subarray(20).toString(
 const SCORES = { A: 30, B: 60, C: 90, FLAKY: 40 };
 
 // A scorer that scores by marker, logs every call (and every context load),
-// throws on THROW (always) and FLAKY (its first time only), judges BAD invalid.
+// throws on THROW (always) and FLAKY (its first time only), takes its whole
+// process down on CRASH, judges BAD invalid.
 const fakeScorer = log => `import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 const marker = glb => { try { return JSON.parse(glb.subarray(20).toString('utf8').trim()).e3d; } catch { return null; } };
 export async function loadContext() { appendFileSync(${JSON.stringify(log)}, 'context\\n'); return { loaded: true }; }
@@ -50,6 +52,7 @@ export async function scoreSubmission({ glb, outDir, context }) {
   const m = marker(glb);
   appendFileSync(${JSON.stringify(log)}, 'score ' + m + (context?.loaded ? ' with-context' : '') + (outDir ? ' maps' : '') + '\\n');
   if (m === 'THROW') throw new Error('scorer exploded');
+  if (m === 'CRASH') process.exit(3);
   if (m === 'FLAKY' && !existsSync(${JSON.stringify(log)} + '.flaky')) { writeFileSync(${JSON.stringify(log)} + '.flaky', ''); throw new Error('scorer hiccup'); }
   if (m === 'BAD' || m === null) return { schema: 'e3d-report-v1', valid: false, error: 'Invalid GLB', score: 0 };
   return { schema: 'e3d-report-v1', valid: true, error: null, score: ${JSON.stringify(SCORES)}[m] ?? 50 };
@@ -108,7 +111,7 @@ async function snapshotBatch(t, { steps, snapshotSeconds = 2, exit, sleep } = {}
   const dir = await scratch(t), dataRoot = join(dir, 'data');
   await makeDataRoot(dataRoot, TASK);
   await mkdir(join(dir, 'models'));
-  for (const marker of ['A', 'B', 'C', 'THROW', 'BAD', 'FLAKY']) await writeFile(join(dir, 'models', marker + '.glb'), fakeGLB(marker));
+  for (const marker of ['A', 'B', 'C', 'THROW', 'BAD', 'FLAKY', 'CRASH']) await writeFile(join(dir, 'models', marker + '.glb'), fakeGLB(marker));
   const binary = await fakeShellCLI(dir, steps, { exit, sleep });
   const scorer = join(dir, 'fake-scorer.mjs'), log = join(dir, 'scorer.log');
   await writeFile(scorer, fakeScorer(log));
@@ -178,6 +181,22 @@ test('a snapshot read refuses symlinks, hard links, FIFOs, oversized files and a
   assert.match(swapped.problem, /not the directory the attempt started with/); assert.equal(await exists(copy), false);
   await rm(out);
   assert.deepEqual(await read(), { present: false, problem: null }, 'no output/ at all: nothing there');
+});
+
+test('a model renamed over the file being read is read again, not refused as a hard link', async t => {
+  // The old file of an atomic rename keeps no link: nlink 0 on the open handle.
+  const dir = await scratch(t), out = join(dir, 'ws', 'output');
+  await mkdir(out, { recursive: true });
+  await writeFile(join(out, 'model.glb'), fakeGLB('A'));
+  const output = await outputIdentity(join(dir, 'ws')), home = process.cwd();
+  process.chdir(out);
+  try {
+    const replace = async () => { await writeFile(join(out, 'model.tmp'), fakeGLB('B')); await rename(join(out, 'model.tmp'), join(out, 'model.glb')); };
+    const found = await readHere({ ...output, maxBytes: 1000 }, { afterRead: replace });
+    assert.deepEqual(found, { present: true, problem: 'output/model.glb was replaced while it was read', retry: true });
+    const again = await readHere({ ...output, maxBytes: 1000, dest: join(dir, 'copy.glb') });
+    assert.equal(again.problem, null); assert.equal(markerOf(await readFile(join(dir, 'copy.glb'))), 'B');
+  } finally { process.chdir(home); }
 });
 
 test('a contestant flipping output/ between itself and a symlink to another directory never gets that directory read', async t => {
@@ -328,10 +347,21 @@ test('a snapshot the scorer fails on is scored again, twice at most, then a scor
     [[2, 'score_error', null, null, 3], [4, 'scored', 0, false, null], [6, 'scored', 40, true, 2]]);
   assert.match(result.snapshots[0].error, /scorer exploded/);
   assert.deepEqual(await batch.calls(), ['score C maps', 'context', 'score THROW with-context', 'score BAD with-context', 'score FLAKY with-context',
-    'context', 'score THROW with-context', 'score FLAKY with-context', 'context', 'score THROW with-context'], 'only the failed ones again, from the stored files');
+    'context', 'score THROW with-context', 'context', 'score FLAKY with-context', 'context', 'score THROW with-context'], 'only the failed ones again, each on its own, from the stored files');
   const scoreDir = join(batch.attemptDir, 'snapshots', 'score');
   assert.deepEqual((await readdir(scoreDir)).filter(name => name.startsWith('t0002')).sort(), ['t0002.json', 't0002.try-1.json', 't0002.try-2.json']);
   assert.equal((await readJSON(join(scoreDir, 't0006.json'))).score, 40);
+});
+
+test('a snapshot that crashes the scorer every time does not keep the ones after it from being scored', async t => {
+  const batch = await snapshotBatch(t, { steps: [{ after: 1, write: 'CRASH' }, { after: 2, write: 'A' }, { after: 2, write: 'C' }] });
+  await execute({ batchDir: batch.batchDir, deps: batch.deps });
+  const result = await readJSON(join(batch.attemptDir, 'result.json'));
+  assert.equal(result.status, 'completed'); assert.equal(result.score, 90);
+  assert.deepEqual(result.snapshots.map(item => [item.t, item.status, item.score, item.tries ?? null]), [[2, 'score_error', null, 3], [4, 'scored', 30, 2]]);
+  assert.match(result.snapshots[0].error, /exit 3/);
+  assert.deepEqual(await batch.calls(), ['score C maps', 'context', 'score CRASH with-context', 'context', 'score CRASH with-context', 'context', 'score A with-context',
+    'context', 'score CRASH with-context']);
 });
 
 test('with --snapshot-seconds 0 nothing is taken and result.json has no snapshots', async t => {
