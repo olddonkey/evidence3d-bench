@@ -2,6 +2,8 @@ import { createServer } from 'node:http';
 import { readFile, appendFile } from 'node:fs/promises';
 import { join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CHOICES, VOTES_FILE, readVoteFiles } from './votes.mjs';
+import { isRater, LEGACY_RATER } from './page/state.js';
 
 // Local server for the rating page. It binds 127.0.0.1 only, serves the page
 // from v1/lib/study/page/ and, from the study directory, pairs.json and the
@@ -9,16 +11,18 @@ import { fileURLToPath } from 'node:url';
 // and appends votes to votes.jsonl.
 //
 //   GET  /            the page            GET /pairs.json   the public pair list
-//   GET  /images/<f>  a rendered image    GET /votes        { votes: [...] } so the page resumes
-//   POST /vote        { pair, choice: a|b|tie, ms, hidden_ms? } -> one line { pair, choice, ms, hidden_ms, at } in votes.jsonl
+//   GET  /images/<f>  a rendered image    GET /votes?rater=<id>   { votes: [...that rater's], malformed } so the page resumes
+//   POST /vote        { rater, pair, choice: a|b|tie, ms, hidden_ms? } -> one line { rater, pair, choice, ms, hidden_ms, at } in votes.jsonl
 //
-// ms is the time from showing the pair to the vote; hidden_ms the part of it
-// the page was hidden. A revision is a new line; the analysis keeps the last
-// vote per pair.
+// rater is the id the rater gave on the page (letters and digits). ms is the
+// time from showing the pair to the vote; hidden_ms the part of it the page
+// was hidden. A revision is a new line; the analysis keeps the last vote per
+// rater and pair. GET /votes reads every votes file of the study (votes.jsonl
+// and votes-<id>.jsonl, see votes.mjs) and returns only the asking rater's
+// votes, so nobody sees another rater's choices.
 
 export const DEFAULT_PORT = 4173;
 export const HOST = '127.0.0.1';
-export const CHOICES = ['a', 'b', 'tie'];
 // A vote's time on the pair is capped at a day; anything larger is a broken clock.
 const MAX_MS = 24 * 3600 * 1000;
 const MAX_BODY = 4096;
@@ -27,38 +31,16 @@ const PAGE_FILES = { '/': 'index.html', '/index.html': 'index.html', '/app.js': 
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8', '.png': 'image/png' };
 
-// votes.jsonl -> { votes, malformed }. A line that is not a valid vote (a torn
-// write, a hand edit) is counted and skipped, never guessed at.
-export function parseVotes(text) {
-  const votes = [];
-  let malformed = 0;
-  for (const line of String(text ?? '').split('\n')) {
-    if (!line.trim()) continue;
-    let vote;
-    try { vote = JSON.parse(line); } catch { malformed++; continue; }
-    if (!vote || typeof vote.pair !== 'string' || !CHOICES.includes(vote.choice)) { malformed++; continue; }
-    votes.push({ pair: vote.pair, choice: vote.choice, ms: Number.isFinite(vote.ms) ? vote.ms : null,
-      hidden_ms: Number.isFinite(vote.hidden_ms) ? vote.hidden_ms : null, at: typeof vote.at === 'string' ? vote.at : null });
-  }
-  return { votes, malformed };
-}
-
-export async function readVotes(studyDir) {
-  try { return parseVotes(await readFile(join(studyDir, 'votes.jsonl'), 'utf8')); } catch (error) {
-    if (error.code === 'ENOENT') return { votes: [], malformed: 0 };
-    throw error;
-  }
-}
-
 // Validates a posted vote against the study's pair ids; returns the line to store or throws.
 export function voteLine(payload, pairIds, at) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('vote must be a JSON object');
+  if (!isRater(payload.rater)) throw new Error('rater must be 1 to 32 lower-case letters and digits, not ' + LEGACY_RATER);
   if (typeof payload.pair !== 'string' || !pairIds.has(payload.pair)) throw new Error('unknown pair');
   if (!CHOICES.includes(payload.choice)) throw new Error('choice must be one of ' + CHOICES.join(', '));
   if (!Number.isFinite(payload.ms) || payload.ms < 0 || payload.ms > MAX_MS) throw new Error('ms must be a number of milliseconds between 0 and ' + MAX_MS);
   const hidden = payload.hidden_ms ?? null;
   if (hidden !== null && (!Number.isFinite(hidden) || hidden < 0 || hidden > payload.ms)) throw new Error('hidden_ms must be between 0 and ms');
-  return { pair: payload.pair, choice: payload.choice, ms: Math.round(payload.ms), hidden_ms: hidden === null ? null : Math.round(hidden), at };
+  return { rater: payload.rater, pair: payload.pair, choice: payload.choice, ms: Math.round(payload.ms), hidden_ms: hidden === null ? null : Math.round(hidden), at };
 }
 
 async function body(request) {
@@ -72,13 +54,17 @@ async function body(request) {
   return JSON.parse(text);
 }
 
-export async function startStudyServer({ studyDir, port = DEFAULT_PORT, now = () => new Date() }) {
+//   legacyRater: whose the votes in votes.jsonl without a rater are (see votes.mjs);
+//   the owner names themself here to resume where they stopped before raters had names.
+export async function startStudyServer({ studyDir, port = DEFAULT_PORT, now = () => new Date(), legacyRater = LEGACY_RATER }) {
   const pairsBytes = await readFile(join(studyDir, 'pairs.json'));
   const study = JSON.parse(pairsBytes.toString('utf8'));
   const pairIds = new Set(study.pairs.map(pair => pair.id));
   // Only the images pairs.json names can be fetched, so no path from a request reaches the file system.
   const imageNames = new Set(study.pairs.flatMap(pair => Object.values(pair.images).flatMap(byRole => Object.values(byRole))));
-  const votesFile = join(studyDir, 'votes.jsonl');
+  const votesFile = join(studyDir, VOTES_FILE);
+  // Fails here, before listening, on a legacy rater that is not an id.
+  await readVoteFiles(studyDir, { legacyRater });
   let appending = Promise.resolve();
 
   const send = (response, status, bytes, type, cache = 'no-store') => {
@@ -110,8 +96,11 @@ export async function startStudyServer({ studyDir, port = DEFAULT_PORT, now = ()
       if (request.method !== 'GET' && request.method !== 'HEAD') return json(response, 405, { error: 'method not allowed' });
       if (path === '/pairs.json') return send(response, 200, pairsBytes, TYPES['.json']);
       if (path === '/votes') {
-        const { votes, malformed } = await readVotes(studyDir);
-        return json(response, 200, { votes, malformed });
+        const rater = new URL(request.url, 'http://' + request.headers.host).searchParams.get('rater');
+        if (!isRater(rater)) return json(response, 400, { error: 'rater required: 1 to 32 lower-case letters and digits' });
+        await appending;
+        const { votes, malformed } = await readVoteFiles(studyDir, { legacyRater });
+        return json(response, 200, { votes: votes.filter(vote => vote.rater === rater), malformed });
       }
       if (PAGE_FILES[path]) {
         const file = PAGE_FILES[path];

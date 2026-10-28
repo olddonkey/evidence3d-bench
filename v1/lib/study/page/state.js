@@ -5,6 +5,19 @@
 // The rater's choice per key: left / 1 for A, down / 0 for "cannot tell", right / 2 for B.
 export const KEY_CHOICES = Object.freeze({ ArrowLeft: 'a', 1: 'a', ArrowDown: 'tie', 0: 'tie', ArrowRight: 'b', 2: 'b' });
 
+// A rater is named by an id of lower-case letters and digits; it is stored with
+// every vote and names the rater's file (votes-<id>.jsonl). r0 stands for the
+// votes recorded before raters were named, so nobody can take it.
+export const RATER_PATTERN = /^[a-z0-9]{1,32}$/;
+export const LEGACY_RATER = 'r0';
+export const isRater = id => typeof id === 'string' && RATER_PATTERN.test(id) && id !== LEGACY_RATER;
+
+// What the rater typed -> their id (trimmed, lower case), or null if it is not one.
+export function raterId(text) {
+  const id = String(text ?? '').trim().toLowerCase();
+  return isRater(id) ? id : null;
+}
+
 // Latest choice per pair: a later line replaces an earlier one (a revision).
 export function latestChoices(votes) {
   const latest = new Map();
