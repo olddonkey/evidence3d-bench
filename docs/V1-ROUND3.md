@@ -37,13 +37,13 @@ the normal-mode Grok models; 1 on t1/t3 for everyone who ran them.
 |---|---|---|---|---|---|---|---|---|---|---|
 | 1 | Codex / gpt-6-astra / **max** | **79.2** [77.5, 80.9] | — | — | 69.5 | — | 85.4 | 82.7 | 91.4 | 67.0 |
 | 2 | Codex / gpt-6.1-sol / **max** | **77.2** [75.6, 78.8] | — | — | 69.0 | — | 82.9 | 79.6 | 90.9 | 63.4 |
-| 3 | Codex / gpt-6-astra / high | **73.5** | 71.0 [69.2, 72.6] | 52.3 | 59.5 | 82.3 | 82.1 | 78.8 | 86.9 | 54.9 |
+| 3 | Codex / gpt-6-astra / high | **73.4** | 71.0 [69.2, 72.6] | 52.3 | 59.5 | 82.3 | 82.1 | 78.8 | 86.9 | 54.9 |
 | 4 | Codex / gpt-6.1-sol / high | **72.4** [71.2, 73.7] | — | — | 61.1 | — | 81.4 | 74.8 | 87.5 | 57.4 |
 | 5 | Claude Code / claude-opus-5-5 / **max** | **71.5** [69.4, 73.7] | — | — | 57.2 | — | 83.1 | 74.3 | 86.0 | 57.1 |
-| 6 | Claude Code / claude-opus-5-5 / high | **66.6** | 65.0 [62.9, 66.9] | 46.7 | 51.1 | 78.5 | 78.7 | 69.9 | 81.4 | 48.4 |
-| 7 | Codex / gpt-6-sol / high | **53.2** [50.4, 56.3] | — | — | 37.3 | — | 67.0 | 55.4 | 70.0 | 36.5 |
+| 6 | Claude Code / claude-opus-5-5 / high | **66.5** | 65.0 [62.9, 66.9] | 46.7 | 51.1 | 78.5 | 78.7 | 69.9 | 81.4 | 48.4 |
+| 7 | Codex / gpt-6-sol / high | **53.3** [50.4, 56.3] | — | — | 37.3 | — | 67.0 | 55.4 | 70.0 | 36.5 |
 | 8 | Grok Build / grok-4.7-build-fast / high | **53.1** | 52.1 [49.5, 54.6] | 34.2 | 36.8 | 67.3 | 67.4 | 55.0 | 70.3 | 34.1 |
-| 9 | Grok Build / grok-4.6 / high | **50.5** | 49.9 [46.7, 52.9] | 36.3 | 36.1 | 61.4 | 63.0 | 52.5 | 68.2 | 31.6 |
+| 9 | Grok Build / grok-4.6 / high | **50.6** | 49.9 [46.7, 52.9] | 36.3 | 36.1 | 61.4 | 63.0 | 52.5 | 68.2 | 31.6 |
 | 10 | Grok Build / grok-4.7 / high | **49.6** [44.6, 54.5] | 47.7 [43.5, 51.8] | 31.7 | 36.7 | 58.0 | 60.0 | 52.2 | 64.7 | 30.6 |
 | 11 | Codex / gpt-5.6-luna / high | **40.1** | 39.2 [35.8, 42.5] | 31.2 | 31.2 | 44.5 | 48.6 | 40.5 | 57.4 | 20.9 |
 | 12 | Claude Code / claude-haiku-4-5 | **24.0** | 23.8 [20.7, 26.9] | 23.1 | 22.8 | 23.8 | 29.2 | 20.0 | 35.5 | 12.0 |
@@ -51,6 +51,13 @@ the normal-mode Grok models; 1 on t1/t3 for everyone who ran them.
 The first-pass intervals of rows 3 and 6 are in `docs/V1-TEST.md`
 (73.4 [72.0, 74.8] and 66.5 [64.3, 68.8]). Shape and detail are over the
 variants each configuration ran.
+
+Corrected on 2026-10-28: four three-variant values had been worked out from
+the rounded variant columns; they are now the report's (rows 3, 6, 7 and 9:
+73.5 → 73.4, 66.6 → 66.5, 53.2 → 53.3, 50.5 → 50.6, also in §5 and §6). The
+Opus high − grok-4.7 fast row below had been copied from an interim report
+(`test-grok`, 2026-10-12); it is now the final report's (`test-final`), and its
+verdict is unchanged.
 
 Pairwise, objects paired (bootstrap interval; "separated" = both intervals
 exclude zero). The last column, added on 2026-10-28, is the same verdict after
@@ -70,7 +77,7 @@ is given where the verdict changes:
 | Opus max | Opus high | +5.0 [+3.8, +6.2] | 23 / 1 | separated | separated |
 | Astra high | Opus high | +6.0 [+4.6, +7.4] | 24 / 0 | separated | separated |
 | Opus high | gpt-6-sol high | +13.3 [+10.6, +16.2] | 24 / 0 | separated | separated |
-| Opus high | grok-4.7 fast high | +13.0 [+11.0, +15.2] | 24 / 0 | separated | separated |
+| Opus high | grok-4.7 fast high | +12.8 [+10.4, +15.4] | 23 / 1 | separated | separated |
 | grok-4.7 fast | grok-4.6 | +2.3 [+0.5, +4.2] | 16 / 8 | separated, barely | not separated (0.243) |
 | grok-4.7 fast | grok-4.7 | +4.4 [+1.7, +7.5] | 14 / 10 | separated | not separated (0.081) |
 | grok-4.6 | grok-4.7 | +2.2 [−1.1, +5.9] | 10 / 14 | not separated | not separated |
@@ -195,9 +202,9 @@ attempts).
 
 | Model | high | max | max − high | won / lost |
 |---|---|---|---|---|
-| Codex / gpt-6-astra | 73.5 | 79.2 | +5.7 [+4.2, +7.1] | 23 / 1 |
+| Codex / gpt-6-astra | 73.4 | 79.2 | +5.7 [+4.2, +7.1] | 23 / 1 |
 | Codex / gpt-6.1-sol | 72.4 | 77.2 | +4.7 [+3.2, +5.9] | 23 / 1 |
-| Claude Code / claude-opus-5-5 | 66.6 | 71.5 | +5.0 [+3.8, +6.2] | 23 / 1 |
+| Claude Code / claude-opus-5-5 | 66.5 | 71.5 | +5.0 [+3.8, +6.2] | 23 / 1 |
 
 Five points for every model, almost every object, and the gain is largest on
 the photos-only variant. Five points is also the size of the gap between
@@ -216,7 +223,7 @@ not run.
 gpt-6.1-sol at high is statistically tied with Astra high (−1.0, 7 won / 17
 lost but the interval crosses zero) and ahead of Opus high by 5.9; it is the
 best configuration on photos only (t2 61.1) and the weakest of the top four on
-stale drawings (c1 74.8). gpt-6-sol at high scores 53.2, with the Grok models:
+stale drawings (c1 74.8). gpt-6-sol at high scores 53.3, with the Grok models:
 13 points behind Opus high on every object, 38 % on conflict probes. Both ran
 on codex-cli 0.162.1, Astra and Luna on 0.159.2 (the report flags the
 difference; §7 shows it does not matter for Opus and nothing suggests it
