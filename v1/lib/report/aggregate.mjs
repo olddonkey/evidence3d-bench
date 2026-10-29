@@ -930,18 +930,23 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
       objectTasks.get(info.object).push(task);
     }
     // The variants every object owes: in the real tier both real variants; in
-    // a main set the roster's required variants of the families its tasks
-    // belong to (none without required_variants). An object with no task of
-    // one in these batches is a gap of every configuration, owed under a
-    // placeholder id (the task does not exist here to be named).
-    const families = new Set([...ofSet.values()].map(task => variantFamily(task.variant)));
-    const owedVariants = realTier ? REAL_VARIANTS : (roster?.required_variants ?? []).filter(variant => families.has(variantFamily(variant)));
-    const owingObjects = new Set([...ofSet.values()].filter(task => owedVariants.some(variant => variantFamily(variant) === variantFamily(task.variant))).map(task => task.object));
+    // a main set the roster's required variants of the families the object's
+    // own tasks belong to (none without required_variants). An object with no
+    // task of one in these batches is a gap of every configuration, owed under
+    // a placeholder id (the task does not exist here to be named).
+    const objectFamilies = new Map();
+    for (const task of ofSet.values()) {
+      if (!objectFamilies.has(task.object)) objectFamilies.set(task.object, new Set());
+      objectFamilies.get(task.object).add(variantFamily(task.variant));
+    }
+    const owedVariants = realTier ? REAL_VARIANTS : roster?.required_variants ?? [];
     const kinds = new Set([...ofSet.values()].map(task => task.object + '|' + task.variant));
-    const uncovered = [...owingObjects].sort().flatMap(object => owedVariants.filter(variant => !kinds.has(object + '|' + variant)).map(variant => ({ object, variant })));
+    const uncovered = [...objectFamilies.keys()].sort().flatMap(object => owedVariants
+      .filter(variant => objectFamilies.get(object).has(variantFamily(variant)) && !kinds.has(object + '|' + variant)).map(variant => ({ object, variant })));
+    const uncoveredVariants = [...new Set(uncovered.map(gap => gap.variant))];
     for (const { object, variant } of uncovered) expected.set(object + ' ' + variant + ' (no task in these batches)', { object, variant });
     if (uncovered.length) {
-      problems.push('set ' + set + ' (' + (realTier ? 'real tier' : 'required variants ' + owedVariants.join(', ')) + ') has no task in these batches for ' +
+      problems.push('set ' + set + ' (' + (realTier ? 'real tier' : 'required variant' + (uncoveredVariants.length === 1 ? ' ' : 's ') + uncoveredVariants.join(', ')) + ') has no task in these batches for ' +
         uncovered.length + ' object × variant' + (uncovered.length === 1 ? '' : 's') + ' (' +
         firstFew(uncovered.map(({ object, variant }) => object + ' ' + variant)) + '): every formal configuration owes them, so its pairs get no verdict');
     }

@@ -179,8 +179,8 @@ report never infers one.
   roster lists as missing, restricted to `required_variants` when given (main
   sets only: a real-tier set owes all its tasks, every formal configuration ×
   object × `r2`, `r4`). With `required_variants`, every object of a main set
-  owes each required variant of the families its tasks belong to (the test
-  set owes `t2`, `t4`, `c1`; a memory set owes none of them); an object with
+  owes each required variant of the families its own tasks belong to (a test
+  object owes `t2`, `t4`, `c1`; a memory object none of them); an object with
   no task of one in these batches is owed under a placeholder id
   (`<object> c1 (no task in these batches)`, which no roster can list), so a
   variant no batch ran is an unlisted gap of everyone, reported, and no pair

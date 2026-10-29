@@ -531,7 +531,7 @@ test('a main set owes every required variant of its own families, even one no ba
   const set = board.sets[0];
   assert.equal(set.tier, 'main');
   assert.equal(set.completeness.expected_tasks, 216);
-  assert.ok(board.problems.some(problem => /set test \(required variants t2, t4, c1\) has no task in these batches for 72 object × variants \(o0 c1, o1 c1, o10 c1, \.\.\.\): every formal configuration owes them/.test(problem)),
+  assert.ok(board.problems.some(problem => /set test \(required variant c1\) has no task in these batches for 72 object × variants \(o0 c1, o1 c1, o10 c1, \.\.\.\): every formal configuration owes them/.test(problem)),
     board.problems.join('\n'));
   assert.ok(set.completeness.configurations.every(record => record.sampled === 144 && record.unlisted.length === 72 && record.unlisted.includes('o5 c1 (no task in these batches)')));
   assert.ok(set.pairwise.pairs.length === 6 && set.pairwise.pairs.every(pair => pair.incomplete === 'unlisted_gaps' && pair.holm.verdict === 'incomplete'));
@@ -552,6 +552,27 @@ test('a main set owes every required variant of its own families, even one no ba
   assert.equal(loose.sets[0].completeness.expected_tasks, 144);
   assert.ok(!loose.problems.some(problem => /no task in these batches/.test(problem)));
   assert.ok(loose.sets[0].pairwise.pairs.every(pair => pair.incomplete === null));
+});
+
+test('in a set of several families each object owes only the required variants of its own families', () => {
+  // Four generated objects (t2, t4, c1) and four memory objects (m2, m3) in one set.
+  const generated = design(FOUR, { objects: 4, variants: ['t2', 't4', 'c1'], seed: 'mixed-generated' });
+  const memory = design(FOUR, { objects: 4, variants: ['m2', 'm3'], seed: 'mixed-memory' });
+  const rename = attempt => ({ ...attempt, object: 'k' + attempt.object.slice(1), task_id: 'k' + attempt.task_id.slice(1) });
+  const mixed = attempts => ({ attempts, batches: [], problems: [] });
+  const required = roster({}, { required_variants: ['t2', 't4', 'c1', 'm2', 'm3'] });
+  const whole = buildLeaderboard(mixed([...generated.attempts, ...memory.attempts.map(rename)]), { now: NOW, roster: required });
+  assert.equal(whole.sets[0].completeness.expected_tasks, 20);
+  assert.ok(!whole.problems.some(problem => /no task in these batches|does not list as missing/.test(problem)), whole.problems.join('\n'));
+  assert.ok(whole.sets[0].pairwise.pairs.every(pair => pair.incomplete === null && pair.objects === 8));
+
+  // Without c1 only the generated objects owe it.
+  const noC1 = buildLeaderboard(mixed([...generated.attempts.filter(attempt => attempt.variant !== 'c1'), ...memory.attempts.map(rename)]), { now: NOW, roster: required });
+  assert.equal(noC1.sets[0].completeness.expected_tasks, 20);
+  assert.ok(noC1.problems.some(problem => /set test \(required variant c1\) has no task in these batches for 4 object × variants \(o0 c1, o1 c1, o2 c1, \.\.\.\)/.test(problem)),
+    noC1.problems.join('\n'));
+  assert.ok(noC1.sets[0].completeness.configurations.every(record => deepIs(record.unlisted, ['o0 c1', 'o1 c1', 'o2 c1', 'o3 c1'].map(id => id + ' (no task in these batches)'))));
+  assert.ok(noC1.sets[0].pairwise.pairs.every(pair => pair.incomplete === 'unlisted_gaps'));
 });
 
 function deepIs(actual, expected) {
