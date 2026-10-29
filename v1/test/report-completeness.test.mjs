@@ -373,3 +373,52 @@ test('required_variants must name variants by their own string keys; an unplacea
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('real tier: every per-object figure uses the complete objects; bookkeeping counts every attempt', () => {
+  const withCurves = data => {
+    for (const attempt of data.attempts) Object.assign(attempt, { wall_limit_seconds: 600, wall_seconds: 550, cost_usd: 1,
+      snapshots: { interval_seconds: 300, points: [{ t: 300, score: attempt.score / 2 }] } });
+    return data;
+  };
+  // Seven of ten objects complete for Opus (r4 listed missing on three).
+  const gaps = ['o0-r4', 'o4-r4', 'o9-r4'];
+  const data = withCurves(design(FOUR, { set: 'real', variants: ['r2', 'r4'], objects: 10, skip: { [OPUS]: gaps } }));
+  const opusAttempts = data.attempts.filter(attempt => attempt.model === 'opus' && attempt.effort === 'high');
+  opusAttempts.find(attempt => attempt.task_id === 'o0-r2').valid = false;
+  const board = buildLeaderboard(data, { now: NOW, roster: roster({ [OPUS]: { missing_tasks: gaps.map(task => ({ task, reason: 'photographs withdrawn' })) } }) });
+  const opus = board.entries.find(entry => entry.key === OPUS);
+  assert.deepEqual([opus.archetypes.house.objects, opus.archetypes.house.ci95], [7, null]);
+  assert.ok(opus.time_curve.available && opus.time_curve.points.every(point => point.objects === 7 && point.ci95 === null));
+  assert.equal(opus.time_curve.points.at(-1).mean, opus.score.mean, 'the curve still ends at the score');
+  assert.deepEqual([opus.frame_error.offset_m.ci95, opus.evidence_deltas['r4-r2']?.ci95 ?? null], [null, null]);
+  // Bookkeeping: all 17 attempts, the invalid one on a partial object included.
+  assert.deepEqual([opus.attempts, opus.success.attempts, opus.success.valid, opus.cost_usd.total, opus.objects], [17, 17, 16, 17, 10]);
+  const astra = board.entries.find(entry => entry.key === ASTRA);
+  assert.ok(astra.archetypes.house.ci95 && astra.time_curve.points.every(point => point.ci95), 'ten complete objects: intervals');
+
+  // No complete object (only r2 ran): no figure at all, the attempts still counted.
+  const none = buildLeaderboard(withCurves(design(FOUR, { set: 'real', variants: ['r2'], objects: 10 })), { now: NOW, roster: roster() });
+  const lone = none.entries.find(entry => entry.key === OPUS);
+  assert.deepEqual([lone.score.mean, lone.archetypes, lone.variants, lone.time_curve, lone.attempts, lone.success.attempts], [null, {}, {}, null, 10, 10]);
+});
+
+test('a ladder whose only pair has a demoted or absent member still shows it; the status names a configuration without a complete object', () => {
+  const two = [['codex', 'astra', 'high', 70], ['claude-code', 'opus', 'high', 66]];
+  const gaps = ['o3-t4', 'o7-c1'];
+  const pick = extra => parseRoster({ schema: 'e3d-roster-v1', configurations: [{ system: 'codex', model: 'astra', effort: 'high', ladder: 'default' },
+    { system: 'claude-code', model: 'opus', effort: 'high', ladder: 'default', ...extra }] });
+  const demoted = buildLeaderboard(design(two, { skip: { [OPUS]: gaps } }), { now: NOW,
+    roster: pick({ missing_tasks: gaps.map(task => ({ task, reason: 'usage limit' })), demoted: 'missed 2 of 36 tasks' }) });
+  const page = indexPage(demoted);
+  assert.match(page, /<details class="more" open><summary>All 1 pair of this ladder<\/summary>/);
+  const absent = buildLeaderboard(design([two[0]]), { now: NOW, roster: pick({}) });
+  assert.match(indexPage(absent), /All 1 pair of this ladder/);
+  // Opus has r2 everywhere but lists every r4 as missing: no complete object, no rank.
+  const r4 = Array.from({ length: 10 }, (_, o) => 'o' + o + '-r4');
+  const real = buildLeaderboard(design(two, { set: 'real', variants: ['r2', 'r4'], objects: 10, skip: { [OPUS]: r4 } }), { now: NOW,
+    roster: pick({ missing_tasks: r4.map(task => ({ task, reason: 'no survey notes' })) }) });
+  assert.equal(real.entries.find(entry => entry.key === OPUS).rank, null);
+  assert.equal(real.sets[0].completeness.configurations.find(item => item.key === OPUS).complete_objects, 0);
+  assert.match(indexPage(real), /no complete object<\/span><small>no object with every r2 and r4 task: no score, no rank/);
+  assert.match(summaryMarkdown(real), /no complete object \(no score, no rank; pairs incomplete\)/);
+});

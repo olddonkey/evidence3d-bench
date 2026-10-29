@@ -222,8 +222,13 @@ function laddersSection(board, set) {
       const index = entries.indexOf(entry);
       return [statCell(entry.score), '<td class="num">' + percent(entry.success.rate) + '<small>' + entry.success.valid + ' / ' + entry.success.attempts + ' att.</small></td>', next(entry, index)];
     }, { rankOf: entry => ranks.get(entry.key) });
-    const all = ladder.pairwise.pairs.length > 1 ? '<details class="more"><summary>All ' + ladder.pairwise.pairs.length + ' pairs of this ladder</summary>' +
-      ladderPairs(ladder.pairwise.pairs, ladder.pairwise.correction, { note }) + '</details>' : '';
+    // The folded table lists every pair of the frozen family; it is needed even
+    // for one pair when that pair is not a gap between two ranked rungs (a
+    // demoted or absent member).
+    const adjacent = entries.filter((entry, index) => ranks.get(entry.key) !== null && index + 1 < entries.length && ranks.get(entries[index + 1].key) !== null).length;
+    const count = ladder.pairwise.pairs.length;
+    const all = count > 1 || count > adjacent ? '<details class="more"' + (count > adjacent && count === 1 ? ' open' : '') + '><summary>All ' + plural(count, 'pair') +
+      ' of this ladder</summary>' + ladderPairs(ladder.pairwise.pairs, ladder.pairwise.correction, { note }) + '</details>' : '';
     return '<h4>' + esc(ladder.label) + ' <small>' + plural(entries.length, 'configuration') + ' · ' + esc(correctionLine(ladder.pairwise.correction)) + '</small></h4>' +
       table + missing + all;
   });
@@ -252,6 +257,7 @@ function completenessSection(set) {
       record.missing.map(gap => '<li><code>' + esc(gap.task) + '</code>: ' + esc(gap.reason) + '</li>').join('') + '</ul></details>' : '0';
     const status = record.demoted ? '<span class="na">demoted</span><small>' + esc(record.demoted) + '</small>'
       : record.unlisted.length ? '<span class="bad">gaps not in the roster</span><small>' + plural(record.unlisted.length, 'task') + ': a data problem; no verdict</small>'
+      : record.present && record.complete_objects === 0 ? '<span class="na">no complete object</span><small>no object with every r2 and r4 task: no score, no rank; its pairs are incomplete</small>'
         : record.missing.length ? '<span class="low">missing tasks</span><small>' + (set.tier === 'real' ? 'ranked; its pairs use the objects both completed' : 'ranked; its pairs are incomplete') + '</small>'
           : '<span class="good">complete</span>';
     return '<tr><td>' + esc(record.key) + (record.present ? '' : '<small>no counted attempt in this set</small>') + '</td><td class="num">' + record.sampled + ' / ' + record.expected +

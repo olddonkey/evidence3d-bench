@@ -274,7 +274,7 @@ function cellEntry(key, set, attempts, seed, { deltaPairs = [], archetypes = [],
   const perTask = taskMeans(attempts);
   const attemptCounts = [...perTask.values()].map(task => task.attempts);
   return {
-    key, set, system: first.system, model: first.model, effort: first.effort,
+    key, set, system: first?.system ?? null, model: first?.model ?? null, effort: first?.effort ?? null,
     batches: [...new Set(attempts.map(attempt => attempt.batch))].sort(),
     attempts: attempts.length,
     tasks: new Set(attempts.map(attempt => attempt.task_id)).size,
@@ -560,18 +560,15 @@ function setTasks(set, inSet, taskInfo) {
   return tasks;
 }
 
-// A real-tier configuration's own scores (docs/V1-ROUND4-PLAN.md section 3):
-// the entry was built on its complete objects; without one it has no score
-// (and no rank), below REAL_TIER_MIN_OBJECTS a point estimate only.
-const pointOnly = stat => stat ? { ...stat, ci95: null } : stat;
-const noScore = stat => stat ? { ...stat, mean: null, ci95: null, objects: 0 } : stat;
-function realTierScores(entry, complete, sampled) {
-  entry.real_tier = { complete_objects: complete, sampled_objects: sampled, intervals: complete >= REAL_TIER_MIN_OBJECTS };
-  if (complete >= REAL_TIER_MIN_OBJECTS) return;
-  const strip = complete ? pointOnly : noScore;
-  for (const name of ['score', 'shape', 'detail']) entry[name] = strip(entry[name]);
-  for (const variant of Object.keys(entry.variants)) entry.variants[variant] = strip(entry.variants[variant]);
-}
+// A real-tier configuration's own figures (docs/V1-ROUND4-PLAN.md section 3)
+// use its complete objects only: every per-object summary of cellEntry below,
+// recomputed on those objects, without intervals below REAL_TIER_MIN_OBJECTS
+// and empty without one. Bookkeeping (attempts, success, statuses, time,
+// tokens, cost, batches) counts every counted attempt.
+const REAL_TIER_FIGURES = ['score', 'variants', 'archetypes', 'ladder', 'evidence_deltas', 'conflict', 'memory', 'shape', 'detail', 'detail_categories',
+  'probe_error', 'frame_error', 'scale_error_pct', 'time_curve'];
+const withoutIntervals = value => Array.isArray(value) ? value.map(withoutIntervals) : value && typeof value === 'object'
+  ? Object.fromEntries(Object.entries(value).map(([name, item]) => [name, name === 'ci95' ? null : withoutIntervals(item)])) : value;
 
 // The tasks a main set asks of every formal configuration: all of them, or
 // those of the roster's required variants when it names them. (A real-tier set
@@ -914,9 +911,13 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
     // In the real tier a configuration's own scores use its complete objects
     // only, with intervals from REAL_TIER_MIN_OBJECTS of them (section 3).
     const ranked = [...cells].map(([key, attempts]) => {
-      const scored = realTier ? attempts.filter(attempt => completedOf(key).has(attempt.object)) : attempts;
-      const entry = cellEntry(key, set, scored.length ? scored : attempts, seed, { deltaPairs, archetypes: archetypeIds, categories: categoryIds });
-      if (realTier) realTierScores(entry, completedOf(key).size, new Set(attempts.map(attempt => attempt.object)).size);
+      const options = { deltaPairs, archetypes: archetypeIds, categories: categoryIds }, entry = cellEntry(key, set, attempts, seed, options);
+      if (realTier) {
+        const complete = completedOf(key), enough = complete.size >= REAL_TIER_MIN_OBJECTS;
+        const figures = cellEntry(key, set, attempts.filter(attempt => complete.has(attempt.object)), seed, options);
+        for (const name of REAL_TIER_FIGURES) entry[name] = enough ? figures[name] : withoutIntervals(figures[name]);
+        entry.real_tier = { complete_objects: complete.size, sampled_objects: entry.objects, intervals: enough };
+      }
       return entry;
     });
     ranked.sort((a, b) => (b.score.mean ?? -Infinity) - (a.score.mean ?? -Infinity) || a.key.localeCompare(b.key));
@@ -950,7 +951,8 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
     // part in this set (an attempt, counted or excluded), every roster
     // configuration belongs to it, present or not.
     const frozen = Boolean(roster) && inSet.some(attempt => roster.keys.has(cellKey(attempt)));
-    const completeness = frozen ? roster.configurations.map(item => completenessOf(item, cells.get(item.key) ?? [], expected, { demotable: !realTier })) : [];
+    const completeness = frozen ? roster.configurations.map(item => ({ ...completenessOf(item, cells.get(item.key) ?? [], expected, { demotable: !realTier }),
+      ...(realTier ? { complete_objects: completedOf(item.key).size } : {}) })) : [];
     const byKey = new Map(completeness.map(record => [record.key, record]));
     for (const record of completeness) checkCompleteness(record, { set, realTier, roster, problems });
     const absent = frozen ? roster.configurations.filter(item => !cells.has(item.key)).map(item => item.key) : [];

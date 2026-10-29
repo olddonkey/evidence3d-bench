@@ -211,11 +211,14 @@ report never infers one.
   configuration completed an object when it has a counted sample on every
   task of the object in the set, `r2` and `r4` both among them (a set with
   no `r4` task at all, say, has no complete object, and says so).
-  - A configuration's own scores (`entry.score`, shape, detail, per variant)
-    use its complete objects only (`entry.real_tier = { complete_objects,
+  - A configuration's own figures (score, shape, detail, per variant and
+    archetype, evidence deltas, diagnostics, the score-over-time curve) use
+    its complete objects only (`entry.real_tier = { complete_objects,
     sampled_objects, intervals }`); below `REAL_TIER_MIN_OBJECTS` (8) they are
     point estimates without an interval, and with none it has no score and
-    no rank (shown as –), but stays in every family.
+    no rank (shown as –), but stays in every family. Bookkeeping (attempts,
+    success, statuses, time, tokens, cost, batches and their provenance)
+    counts every counted attempt.
   - A pair is compared only on the objects both configurations completed
     (`pair.complete_objects`) and needs at least 8 of them; below that it is
     incomplete with no intervals, whatever the reason.

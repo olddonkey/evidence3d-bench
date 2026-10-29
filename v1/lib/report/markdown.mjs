@@ -75,6 +75,7 @@ function completenessMarkdown(set) {
   if (!info) return [];
   if (!info.expected_tasks) return ['Completeness: the roster\'s required variants (' + (info.required_variants ?? []).join(', ') + ') ask nothing of this set.', ''];
   const status = record => record.demoted ? 'demoted: ' + record.demoted : record.unlisted.length ? 'gaps not in the roster (data problem; no verdict)'
+    : record.present && record.complete_objects === 0 ? 'no complete object (no score, no rank; pairs incomplete)'
     : record.missing.length ? (set.tier === 'real' ? 'missing tasks (ranked; pairs use the objects both completed)' : 'missing tasks (ranked; pairs incomplete)') : 'complete';
   const lines = ['#### Completeness', '', 'Roster configurations against the ' + plural(info.expected_tasks, 'task') + ' this set asks of each' +
     (info.required_variants ? ' (variants ' + info.required_variants.join(', ') + ')' : '') + '.', '',
