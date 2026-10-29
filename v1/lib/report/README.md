@@ -151,7 +151,8 @@ node v1/cli.mjs report --batches A,B,C --out .local/v1/reports/NAME --roster v1/
   re-report it; it is not a pre-registered decision. It requires `t2`, `t4`
   and `c1` (the test set's three-variant headline: `t1` and `t3` were run by
   some configurations only), so the memory set owes nothing; the real set,
-  a real tier, owes all its tasks.
+  a real tier, owes all its tasks, and the six configurations that never ran
+  it list its four tasks as missing (not run).
 
 Without a roster every configuration is formal and the ladders are inferred
 (`inferLadders`, notes in `set.ladder_notes`): `default` is a run without an
