@@ -6,15 +6,15 @@
 
 参赛的是**系统**：客户端 + 模型 + 推理档位。每题一个全新会话，在 macOS Seatbelt 沙箱里作答：只能读题包、写输出目录，读不到仓库和真值，执行的命令连不了网；墙钟上限 30 分钟。
 
-## 现状（2026-10-28）
+## 现状（2026-10-29）
 
 <!-- 维护：每轮跑完、路线图的 PR 合并、Round 4 计划签署时，更新"现状""各阶段""Round 4 准备进度"三节；新一轮的结果出来后，把"Round 3 榜单"换成新一轮的。数字以 docs/V1-ROUND*.md 为准。 -->
 
 **最新结果是 Round 3**（[docs/V1-ROUND3.md](docs/V1-ROUND3.md)）：私有测试集 `test-2026-10` 的 24 个对象，12 个系统，评分器 1.1.0；10-21 跑完，10-28 按两张榜加 Holm 校正重出了报告。默认档（high）上 Codex 的 gpt-6-astra 和 gpt-6.1-sol 并列第一，Claude Code 的 Opus 5.5 第三；最高档（max）上这三个依次分开，79.2 > 77.2 > 71.5。同一个模型从 high 调到 max 涨 5 分左右，和模型之间的差距一样大。
 
-**正在做 Round 4 的准备**：路线图第一阶段 10 项，5 项已合并，2 项在等负责人拍板（[#4](https://github.com/olddonkey/evidence3d-bench/pull/4) 题面里的评分说明、[#2](https://github.com/olddonkey/evidence3d-bench/pull/2) Round 4 计划），3 项在负责人手上（Antigravity 实机预检、真实建筑候选、盲评）。明细见下面的 [Round 4 准备进度](#round-4-准备进度)。
+**正在做 Round 4 的准备**：路线图第一阶段 10 项，6 项已合并（含已签署的 Round 4 计划），1 项在等负责人拍板（[#4](https://github.com/olddonkey/evidence3d-bench/pull/4) 题面里的评分说明），3 项在负责人手上（Antigravity 实机预检、真实建筑候选、盲评）。明细见下面的 [Round 4 准备进度](#round-4-准备进度)。
 
-**Round 4 要回答的**：在评分器冻结之后才生成的新私有题集（72 个对象）上排两张系统榜，并说清每个分差是否可信：校正多重比较后还分不分得开、人眼看不看得出、有多少来自客户端（同一模型换客户端的对照）。真实建筑扩到 10–12 个（至少 8 个才给区间）。计划还是草案（[#2](https://github.com/olddonkey/evidence3d-bench/pull/2)），负责人合并它就是签署。
+**Round 4 要回答的**：在评分器冻结之后才生成的新私有题集（72 个对象）上排两张系统榜，并说清每个分差是否可信：校正多重比较后还分不分得开、人眼看不看得出、有多少来自客户端（同一模型换客户端的对照）。真实建筑扩到 10–12 个（至少 8 个才给区间）。计划已于 2026-10-29 签署：[docs/V1-ROUND4-PLAN.md](docs/V1-ROUND4-PLAN.md)（[#2](https://github.com/olddonkey/evidence3d-bench/pull/2)）。
 
 **现在还说不了的**：分数和人眼判断是否一致（盲评只评了 110 对里的 14 对）；榜上的差多少来自模型、多少来自客户端；真实建筑只有 2 个，只能看排序。
 
@@ -72,7 +72,7 @@
 | v1 试点 | 2026-10-01 | 公开开发集 5 个对象、4 个系统，验证分数拉得开、和肉眼看到的一致；不是测试成绩 | [docs/V1-PILOT.md](docs/V1-PILOT.md) |
 | v1 首轮测试 | 2026-10-03 至 04 | 私有测试集 `test-2026-10`，24 个对象 × `t2`/`t4`/`c1`，4 个系统，两两全部分开 | [docs/V1-TEST.md](docs/V1-TEST.md) |
 | Round 3 | 2026-10-05 至 21 | 同一测试集补上 `t1`、`t3`；12 个系统（加了 gpt-6.1-sol、gpt-6-sol、3 个 Grok 和 max 档）；记忆题；2 个真实建筑；10-28 按两张榜和 Holm 重出报告 | [docs/V1-ROUND3.md](docs/V1-ROUND3.md) |
-| Round 4 | 准备中 | 新题集 72 个对象、两张系统榜、人眼校准、同模型跨客户端对照、10–12 个真实建筑 | 计划草案 [#2](https://github.com/olddonkey/evidence3d-bench/pull/2) |
+| Round 4 | 准备中 | 新题集 72 个对象、两张系统榜、人眼校准、同模型跨客户端对照、10–12 个真实建筑 | [计划](docs/V1-ROUND4-PLAN.md)（2026-10-29 签署） |
 
 ## Round 4 准备进度
 
@@ -89,7 +89,7 @@
 | ⏳ | T7 在装了 agy 的 Mac 上查 `agy models`，跑 Antigravity 第一次实机预检和 3–5 题试跑 | 适配器是照文档写的，还没在真机上跑过 |
 | ⏳ | T8 真实建筑候选：有平面和至少两个立面、街上拍得到、不是名建筑 | 现有 2 个，Round 4 目标 10–12 个 |
 | ⏳ | T9 负责人评完自己那份 110 对盲评，再找 2 位评审者 | 已评 14 / 110 |
-| 🔄 | T10 Round 4 计划与事先决定 | [#2](https://github.com/olddonkey/evidence3d-bench/pull/2)：等负责人确认第 13 节，合并即签署 |
+| ✅ | T10 Round 4 计划与事先决定 | [#2](https://github.com/olddonkey/evidence3d-bench/pull/2)：2026-10-29 签署，见 [docs/V1-ROUND4-PLAN.md](docs/V1-ROUND4-PLAN.md) |
 
 之后：阶段 2 用 3 位评审者的盲评决定评分器权重是否要改（G1），跑同一模型换客户端的对照（G2），定名单；阶段 3 加新题型（`t5`、照片退化）和生成器 1.2，生成新题集并打 tag `v1.3`；阶段 4 正式跑 Round 4，发布 `docs/V1-ROUND4.md`。
 
@@ -123,7 +123,7 @@
 | 文档 | 内容 |
 |---|---|
 | [docs/V1-ROUND3.md](docs/V1-ROUND3.md) | **最新结果**：Round 3 的全部数字、两张榜、记忆题、真实建筑、Grok、工具链漂移（英文） |
-| [docs/V1-ROUND4-PLAN.md](docs/V1-ROUND4-PLAN.md) | Round 4 的计划与事先决定（规则先于数据）：两张系统榜、题集与次数、Holm 校正、人眼校准、同模型跨客户端对照、运行栈冻结。草案，负责人合并即签署 |
+| [docs/V1-ROUND4-PLAN.md](docs/V1-ROUND4-PLAN.md) | Round 4 的计划与事先决定（规则先于数据）：两张系统榜、题集与次数、Holm 校正、人眼校准、同模型跨客户端对照、运行栈冻结。2026-10-29 签署 |
 | [docs/V1-TEST.md](docs/V1-TEST.md) | 第一份测试成绩（4 个系统），以及主机睡眠规则的由来 |
 | [docs/V1-PILOT.md](docs/V1-PILOT.md) | v1 试点：分数能不能拉开、和肉眼看到的是否一致 |
 | [docs/V1.md](docs/V1.md) | v1 的设计：题目、评分、评分器校准、运行条件、已知限制 |
