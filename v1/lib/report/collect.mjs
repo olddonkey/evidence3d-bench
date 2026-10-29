@@ -57,6 +57,12 @@ async function directories(path) {
 }
 
 const text = value => typeof value === 'string' && value ? value : null;
+// A configuration as a result.json records it. The runner copies the
+// manifest's own top-level system, model and effort into every result.json
+// (an explicit null effort included, whatever the harness default), so a
+// manifest is read the same way.
+const configurationOf = record => ({ system: String(record.system ?? 'unknown'), model: String(record.model ?? 'unknown'),
+  effort: record.effort === undefined || record.effort === null ? null : String(record.effort) });
 const hash = value => typeof value === 'string' && HASH.test(value) ? value : null;
 const distinct = values => [...new Set(values.filter(value => value !== null && value !== undefined))].sort();
 
@@ -288,10 +294,7 @@ export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT
     for (const id of plannedIds) if (!planned.has(id)) planned.set(id, batch);
     // Which configuration was prepared for which tasks: a formal one takes
     // part in their sets before (or without) any result.json.
-    if (manifest) {
-      const { system, model, effort } = manifestProvenance(manifest);
-      if (system && model && plannedIds.length) plans.push({ batch, system, model, effort, tasks: plannedIds });
-    }
+    if (manifest && typeof manifest === 'object' && plannedIds.length) plans.push({ batch, ...configurationOf(manifest), tasks: plannedIds });
     const mine = [];
     let unfinished = 0, archivedTries = 0;
     for (const taskDirName of await directories(batchDir)) {
@@ -325,15 +328,14 @@ export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT
         if (valid && finite(result.score) && Math.abs(result.score - report.score) > 1e-6) {
           problems.push(attemptDir + ': result.score ' + result.score + ' differs from report.score ' + report.score + '; the report is used');
         }
-        const model = String(result.model ?? 'unknown'), modelReported = text(result.model_reported);
+        const { system, model, effort } = configurationOf(result), modelReported = text(result.model_reported);
         if (modelReported && modelReported !== model) {
           problems.push(attemptDir + ': requested model ' + model + ' but the harness reported ' + modelReported + '; ranked under the requested id');
         }
         const excluded = excludeStatuses.includes(status);
         const entry = {
           batch, task_id: taskId, attempt, slot: attemptName, dir: attemptDir,
-          system: String(result.system ?? 'unknown'), model, model_reported: modelReported,
-          effort: result.effort === undefined || result.effort === null ? null : String(result.effort),
+          system, model, model_reported: modelReported, effort,
           set: setOf(truth, taskId, problems),
           status, excluded, valid,
           // Why the harness failed, when the runner says (field name not fixed by the contract yet).

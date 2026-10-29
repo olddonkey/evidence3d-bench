@@ -205,7 +205,8 @@ report never infers one.
 - **Families are frozen**: with a roster, once any roster configuration took
   part in a set (an attempt, counted or excluded, or a batch whose
   `manifest.json` was prepared with tasks of the set, even one that never
-  wrote a `result.json`), every pair of roster configurations is in the set's families,
+  wrote a `result.json`; matched by the manifest's top-level system, model
+  and effort, which the runner copies into every `result.json`), every pair of roster configurations is in the set's families,
   absent and demoted ones included; m never shrinks because a configuration
   failed to deliver.
 - **Incomplete pair** (`pair.verdict: 'incomplete'`, `pair.incomplete` = the

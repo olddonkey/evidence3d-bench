@@ -619,6 +619,33 @@ test('a formal batch prepared without any result.json still freezes its sets\' f
   }
 });
 
+test('a prepared batch is matched to the roster by the configuration its result.json files would carry, an explicit null effort included', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'e3d-completeness-'));
+  try {
+    const dataRoot = join(root, 'data');
+    await writeSampleRuns(dataRoot, { withModels: false, withInputs: false });
+    const runs = layout(dataRoot).runs, manifest = JSON.parse(await readFile(join(runs, 'demo-claude', 'manifest.json'), 'utf8'));
+    // The runner copies the top-level effort (null: no effort flag) into
+    // result.json, whatever default the harness reports.
+    for (const [batch, model, effort] of [['pending-n', 'model-n', null], ['pending-a', 'model-a', 'high']]) {
+      await mkdir(join(runs, batch), { recursive: true });
+      await writeFile(join(runs, batch, 'manifest.json'), JSON.stringify({ ...manifest, id: batch, system: 'codex', model, effort,
+        harness: { ...manifest.harness, system: 'codex', model, effort: 'high' } }));
+    }
+    const collected = await collectRuns({ dataRoot, batches: ['demo-codex', 'demo-claude', 'pending-n', 'pending-a'] });
+    assert.deepEqual(collected.plans.filter(plan => plan.batch.startsWith('pending')).map(plan => [plan.model, plan.effort]), [['model-n', null], ['model-a', 'high']]);
+    const formal = parseRoster({ schema: 'e3d-roster-v1', configurations: [{ system: 'codex', model: 'model-n', effort: null, ladder: 'default' },
+      { system: 'codex', model: 'model-a', effort: 'high', ladder: 'top' }] });
+    const board = buildLeaderboard(collected, { now: NOW, roster: formal });
+    const set = board.sets.find(item => item.id === collected.taskInfo.get(manifest.tasks[0].id).set);
+    assert.deepEqual(set.absent_configurations, ['codex / model-n / -', 'codex / model-a / high']);
+    assert.equal(set.pairwise.correction.comparisons, 1);
+    assert.ok(board.problems.some(problem => /lists codex \/ model-n \/ -, which no attempt in these batches ran \(a batch was prepared for it/.test(problem)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 function deepIs(actual, expected) {
   try { assert.deepEqual(actual, expected); return true; } catch { return false; }
 }
