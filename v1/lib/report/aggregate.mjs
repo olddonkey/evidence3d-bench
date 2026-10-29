@@ -899,7 +899,21 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
   // Attempts assembled by hand (tests, calibration) may carry no set or archetype.
   const all = collected.attempts.map(attempt => attempt.set && attempt.archetype ? attempt
     : { ...attempt, set: attempt.set || UNNAMED_SET, archetype: attempt.archetype || UNKNOWN_ARCHETYPE });
-  const setIds = [...new Set(all.map(attempt => attempt.set))]
+  // Roster configurations by the sets their batches were prepared for: taking
+  // part in a set needs no result.json (a batch that failed preflight, or has
+  // not finished its first attempt, still owes its tasks).
+  const preparedFor = new Map();
+  for (const plan of roster ? collected.plans ?? [] : []) {
+    const key = cellKey(plan);
+    if (!roster.keys.has(key)) continue;
+    for (const task of plan.tasks) {
+      const set = collected.taskInfo?.get(task)?.set;
+      if (!set) continue;
+      if (!preparedFor.has(set)) preparedFor.set(set, new Set());
+      preparedFor.get(set).add(key);
+    }
+  }
+  const setIds = [...new Set([...all.map(attempt => attempt.set), ...preparedFor.keys()])]
     .sort((p, q) => (p === UNKNOWN_SET) - (q === UNKNOWN_SET) || (p === UNNAMED_SET) - (q === UNNAMED_SET) || p.localeCompare(q));
   const entries = [], sets = [];
   for (const set of setIds) {
@@ -996,9 +1010,10 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
       .map(key => ({ key, excluded_attempts: inSet.filter(attempt => cellKey(attempt) === key).length }));
 
     // With a roster the families are frozen: once any roster configuration took
-    // part in this set (an attempt, counted or excluded), every roster
-    // configuration belongs to it, present or not.
-    const frozen = Boolean(roster) && inSet.some(attempt => roster.keys.has(cellKey(attempt)));
+    // part in this set (an attempt, counted or excluded, or a batch prepared
+    // with tasks of the set), every roster configuration belongs to it,
+    // present or not.
+    const frozen = Boolean(roster) && (preparedFor.has(set) || inSet.some(attempt => roster.keys.has(cellKey(attempt))));
     const completeness = frozen ? roster.configurations.map(item => ({ ...completenessOf(item, cells.get(item.key) ?? [], expected, { demotable: !realTier }),
       ...(realTier ? { complete_objects: completedOf(item.key).size } : {}) })) : [];
     const byKey = new Map(completeness.map(record => [record.key, record]));
@@ -1112,7 +1127,11 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
   // A roster entry no batch ran is usually a misspelt system, model or effort.
   if (roster) {
     const ran = new Set(all.map(cellKey)), known = new Set([...all.map(attempt => attempt.task_id), ...(collected.taskInfo?.keys() ?? [])]);
-    for (const item of roster.configurations) if (!ran.has(item.key)) problems.push('roster ' + (roster.file ?? '') + ' lists ' + item.key + ', which no attempt in these batches ran');
+    const prepared = new Set([...preparedFor.values()].flatMap(keys => [...keys]));
+    for (const item of roster.configurations) {
+      if (!ran.has(item.key)) problems.push('roster ' + (roster.file ?? '') + ' lists ' + item.key + ', which no attempt in these batches ran' +
+        (prepared.has(item.key) ? ' (a batch was prepared for it but wrote no result.json)' : ''));
+    }
     // A missing task the report cannot place in a set is checked against nothing.
     const unplaced = [...new Set(rosterTasks(roster))].filter(task => !known.has(task)).sort();
     if (unplaced.length) problems.push('roster ' + (roster.file ?? '') + ' lists missing tasks that no batch planned and no truth.json places in a set: ' + firstFew(unplaced, 5));

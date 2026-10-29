@@ -248,9 +248,10 @@ function setOf(truth, taskId, problems) {
 
 // `alsoTasks`: task ids to place in their sets beside the batches' own (a
 // roster's missing tasks). -> { attempts, batches, problems, truths, objects,
-// setFiles, taskInfo: Map(task id -> { set, object, variant }) } where
+// setFiles, taskInfo: Map(task id -> { set, object, variant }), plans } where
 // taskInfo covers every task an attempt ran, every task a batch's manifest
-// planned (run or not), and `alsoTasks`.
+// planned (run or not), and `alsoTasks`; plans: [{ batch, system, model,
+// effort, tasks }], the configuration each manifest froze and its task ids.
 export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT_EXCLUDED_STATUSES, alsoTasks = [] } = {}) {
   if (typeof dataRoot !== 'string' || !dataRoot) throw new Error('collectRuns needs dataRoot');
   const paths = layout(resolve(dataRoot)), problems = [], attempts = [], batchInfo = [];
@@ -273,7 +274,7 @@ export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT
     }
     return objectCache.get(objectId);
   };
-  const planned = new Map();
+  const planned = new Map(), plans = [];
   for (const batch of batchIds) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(batch)) { problems.push('invalid batch id ' + JSON.stringify(batch)); continue; }
     const batchDir = join(paths.runs, batch);
@@ -283,7 +284,14 @@ export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT
     const preflight = await readJSONIfPresent(join(batchDir, 'preflight.json'), problems);
     // Every task the batch was prepared with, run or not: a task nobody has run
     // yet is still one the configuration owes.
-    for (const task of Array.isArray(manifest?.tasks) ? manifest.tasks : []) if (typeof task?.id === 'string' && task.id && !planned.has(task.id)) planned.set(task.id, batch);
+    const plannedIds = (Array.isArray(manifest?.tasks) ? manifest.tasks : []).map(task => task?.id).filter(id => typeof id === 'string' && id);
+    for (const id of plannedIds) if (!planned.has(id)) planned.set(id, batch);
+    // Which configuration was prepared for which tasks: a formal one takes
+    // part in their sets before (or without) any result.json.
+    if (manifest) {
+      const { system, model, effort } = manifestProvenance(manifest);
+      if (system && model && plannedIds.length) plans.push({ batch, system, model, effort, tasks: plannedIds });
+    }
     const mine = [];
     let unfinished = 0, archivedTries = 0;
     for (const taskDirName of await directories(batchDir)) {
@@ -377,7 +385,7 @@ export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT
         'the report cannot place it in a set, so no configuration is checked against it');
     }
   }
-  return { attempts, batches: batchInfo, problems: [...new Set(problems)], truths: truthCache, objects: objectCache, setFiles, taskInfo };
+  return { attempts, batches: batchInfo, problems: [...new Set(problems)], truths: truthCache, objects: objectCache, setFiles, taskInfo, plans };
 }
 
 // One batch's provenance: what its manifest froze plus what its attempts show

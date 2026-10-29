@@ -203,7 +203,9 @@ report never infers one.
   its pairs are incomplete. Demoting within the limit, or listing a task that
   has a counted sample, is reported.
 - **Families are frozen**: with a roster, once any roster configuration took
-  part in a set (an attempt, counted or excluded), every pair of roster configurations is in the set's families,
+  part in a set (an attempt, counted or excluded, or a batch whose
+  `manifest.json` was prepared with tasks of the set, even one that never
+  wrote a `result.json`), every pair of roster configurations is in the set's families,
   absent and demoted ones included; m never shrinks because a configuration
   failed to deliver.
 - **Incomplete pair** (`pair.verdict: 'incomplete'`, `pair.incomplete` = the

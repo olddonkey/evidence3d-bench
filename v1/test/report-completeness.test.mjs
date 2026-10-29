@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { rng } from '../lib/rng.mjs';
@@ -573,6 +573,50 @@ test('in a set of several families each object owes only the required variants o
     noC1.problems.join('\n'));
   assert.ok(noC1.sets[0].completeness.configurations.every(record => deepIs(record.unlisted, ['o0 c1', 'o1 c1', 'o2 c1', 'o3 c1'].map(id => id + ' (no task in these batches)'))));
   assert.ok(noC1.sets[0].pairwise.pairs.every(pair => pair.incomplete === 'unlisted_gaps'));
+});
+
+test('a formal batch prepared without any result.json still freezes its sets\' families', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'e3d-completeness-'));
+  try {
+    const dataRoot = join(root, 'data');
+    await writeSampleRuns(dataRoot, { withModels: false, withInputs: false });
+    // Two formal configurations were prepared with demo-claude's tasks but
+    // never wrote a result.json (preflight failed, say); the sample batches
+    // themselves are reference rows.
+    const runs = layout(dataRoot).runs, manifest = JSON.parse(await readFile(join(runs, 'demo-claude', 'manifest.json'), 'utf8'));
+    for (const [batch, model] of [['pending-a', 'model-a'], ['pending-b', 'model-b']]) {
+      await mkdir(join(runs, batch), { recursive: true });
+      await writeFile(join(runs, batch, 'manifest.json'), JSON.stringify({ ...manifest, id: batch, system: 'codex', model, effort: 'high',
+        harness: { ...manifest.harness, system: 'codex', model, effort: 'high' } }));
+    }
+    const formal = parseRoster({ schema: 'e3d-roster-v1', configurations: [{ system: 'codex', model: 'model-a', effort: 'high', ladder: 'default' },
+      { system: 'codex', model: 'model-b', effort: 'high', ladder: 'top' }] });
+    const collected = await collectRuns({ dataRoot, batches: ['demo-codex', 'demo-claude', 'pending-a', 'pending-b'] });
+    assert.deepEqual(collected.plans.filter(plan => plan.batch.startsWith('pending')).map(plan => [plan.system, plan.model, plan.effort, plan.tasks.length]),
+      [['codex', 'model-a', 'high', manifest.tasks.length], ['codex', 'model-b', 'high', manifest.tasks.length]]);
+    const board = buildLeaderboard(collected, { now: NOW, roster: formal });
+    const set = board.sets.find(item => item.id === collected.taskInfo.get(manifest.tasks[0].id).set);
+    assert.deepEqual(set.absent_configurations, ['codex / model-a / high', 'codex / model-b / high']);
+    const pair = pairOf(set, 'codex / model-a / high', 'codex / model-b / high');
+    assert.equal(pair.incomplete, 'unlisted_gaps');
+    assert.equal(set.pairwise.correction.comparisons, 1, 'the roster pair stays in m');
+    assert.equal(set.completeness.configurations.length, 2);
+    assert.ok(board.problems.some(problem => /lists codex \/ model-a \/ high, which no attempt in these batches ran \(a batch was prepared for it but wrote no result\.json\)/.test(problem)));
+
+    // A set no attempt reached at all is still listed, with its roster pairs incomplete.
+    const tasks = new Map([['p0-t2', { set: 'later', object: 'p0', variant: 't2' }], ['p1-t2', { set: 'later', object: 'p1', variant: 't2' }]]);
+    const plans = ['model-a', 'model-b'].map(model => ({ batch: 'later-' + model, system: 'codex', model, effort: 'high', tasks: [...tasks.keys()] }));
+    const empty = buildLeaderboard({ attempts: [], batches: [], problems: [], taskInfo: tasks, plans }, { now: NOW, roster: formal });
+    const later = empty.sets.find(item => item.id === 'later');
+    assert.ok(later, 'the set is listed');
+    assert.deepEqual([later.absent_configurations.length, later.completeness.expected_tasks, later.pairwise.correction.comparisons], [2, 2, 1]);
+    assert.equal(later.pairwise.pairs[0].holm.verdict, 'incomplete');
+    assert.ok(indexPage(empty).includes('later') && summaryMarkdown(empty).includes('later'));
+    // Without a roster nothing is assumed about a batch that never ran.
+    assert.equal(buildLeaderboard({ attempts: [], batches: [], problems: [], taskInfo: tasks, plans }, { now: NOW }).sets.length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 function deepIs(actual, expected) {
