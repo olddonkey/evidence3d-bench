@@ -483,9 +483,10 @@ export const pText = p => !finite(p) ? 'n/a' : p < 0.001 ? '< 0.001' : '= ' + p.
 
 export function holmSentence(row) {
   if (!row.holm) return '';
-  if (row.holm.verdict === 'incomplete') return ' It counts among the ' + row.holm.comparisons + ' pairs of Holm\'s correction for this table with p = 1.';
+  const pairs = row.holm.comparisons + (row.holm.comparisons === 1 ? ' pair' : ' pairs');
+  if (row.holm.verdict === 'incomplete') return ' It counts among the ' + pairs + ' of Holm\'s correction for this table with p = 1.';
   const after = SEPARATED.has(row.holm.verdict) ? 'still separated' : SEPARATED.has(row.verdict) ? 'no longer separated' : 'not separated';
-  return ' After Holm\'s correction over the ' + row.holm.comparisons + ' pairs of this table (adjusted p ' + pText(row.holm.p_adjusted) + '): ' + after + '.';
+  return ' After Holm\'s correction over the ' + pairs + ' of this table (adjusted p ' + pText(row.holm.p_adjusted) + '): ' + after + '.';
 }
 
 // For a set: pair -> a note when the same pair, in the table of every formal
@@ -928,17 +929,21 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
       if (!objectTasks.has(info.object)) objectTasks.set(info.object, []);
       objectTasks.get(info.object).push(task);
     }
-    // Every object owes both real variants; one with no task of a variant in
-    // these batches is a gap of every configuration, owed under a placeholder
-    // id (the task does not exist here to be named).
+    // The variants every object owes: in the real tier both real variants; in
+    // a main set the roster's required variants of the families its tasks
+    // belong to (none without required_variants). An object with no task of
+    // one in these batches is a gap of every configuration, owed under a
+    // placeholder id (the task does not exist here to be named).
+    const families = new Set([...ofSet.values()].map(task => variantFamily(task.variant)));
+    const owedVariants = realTier ? REAL_VARIANTS : (roster?.required_variants ?? []).filter(variant => families.has(variantFamily(variant)));
+    const owingObjects = new Set([...ofSet.values()].filter(task => owedVariants.some(variant => variantFamily(variant) === variantFamily(task.variant))).map(task => task.object));
     const kinds = new Set([...ofSet.values()].map(task => task.object + '|' + task.variant));
-    const uncovered = !realTier ? [] : [...objectTasks.keys()].sort().flatMap(object => REAL_VARIANTS.filter(variant => !kinds.has(object + '|' + variant)).map(variant => ({ object, variant })));
-    if (realTier) {
-      for (const { object, variant } of uncovered) expected.set(object + ' ' + variant + ' (no task in these batches)', { object, variant });
-      if (uncovered.length) {
-        problems.push('set ' + set + ' (real tier) has no task in these batches for ' + uncovered.length + ' object × variant' + (uncovered.length === 1 ? '' : 's') + ' (' +
-          firstFew(uncovered.map(({ object, variant }) => object + ' ' + variant)) + '): every formal configuration owes them, so its pairs get no verdict');
-      }
+    const uncovered = [...owingObjects].sort().flatMap(object => owedVariants.filter(variant => !kinds.has(object + '|' + variant)).map(variant => ({ object, variant })));
+    for (const { object, variant } of uncovered) expected.set(object + ' ' + variant + ' (no task in these batches)', { object, variant });
+    if (uncovered.length) {
+      problems.push('set ' + set + ' (' + (realTier ? 'real tier' : 'required variants ' + owedVariants.join(', ')) + ') has no task in these batches for ' +
+        uncovered.length + ' object × variant' + (uncovered.length === 1 ? '' : 's') + ' (' +
+        firstFew(uncovered.map(({ object, variant }) => object + ' ' + variant)) + '): every formal configuration owes them, so its pairs get no verdict');
     }
     const completed = new Map(realTier ? [...cells].map(([key, attempts]) => {
       const sampled = new Set(attempts.map(attempt => attempt.task_id)), kinds = new Set(attempts.map(attempt => attempt.object + '|' + attempt.variant));
@@ -1002,7 +1007,7 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
       if (records.some(record => record?.demoted)) return 'demoted';
       // The real tier's missing tasks only shrink its completed objects.
       if (!realTier && records.some(record => record?.missing.length)) return 'missing_tasks';
-      // An object without one of the real variants is everyone's gap, roster or not.
+      // An object without one of its owed variants is everyone's gap, roster or not.
       if (records.some(record => record?.unlisted.length) || uncovered.length) return 'unlisted_gaps';
       if (realTier && pair.objects < REAL_TIER_MIN_OBJECTS) return 'few_complete_objects';
       if (pair.objects < 2) return 'few_objects';

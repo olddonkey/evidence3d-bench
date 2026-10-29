@@ -523,3 +523,37 @@ test('real tier: an uncovered variant vetoes verdicts without a roster too; atte
   assert.throws(() => parseRoster({ schema: 'e3d-roster-v1', configurations: [{ system: 'codex', model: 'a', effort: 'high',
     missing_tasks: [{ task: 'o9 r4 (no task in these batches)', reason: 'trying to excuse a placeholder' }] }] }), /"o9 r4 \(no task in these batches\)" is not a task id/);
 });
+
+test('a main set owes every required variant of its own families, even one no batch contains', () => {
+  // 72 objects with t2 and t4 only, but the roster requires c1 as well.
+  const data = design(FOUR, { objects: 72, variants: ['t2', 't4'] });
+  const board = buildLeaderboard(data, { now: NOW, roster: roster({}, { required_variants: ['t2', 't4', 'c1', 'r2', 'r4'] }) });
+  const set = board.sets[0];
+  assert.equal(set.tier, 'main');
+  assert.equal(set.completeness.expected_tasks, 216);
+  assert.ok(board.problems.some(problem => /set test \(required variants t2, t4, c1\) has no task in these batches for 72 object × variants \(o0 c1, o1 c1, o10 c1, \.\.\.\): every formal configuration owes them/.test(problem)),
+    board.problems.join('\n'));
+  assert.ok(set.completeness.configurations.every(record => record.sampled === 144 && record.unlisted.length === 72 && record.unlisted.includes('o5 c1 (no task in these batches)')));
+  assert.ok(set.pairwise.pairs.length === 6 && set.pairwise.pairs.every(pair => pair.incomplete === 'unlisted_gaps' && pair.holm.verdict === 'incomplete'));
+  assert.equal(set.configurations.length, 4, 'an unlisted gap costs no rank');
+
+  // One object without its c1 task is the same gap, for that object only.
+  const one = design(FOUR, { objects: 12 });
+  one.attempts = one.attempts.filter(attempt => attempt.task_id !== 'o3-c1');
+  const partial = buildLeaderboard(one, { now: NOW, roster: roster({}, { required_variants: ['t2', 't4', 'c1'] }) });
+  assert.ok(partial.problems.some(problem => /has no task in these batches for 1 object × variant \(o3 c1\)/.test(problem)));
+  assert.ok(partial.sets[0].completeness.configurations.every(record => record.expected === 36 && deepIs(record.unlisted, ['o3 c1 (no task in these batches)'])));
+
+  // A set of other families owes none of them; without required_variants nothing is assumed.
+  const memory = buildLeaderboard(design(FOUR, { set: 'memory', variants: ['m2', 'm3'] }), { now: NOW, roster: roster({}, { required_variants: ['t2', 't4', 'c1'] }) });
+  assert.equal(memory.sets[0].completeness.expected_tasks, 0);
+  assert.ok(!memory.problems.some(problem => /no task in these batches/.test(problem)));
+  const loose = buildLeaderboard(data, { now: NOW, roster: roster() });
+  assert.equal(loose.sets[0].completeness.expected_tasks, 144);
+  assert.ok(!loose.problems.some(problem => /no task in these batches/.test(problem)));
+  assert.ok(loose.sets[0].pairwise.pairs.every(pair => pair.incomplete === null));
+});
+
+function deepIs(actual, expected) {
+  try { assert.deepEqual(actual, expected); return true; } catch { return false; }
+}

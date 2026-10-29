@@ -137,7 +137,7 @@ const verdictCell = pair => '<td class="' + (separated(pair.verdict) ? 'good' : 
 const holmCell = (pair, note = '') => !pair.holm ? '<td class="na">' + (pair.reference ? 'reference row' : 'not tested') + '</td>'
   : pair.holm.verdict === 'incomplete' ? '<td class="low" title="no verdict; counted among the ' + plural(pair.holm.comparisons, 'pair') + ' of this table with p = 1">incomplete' +
     '<small>in m with p = 1</small></td>'
-  : '<td class="' + (separated(pair.holm.verdict) ? 'good' : 'na') + '" title="Holm over the ' + pair.holm.comparisons + ' pairs of this table">' +
+  : '<td class="' + (separated(pair.holm.verdict) ? 'good' : 'na') + '" title="Holm over the ' + plural(pair.holm.comparisons, 'pair') + ' of this table">' +
     (separated(pair.holm.verdict) ? 'separated' : separated(pair.verdict) ? 'not separated<small>separated only uncorrected</small>' : 'not separated') +
     '<small>adj. p ' + esc(pText(pair.holm.p_adjusted)) + '</small>' + (note ? '<small class="low">' + esc(note) + '</small>' : '') + '</td>';
 const holmHead = correction => '<th title="Holm&rsquo;s step-down correction at family-wise 5% on the paired t p-value, over every pair of this table (an incomplete one with p = 1)">Holm' +

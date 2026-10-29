@@ -178,7 +178,13 @@ report never infers one.
   the set an attempt ran, a batch's manifest planned (run or not) or the
   roster lists as missing, restricted to `required_variants` when given (main
   sets only: a real-tier set owes all its tasks, every formal configuration ×
-  object × `r2`, `r4`). A planned task without a `truth.json` naming its
+  object × `r2`, `r4`). With `required_variants`, every object of a main set
+  owes each required variant of the families its tasks belong to (the test
+  set owes `t2`, `t4`, `c1`; a memory set owes none of them); an object with
+  no task of one in these batches is owed under a placeholder id
+  (`<object> c1 (no task in these batches)`, which no roster can list), so a
+  variant no batch ran is an unlisted gap of everyone, reported, and no pair
+  is decided. A planned task without a `truth.json` naming its
   object and variant cannot be placed in a set; it is reported as a data
   problem. Per roster configuration, `set.completeness.configurations[]` = `{ key,
   present, expected, sampled, missing: [{ task, reason }], unlisted,
