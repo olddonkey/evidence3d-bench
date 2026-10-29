@@ -567,8 +567,9 @@ function setTasks(set, inSet, taskInfo) {
 // tokens, cost, batches) counts every counted attempt.
 const REAL_TIER_FIGURES = ['score', 'variants', 'archetypes', 'ladder', 'evidence_deltas', 'conflict', 'memory', 'shape', 'detail', 'detail_categories',
   'probe_error', 'frame_error', 'scale_error_pct', 'time_curve'];
+const INTERVALS = new Set(['ci95', 't_ci95', 'detectable_range']);
 const withoutIntervals = value => Array.isArray(value) ? value.map(withoutIntervals) : value && typeof value === 'object'
-  ? Object.fromEntries(Object.entries(value).map(([name, item]) => [name, name === 'ci95' ? null : withoutIntervals(item)])) : value;
+  ? Object.fromEntries(Object.entries(value).map(([name, item]) => [name, INTERVALS.has(name) ? null : withoutIntervals(item)])) : value;
 
 // The tasks a main set asks of every formal configuration: all of them, or
 // those of the roster's required variants when it names them. (A real-tier set
@@ -761,10 +762,21 @@ export function varianceStatement(row) {
   return text;
 }
 
-function setVariance(ranked, cells, pairs, plannedObjects) {
-  const configurations = ranked.map(entry => configurationVariance(entry, cells.get(entry.key)));
+// `minObjects`: below it a row keeps its point figures but no interval or
+// range (the real tier's minimum; its cells hold complete objects only).
+function setVariance(ranked, cells, pairs, plannedObjects, { minObjects = 0 } = {}) {
+  const configurations = ranked.map(entry => {
+    const row = configurationVariance(entry, cells.get(entry.key));
+    return row.object_sd.objects < minObjects ? withoutIntervals(row) : row;
+  });
   const noise = new Map(configurations.map(item => [item.key, item.attempt_sd]));
-  const pairRows = pairs.map(pair => pairVariance(pair, cells.get(pair.a), cells.get(pair.b), noise.get(pair.a), noise.get(pair.b), plannedObjects));
+  const pairRows = pairs.map(pair => {
+    const row = pairVariance(pair, cells.get(pair.a), cells.get(pair.b), noise.get(pair.a), noise.get(pair.b), plannedObjects);
+    if (row.objects >= minObjects) return row;
+    const bare = withoutIntervals(row);
+    bare.statement = varianceStatement(bare);
+    return bare;
+  });
   // One sentence on where the noise is, from the medians across configurations and pairs.
   const all = pooledSD(ranked.flatMap(entry => [...taskScores(cells.get(entry.key)).values()].map(task => task.values)));
   const objectSD = median(configurations.map(item => item.object_sd.sd)), pairSD = median(pairRows.map(row => row.difference_sd.sd));
@@ -1050,8 +1062,10 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
             (pairs.length > formalPairs.length ? '; the ' + (pairs.length - formalPairs.length) + ' pairs with a reference row are not corrected.' : '.')
           : null,
       },
-      // Only pairs of configurations with counted attempts carry a paired SD.
-      variance: setVariance(ranked, cells, pairs.filter(pair => cells.has(pair.a) && cells.has(pair.b)), plannedObjects),
+      // Only pairs of configurations with counted attempts carry a paired SD;
+      // in the real tier, on complete objects only (pairs already are).
+      variance: setVariance(ranked, realTier ? new Map([...cells].map(([key, attempts]) => [key, attempts.filter(attempt => completedOf(key).has(attempt.object))])) : cells,
+        pairs.filter(pair => cells.has(pair.a) && cells.has(pair.b)), plannedObjects, { minObjects: realTier ? REAL_TIER_MIN_OBJECTS : 0 }),
     });
     // Ranked rows, then formal rows without a rank (demoted, or in the real
     // tier without a complete object), then reference rows.

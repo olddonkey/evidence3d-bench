@@ -33,7 +33,7 @@ const holm = (pair, note = '') => !pair.holm ? (pair.reference ? 'reference row'
   : pair.holm.verdict === 'incomplete' ? 'incomplete (in m with p = 1)'
     : (separated(pair.holm.verdict) ? 'separated' : 'not separated') + ' (adj. p ' + pText(pair.holm.p_adjusted) + ')' + (note ? '; ' + note : '');
 const correctionLine = correction => correction.comparisons
-  ? correction.separated + ' of ' + correction.comparisons + ' pairs separated after Holm (' + correction.separated_uncorrected + ' uncorrected' +
+  ? correction.separated + ' of ' + plural(correction.comparisons, 'pair') + ' separated after Holm (' + correction.separated_uncorrected + ' uncorrected' +
     (correction.incomplete ? '; ' + correction.incomplete + ' incomplete, in m with p = 1' : '') + ')' : 'no pair';
 const effortText = effort => effort ?? 'no flag';
 
@@ -75,7 +75,7 @@ function completenessMarkdown(set) {
   if (!info) return [];
   if (!info.expected_tasks) return ['Completeness: the roster\'s required variants (' + (info.required_variants ?? []).join(', ') + ') ask nothing of this set.', ''];
   const status = record => record.demoted ? 'demoted: ' + record.demoted : record.unlisted.length ? 'gaps not in the roster (data problem; no verdict)'
-    : record.present && record.complete_objects === 0 ? 'no complete object (no score, no rank; pairs incomplete)'
+    : record.complete_objects === 0 ? 'no complete object (no score, no rank; pairs incomplete)'
     : record.missing.length ? (set.tier === 'real' ? 'missing tasks (ranked; pairs use the objects both completed)' : 'missing tasks (ranked; pairs incomplete)') : 'complete';
   const lines = ['#### Completeness', '', 'Roster configurations against the ' + plural(info.expected_tasks, 'task') + ' this set asks of each' +
     (info.required_variants ? ' (variants ' + info.required_variants.join(', ') + ')' : '') + '.', '',

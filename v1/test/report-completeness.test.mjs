@@ -422,3 +422,42 @@ test('a ladder whose only pair has a demoted or absent member still shows it; th
   assert.match(indexPage(real), /no complete object<\/span><small>no object with every r2 and r4 task: no score, no rank/);
   assert.match(summaryMarkdown(real), /no complete object \(no score, no rank; pairs incomplete\)/);
 });
+
+test('real tier: variance rows and Student-t intervals follow the complete-object rules too', () => {
+  const gaps = ['o0-r4', 'o4-r4', 'o9-r4'];
+  const board = buildLeaderboard(design(FOUR, { set: 'real', variants: ['r2', 'r4'], objects: 10, skip: { [OPUS]: gaps } }), { now: NOW,
+    roster: roster({ [OPUS]: { missing_tasks: gaps.map(task => ({ task, reason: 'photographs withdrawn' })) } }) });
+  const set = board.sets[0], opus = board.entries.find(entry => entry.key === OPUS);
+  // Seven complete objects: the evidence delta keeps no interval of either kind.
+  assert.ok(opus.evidence_deltas['r4-r2'], 'r4 - r2 is reported');
+  assert.deepEqual([opus.evidence_deltas['r4-r2'].ci95 ?? null, opus.evidence_deltas['r4-r2'].t_ci95 ?? null], [null, null]);
+  assert.doesNotMatch(summaryMarkdown(board).split('\n').filter(line => line.includes(OPUS) && line.includes('t [')).join('\n'), /t \[/);
+  const row = set.variance.configurations.find(item => item.key === OPUS);
+  assert.deepEqual([row.object_sd.objects, row.object_sd.ci95, row.attempt_sd.ci95], [7, null, null]);
+  const astraRow = set.variance.configurations.find(item => item.key === ASTRA);
+  assert.ok(astraRow.object_sd.ci95 && astraRow.object_sd.objects === 10);
+  const pairRow = set.variance.pairs.find(item => [item.a, item.b].includes(OPUS) && [item.a, item.b].includes(ASTRA));
+  assert.deepEqual([pairRow.objects, pairRow.difference_sd.ci95, pairRow.detectable_range], [7, null, null]);
+  assert.doesNotMatch(pairRow.statement, /95% range/);
+  // No complete object (only r2 ran): no object SD at all.
+  const none = buildLeaderboard(design(FOUR, { set: 'real', variants: ['r2'], objects: 10 }), { now: NOW, roster: roster() }).sets[0];
+  assert.ok(none.variance.configurations.every(item => item.object_sd.objects === 0 && item.object_sd.sd === null && item.object_sd.ci95 === null));
+});
+
+test('a ladder family whose members are all absent is shown; so is a configuration that never ran a real task', () => {
+  // Only the default-effort configurations ran: the top family is one incomplete pair of two absent members.
+  const board = buildLeaderboard(design([FOUR[0], FOUR[2]]), { now: NOW, roster: roster() });
+  const top = board.sets[0].ladders.find(ladder => ladder.id === 'top');
+  assert.deepEqual([top.entries.length, top.pairwise.pairs.length, top.pairwise.pairs[0].incomplete], [0, 1, 'unlisted_gaps']);
+  const page = indexPage(board);
+  assert.match(page, /Each client’s top effort <small>0 of 1 pair separated after Holm \(0 uncorrected; 1 incomplete, in m with p = 1\)<\/small><\/h4><p class="muted">No configuration of this set is on this ladder with a counted attempt/);
+  assert.match(page, /<details class="more" open><summary>All 1 pair of this ladder/);
+  // Real tier: Opus max never ran, and the roster lists all its tasks as missing.
+  const all = Array.from({ length: 10 }, (_, o) => ['o' + o + '-r2', 'o' + o + '-r4']).flat();
+  const real = buildLeaderboard(design([FOUR[0], FOUR[1], FOUR[2]], { set: 'real', variants: ['r2', 'r4'], objects: 10 }), { now: NOW,
+    roster: roster({ [OPUS_MAX]: { missing_tasks: all.map(task => ({ task, reason: 'not run' })) } }) });
+  const record = real.sets[0].completeness.configurations.find(item => item.key === OPUS_MAX);
+  assert.deepEqual([record.present, record.complete_objects, record.unlisted.length], [false, 0, 0]);
+  assert.match(indexPage(real), /no complete object<\/span>/);
+  assert.match(summaryMarkdown(real), new RegExp(OPUS_MAX.replace(/[/]/g, '\\/') + '.*no complete object'));
+});

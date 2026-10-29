@@ -135,7 +135,7 @@ const verdictCell = pair => '<td class="' + (separated(pair.verdict) ? 'good' : 
 // The corrected verdict: separated or not after Holm within the pair's family;
 // `note` says when the table of all pairs corrects the same pair the other way.
 const holmCell = (pair, note = '') => !pair.holm ? '<td class="na">' + (pair.reference ? 'reference row' : 'not tested') + '</td>'
-  : pair.holm.verdict === 'incomplete' ? '<td class="low" title="no verdict; counted among the ' + pair.holm.comparisons + ' pairs of this table with p = 1">incomplete' +
+  : pair.holm.verdict === 'incomplete' ? '<td class="low" title="no verdict; counted among the ' + plural(pair.holm.comparisons, 'pair') + ' of this table with p = 1">incomplete' +
     '<small>in m with p = 1</small></td>'
   : '<td class="' + (separated(pair.holm.verdict) ? 'good' : 'na') + '" title="Holm over the ' + pair.holm.comparisons + ' pairs of this table">' +
     (separated(pair.holm.verdict) ? 'separated' : separated(pair.verdict) ? 'not separated<small>separated only uncorrected</small>' : 'not separated') +
@@ -143,7 +143,7 @@ const holmCell = (pair, note = '') => !pair.holm ? '<td class="na">' + (pair.ref
 const holmHead = correction => '<th title="Holm&rsquo;s step-down correction at family-wise 5% on the paired t p-value, over every pair of this table (an incomplete one with p = 1)">Holm' +
   '<small>m = ' + correction.comparisons + '</small></th>';
 const correctionLine = correction => correction.comparisons
-  ? correction.separated + ' of ' + correction.comparisons + ' pairs separated after Holm (' + correction.separated_uncorrected + ' uncorrected' +
+  ? correction.separated + ' of ' + plural(correction.comparisons, 'pair') + ' separated after Holm (' + correction.separated_uncorrected + ' uncorrected' +
     (correction.incomplete ? '; ' + correction.incomplete + ' incomplete, in m with p = 1' : '') + ')' : 'no pair';
 
 function pairwiseSection(set) {
@@ -207,7 +207,17 @@ function laddersSection(board, set) {
     const entries = ladder.entries.map(item => byKey.get(item.key)), ranks = new Map(ladder.entries.map(item => [item.key, item.rank]));
     const missing = ladder.missing.length ? '<p class="legend low">In the roster for this ladder but with no counted attempt in this set: ' + ladder.missing.map(esc).join(', ') +
       '; ' + (ladder.missing.length === 1 ? 'its pairs stay' : 'their pairs stay') + ' in this ladder&rsquo;s family as incomplete.</p>' : '';
-    if (!entries.length) return '<h4>' + esc(ladder.label) + '</h4><p class="muted">No configuration of this set is on this ladder.</p>' + missing;
+    // The folded table lists every pair of the frozen family; it is needed even
+    // for one pair when that pair is not a gap between two ranked rungs (a
+    // demoted or absent member), and when every member is absent.
+    const adjacent = entries.filter((entry, index) => ranks.get(entry.key) !== null && index + 1 < entries.length && ranks.get(entries[index + 1].key) !== null).length;
+    const count = ladder.pairwise.pairs.length;
+    const all = count > 1 || count > adjacent ? '<details class="more"' + (count > adjacent && count === 1 ? ' open' : '') + '><summary>All ' + plural(count, 'pair') +
+      ' of this ladder</summary>' + ladderPairs(ladder.pairwise.pairs, ladder.pairwise.correction, { note }) + '</details>' : '';
+    if (!entries.length) {
+      return '<h4>' + esc(ladder.label) + (count ? ' <small>' + esc(correctionLine(ladder.pairwise.correction)) + '</small>' : '') + '</h4>' +
+        '<p class="muted">No configuration of this set is on this ladder with a counted attempt.</p>' + missing + all;
+    }
     // Each rung against the one below it: the gap a reader asks about first.
     const pairs = new Map(ladder.pairwise.pairs.map(pair => [pair.a + '|' + pair.b, pair]));
     const next = (entry, index) => {
@@ -222,13 +232,6 @@ function laddersSection(board, set) {
       const index = entries.indexOf(entry);
       return [statCell(entry.score), '<td class="num">' + percent(entry.success.rate) + '<small>' + entry.success.valid + ' / ' + entry.success.attempts + ' att.</small></td>', next(entry, index)];
     }, { rankOf: entry => ranks.get(entry.key) });
-    // The folded table lists every pair of the frozen family; it is needed even
-    // for one pair when that pair is not a gap between two ranked rungs (a
-    // demoted or absent member).
-    const adjacent = entries.filter((entry, index) => ranks.get(entry.key) !== null && index + 1 < entries.length && ranks.get(entries[index + 1].key) !== null).length;
-    const count = ladder.pairwise.pairs.length;
-    const all = count > 1 || count > adjacent ? '<details class="more"' + (count > adjacent && count === 1 ? ' open' : '') + '><summary>All ' + plural(count, 'pair') +
-      ' of this ladder</summary>' + ladderPairs(ladder.pairwise.pairs, ladder.pairwise.correction, { note }) + '</details>' : '';
     return '<h4>' + esc(ladder.label) + ' <small>' + plural(entries.length, 'configuration') + ' · ' + esc(correctionLine(ladder.pairwise.correction)) + '</small></h4>' +
       table + missing + all;
   });
@@ -257,7 +260,7 @@ function completenessSection(set) {
       record.missing.map(gap => '<li><code>' + esc(gap.task) + '</code>: ' + esc(gap.reason) + '</li>').join('') + '</ul></details>' : '0';
     const status = record.demoted ? '<span class="na">demoted</span><small>' + esc(record.demoted) + '</small>'
       : record.unlisted.length ? '<span class="bad">gaps not in the roster</span><small>' + plural(record.unlisted.length, 'task') + ': a data problem; no verdict</small>'
-      : record.present && record.complete_objects === 0 ? '<span class="na">no complete object</span><small>no object with every r2 and r4 task: no score, no rank; its pairs are incomplete</small>'
+      : record.complete_objects === 0 ? '<span class="na">no complete object</span><small>no object with every r2 and r4 task: no score, no rank; its pairs are incomplete</small>'
         : record.missing.length ? '<span class="low">missing tasks</span><small>' + (set.tier === 'real' ? 'ranked; its pairs use the objects both completed' : 'ranked; its pairs are incomplete') + '</small>'
           : '<span class="good">complete</span>';
     return '<tr><td>' + esc(record.key) + (record.present ? '' : '<small>no counted attempt in this set</small>') + '</td><td class="num">' + record.sampled + ' / ' + record.expected +

@@ -212,10 +212,12 @@ report never infers one.
   task of the object in the set, `r2` and `r4` both among them (a set with
   no `r4` task at all, say, has no complete object, and says so).
   - A configuration's own figures (score, shape, detail, per variant and
-    archetype, evidence deltas, diagnostics, the score-over-time curve) use
+    archetype, evidence deltas, diagnostics, the score-over-time curve, its
+    and its pairs' rows in *Where the noise is*) use
     its complete objects only (`entry.real_tier = { complete_objects,
     sampled_objects, intervals }`); below `REAL_TIER_MIN_OBJECTS` (8) they are
-    point estimates without an interval, and with none it has no score and
+    point estimates without an interval (bootstrap, Student-t or SD range),
+    and with none it has no score and
     no rank (shown as –), but stays in every family. Bookkeeping (attempts,
     success, statuses, time, tokens, cost, batches and their provenance)
     counts every counted attempt.
