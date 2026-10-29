@@ -559,13 +559,15 @@ function setTasks(set, inSet, taskInfo) {
   return tasks;
 }
 
-// The tasks a set asks of every formal configuration: all of them, or those of
-// the roster's required variants when it names them.
+// The tasks a main set asks of every formal configuration: all of them, or
+// those of the roster's required variants when it names them. (A real-tier set
+// owes all of its tasks.)
 const owedTasks = (tasks, roster) => roster?.required_variants ? new Map([...tasks].filter(([, info]) => roster.required_variants.includes(info.variant))) : tasks;
 
 // One roster configuration against what the set asks: tasks with a counted
 // sample, the gaps the roster lists (with its reasons) and those it does not.
-function completenessOf(item, attempts, expected) {
+// A demotion applies only where it can (`demotable`: not in the real tier).
+function completenessOf(item, attempts, expected, { demotable = true } = {}) {
   const sampled = new Set(attempts.map(attempt => attempt.task_id)), listed = new Map(item.missing_tasks.map(gap => [gap.task, gap.reason]));
   const gaps = [...expected.keys()].filter(task => !sampled.has(task)).sort();
   return {
@@ -573,7 +575,7 @@ function completenessOf(item, attempts, expected) {
     missing: gaps.filter(task => listed.has(task)).map(task => ({ task, reason: listed.get(task) })),
     unlisted: gaps.filter(task => !listed.has(task)),
     listed_but_sampled: [...listed.keys()].filter(task => expected.has(task) && sampled.has(task)).sort(),
-    demoted: item.demoted,
+    demoted: demotable ? item.demoted : null,
   };
 }
 
@@ -874,15 +876,21 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
     const categoryIds = detailCategories(counted);
     const ranked = [...cells].map(([key, attempts]) => cellEntry(key, set, attempts, seed, { deltaPairs, archetypes: archetypeIds, categories: categoryIds }));
     ranked.sort((a, b) => (b.score.mean ?? -Infinity) - (a.score.mean ?? -Infinity) || a.key.localeCompare(b.key));
+    // The real tier: a set of real-building tasks only (docs/V1-ROUND4-PLAN.md
+    // section 3). Its own completeness rule replaces the main sets' 5 % demotion
+    // and their no verdict on listed gaps, and it owes every one of its tasks.
+    const ofSet = setTasks(set, inSet, collected.taskInfo);
+    const realTier = ofSet.size > 0 && [...ofSet.values()].every(task => variantFamily(task.variant) === 'real');
+    const expected = realTier ? ofSet : owedTasks(ofSet, roster);
     // Formal configurations are ranked; reference rows (not in the roster) and
-    // demoted ones keep their place in score order for the pairwise orientation
-    // but get no rank.
+    // demoted ones (main sets only) keep their place in score order for the
+    // pairwise orientation but get no rank.
     const placement = roster ? null : inferLadders(ranked.map(({ key, system, model, effort }) => ({ key, system, model, effort })));
     let rank = 0;
     for (const entry of ranked) {
       const listed = roster?.keys.get(entry.key);
       entry.reference = roster ? !listed : false;
-      entry.demoted = listed?.demoted ?? null;
+      entry.demoted = realTier ? null : listed?.demoted ?? null;
       entry.ladders = roster ? listed?.ladders ?? [] : placement.ladders.get(entry.key);
       entry.rank = entry.reference || entry.demoted ? null : ++rank;
     }
@@ -899,21 +907,17 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
     const unranked = [...new Set(inSet.filter(attempt => attempt.excluded).map(cellKey))].filter(key => !cells.has(key)).sort()
       .map(key => ({ key, excluded_attempts: inSet.filter(attempt => cellKey(attempt) === key).length }));
 
-    // What the set asks of every formal configuration, and the real tier's
-    // rule: a set of real-building tasks only (docs/V1-ROUND4-PLAN.md section 3).
-    const ofSet = setTasks(set, inSet, collected.taskInfo), expected = owedTasks(ofSet, roster);
-    const realTier = ofSet.size > 0 && [...ofSet.values()].every(task => variantFamily(task.variant) === 'real');
     // With a roster the families are frozen: once any roster configuration ran
     // in this set, every roster configuration belongs to it, present or not.
     const frozen = Boolean(roster) && ranked.some(entry => !entry.reference);
-    const completeness = frozen ? roster.configurations.map(item => completenessOf(item, cells.get(item.key) ?? [], expected)) : [];
+    const completeness = frozen ? roster.configurations.map(item => completenessOf(item, cells.get(item.key) ?? [], expected, { demotable: !realTier })) : [];
     const byKey = new Map(completeness.map(record => [record.key, record]));
     for (const record of completeness) checkCompleteness(record, { set, realTier, roster, problems });
     const absent = frozen ? roster.configurations.filter(item => !cells.has(item.key)).map(item => item.key) : [];
     const order = [...ranked.map(entry => entry.key), ...absent];
     const isReference = key => Boolean(roster) && !roster.keys.has(key);
     // Real tier: per configuration, the objects it completed (every task of the
-    // object in the set sampled, whatever the roster requires).
+    // object in the set sampled).
     const objectTasks = new Map();
     for (const [task, info] of ofSet) {
       if (!objectTasks.has(info.object)) objectTasks.set(info.object, []);
@@ -948,7 +952,8 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
         if (both) pair.complete_objects = both.size;
         const reason = incompleteReason(pair);
         pair.incomplete = null;
-        if (reason) makeIncomplete(pair, reason, { intervals: reason !== 'few_complete_objects' });
+        // The real tier gives no interval below its object minimum, whatever the reason.
+        if (reason) makeIncomplete(pair, reason, { intervals: !(realTier && pair.objects < REAL_TIER_MIN_OBJECTS) });
         pairs.push(pair);
       }
     }
@@ -983,7 +988,7 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
       absent_configurations: absent,
       tier: realTier ? 'real' : 'main',
       // Per roster configuration, what the set asked of it and what it lacks (null without a roster).
-      completeness: frozen ? { expected_tasks: expected.size, required_variants: roster.required_variants, missing_share_limit: realTier ? null : MISSING_SHARE_LIMIT,
+      completeness: frozen ? { expected_tasks: expected.size, required_variants: realTier ? null : roster.required_variants, missing_share_limit: realTier ? null : MISSING_SHARE_LIMIT,
         configurations: completeness } : null,
       objects: new Set(inSet.map(attempt => attempt.object)).size,
       variants: VARIANT_ORDER.filter(variant => counted.some(attempt => attempt.variant === variant)),

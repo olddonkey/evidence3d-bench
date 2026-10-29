@@ -243,14 +243,25 @@ test('real tier: compared on the objects both completed, at least 8 of them; mis
   const unlisted = buildLeaderboard(design(FOUR, { ...real, skip: { [OPUS]: ['o0-r4'] } }), { now: NOW, roster: roster() });
   assert.ok(unlisted.problems.some(problem => /set real: claude-code \/ opus \/ high has no counted sample on 1 task that the roster does not list/.test(problem)));
   assert.equal(pairOf(unlisted.sets[0], ASTRA, OPUS).incomplete, 'unlisted_gaps');
-  // Required variants that leave the real set nothing to owe (Round 3's roster
-  // names the test set's t2, t4, c1) change nothing of the real tier's rule.
-  const unowed = buildLeaderboard(design(FOUR, { ...real, skip: { [OPUS]: gaps } }), { now: NOW, roster: roster({}, { required_variants: ['t2', 't4', 'c1'] }) });
-  const owedNothing = unowed.sets[0];
-  assert.deepEqual([owedNothing.tier, owedNothing.completeness.expected_tasks], ['real', 0]);
-  assert.ok(!unowed.problems.some(problem => /does not list as missing/.test(problem)));
-  assert.deepEqual([pairOf(owedNothing, ASTRA, OPUS).complete_objects, pairOf(owedNothing, ASTRA, OPUS).incomplete], [9, null]);
-  assert.match(indexPage(unowed), /required variants \(t2, t4, c1\) ask nothing of this set/);
+  // The real tier owes every one of its tasks, whatever required_variants says
+  // (Round 3's roster names the test set's t2, t4, c1).
+  const required = roster({}, { required_variants: ['t2', 't4', 'c1'] });
+  const owedAll = buildLeaderboard(design(FOUR, { ...real, skip: { [OPUS]: ['o0-r4'] } }), { now: NOW, roster: required });
+  assert.deepEqual([owedAll.sets[0].completeness.expected_tasks, owedAll.sets[0].completeness.required_variants], [24, null]);
+  assert.ok(owedAll.problems.some(problem => /set real: claude-code \/ opus \/ high has no counted sample on 1 task that the roster does not list/.test(problem)));
+  // An unlisted gap below 8 complete objects: no verdict and no interval either.
+  const unlistedFew = buildLeaderboard(design(FOUR, { ...real, objects: 10, skip: { [OPUS]: ['o0-r4', 'o1-r4', 'o2-r2', 'o3-r4', 'o4-r2'] } }), { now: NOW, roster: roster() }).sets[0];
+  const gap = pairOf(unlistedFew, ASTRA, OPUS);
+  assert.deepEqual([gap.complete_objects, gap.incomplete, gap.ci95, gap.t_ci95], [5, 'unlisted_gaps', null, null]);
+  // A main-set demotion does not reach the real tier: ranked, judged on complete objects.
+  const demoted = buildLeaderboard(design(FOUR, { ...real, objects: 10 }), { now: NOW, roster: roster({ [OPUS]: { demoted: 'missed 30 of 216 main tasks' } }) });
+  const tier = demoted.sets[0];
+  assert.ok(Number.isInteger(demoted.entries.find(entry => entry.key === OPUS).rank));
+  assert.equal(demoted.entries.find(entry => entry.key === OPUS).demoted, null);
+  assert.deepEqual(tier.demoted_configurations, []);
+  assert.equal(tier.completeness.configurations.find(item => item.key === OPUS).demoted, null);
+  assert.ok(tier.pairwise.pairs.every(pair => pair.verdict !== 'incomplete' && pair.complete_objects === 10), 'no pair incomplete');
+  assert.ok(!demoted.problems.some(problem => /demotes/.test(problem)));
 });
 const finiteP = value => typeof value === 'number' && Number.isFinite(value);
 
@@ -262,6 +273,11 @@ test('the page and summary.md show incomplete pairs, the demoted row and the com
   for (const text of ['incomplete', '<h4>Demoted</h4>', 'Completeness', 'missed 2 of 36 tasks', 'usage limit', 'in m with p = 1']) assert.ok(page.includes(text), 'index.html has ' + text);
   for (const text of ['incomplete', 'Completeness', '| dem |', 'missed 2 of 36 tasks', 'p = 1']) assert.ok(summary.includes(text), 'summary.md has ' + text);
   assert.ok(FAMILY_ALPHA === 0.05);
+  // A main set of variants the roster does not require owes nothing.
+  const memory = buildLeaderboard(design(FOUR, { set: 'memory', variants: ['m2', 'm3'] }), { now: NOW, roster: roster({}, { required_variants: ['t2', 't4', 'c1'] }) });
+  assert.equal(memory.sets[0].completeness.expected_tasks, 0);
+  assert.match(indexPage(memory), /required variants \(t2, t4, c1\) ask nothing of this set/);
+  assert.match(summaryMarkdown(memory), /required variants \(t2, t4, c1\) ask nothing of this set/);
 });
 
 test('collectRuns places planned and roster-listed tasks in their sets, run or not', async () => {

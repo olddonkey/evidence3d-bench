@@ -150,7 +150,8 @@ node v1/cli.mjs report --batches A,B,C --out .local/v1/reports/NAME --roster v1/
   Astra, gpt-6.1-sol and Opus). It was written after that round's data, to
   re-report it; it is not a pre-registered decision. It requires `t2`, `t4`
   and `c1` (the test set's three-variant headline: `t1` and `t3` were run by
-  some configurations only), so the memory and real sets owe nothing.
+  some configurations only), so the memory set owes nothing; the real set,
+  a real tier, owes all its tasks.
 
 Without a roster every configuration is formal and the ladders are inferred
 (`inferLadders`, notes in `set.ladder_notes`): `default` is a run without an
@@ -174,7 +175,9 @@ report never infers one.
 
 - **Owed tasks** of a set (`set.completeness.expected_tasks`): every task of
   the set an attempt ran, a batch's manifest planned (run or not) or the
-  roster lists as missing, restricted to `required_variants` when given.
+  roster lists as missing, restricted to `required_variants` when given (main
+  sets only: a real-tier set owes all its tasks, every formal configuration ×
+  object × `r2`, `r4`).
   Per roster configuration, `set.completeness.configurations[]` = `{ key,
   present, expected, sampled, missing: [{ task, reason }], unlisted,
   listed_but_sampled, demoted }`, shown on the page and in `summary.md` as the
@@ -182,9 +185,10 @@ report never infers one.
 - **Unlisted gap**: an owed task without a counted sample that the roster
   does not list (still running, or a data problem). Reported as a data
   problem; the configuration keeps its rank but its pairs get no verdict.
-- **Main sets**: a formal configuration whose listed missing tasks exceed
-  `MISSING_SHARE_LIMIT` (5 %; 10 of 216 is within it) of the owed tasks must
-  be `demoted`, or the roster is refused (`buildLeaderboard` throws).
+- **Main sets** (not the real tier): a formal configuration whose listed
+  missing tasks exceed `MISSING_SHARE_LIMIT` (5 %; 10 of 216 is within it) of
+  the owed tasks must be `demoted`, or the roster is refused
+  (`buildLeaderboard` throws).
   Demoted: `entry.rank: null`, `entry.demoted` = the reason,
   `set.demoted_configurations`, listed after the ranked rows; it stays in the
   table of all pairs and on its ladders. Within the limit it stays ranked and
@@ -206,8 +210,13 @@ report never infers one.
   is compared only on the objects both configurations completed (every task
   of the object in the set, `pair.complete_objects`), and needs at least
   `REAL_TIER_MIN_OBJECTS` (8) of them; below that it is incomplete with no
-  intervals. Listed missing tasks only shrink those objects (no veto) and
-  never require demotion.
+  intervals, whatever the reason. Listed missing tasks only shrink those
+  objects (no veto) and never require demotion, and a roster demotion does not
+  apply there: the configuration is ranked and judged on its complete objects.
+- **Which reports take the roster**: only the main-set report and the
+  real-tier report. The extras and regression reports read other batches;
+  with `--roster` they would list absent configurations and report gaps that
+  are not gaps.
 
 ## Multiple comparisons (Holm)
 
