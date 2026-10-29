@@ -209,15 +209,19 @@ report never infers one.
   without a roster too. The gap and its intervals are kept where they exist.
 - **Real tier** (`set.tier: 'real'`, a set of `r2` / `r4` tasks only). A
   configuration completed an object when it has a counted sample on every
-  task of the object in the set, `r2` and `r4` both among them (a set with
-  no `r4` task at all, say, has no complete object, and says so).
+  task of the object in the set, `r2` and `r4` both among them. An object
+  with no task of one of them in these batches is owed by every formal
+  configuration under a placeholder id (`<object> r4 (no task in these
+  batches)`): an unlisted gap of everyone, reported, so no pair is decided.
   - A configuration's own figures (score, shape, detail, per variant and
     archetype, evidence deltas, diagnostics, the score-over-time curve, its
     and its pairs' rows in *Where the noise is*) use
     its complete objects only (`entry.real_tier = { complete_objects,
-    sampled_objects, intervals }`); below `REAL_TIER_MIN_OBJECTS` (8) they are
-    point estimates without an interval (bootstrap, Student-t or SD range),
-    and with none it has no score and
+    sampled_objects, intervals }`); a summary resting on fewer than
+    `REAL_TIER_MIN_OBJECTS` (8) objects (the configuration's, or its own: an
+    archetype row, a curve point) is a point estimate without an interval
+    (bootstrap, Student-t or SD range), the set's pooled attempt SD likewise,
+    and with no complete object a configuration has no score and
     no rank (shown as –), but stays in every family. Bookkeeping (attempts,
     success, statuses, time, tokens, cost, batches and their provenance)
     counts every counted attempt.

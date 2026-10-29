@@ -562,14 +562,23 @@ function setTasks(set, inSet, taskInfo) {
 
 // A real-tier configuration's own figures (docs/V1-ROUND4-PLAN.md section 3)
 // use its complete objects only: every per-object summary of cellEntry below,
-// recomputed on those objects, without intervals below REAL_TIER_MIN_OBJECTS
-// and empty without one. Bookkeeping (attempts, success, statuses, time,
+// recomputed on those objects, each without intervals when it rests on fewer
+// than REAL_TIER_MIN_OBJECTS objects (an archetype row of five objects, say),
+// and empty without a complete object. Bookkeeping (attempts, success, statuses, time,
 // tokens, cost, batches) counts every counted attempt.
 const REAL_TIER_FIGURES = ['score', 'variants', 'archetypes', 'ladder', 'evidence_deltas', 'conflict', 'memory', 'shape', 'detail', 'detail_categories',
   'probe_error', 'frame_error', 'scale_error_pct', 'time_curve'];
 const INTERVALS = new Set(['ci95', 't_ci95', 'detectable_range']);
 const withoutIntervals = value => Array.isArray(value) ? value.map(withoutIntervals) : value && typeof value === 'object'
   ? Object.fromEntries(Object.entries(value).map(([name, item]) => [name, INTERVALS.has(name) ? null : withoutIntervals(item)])) : value;
+// The same per summary: one that records its `objects` is judged on them, one
+// that does not on those of the summary around it.
+const gateIntervals = (value, objects) => {
+  if (Array.isArray(value)) return value.map(item => gateIntervals(item, objects));
+  if (!value || typeof value !== 'object') return value;
+  const own = finite(value.objects) ? value.objects : objects;
+  return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, INTERVALS.has(name) && own < REAL_TIER_MIN_OBJECTS ? null : gateIntervals(item, own)]));
+};
 
 // The tasks a main set asks of every formal configuration: all of them, or
 // those of the roster's required variants when it names them. (A real-tier set
@@ -779,6 +788,7 @@ function setVariance(ranked, cells, pairs, plannedObjects, { minObjects = 0 } = 
   });
   // One sentence on where the noise is, from the medians across configurations and pairs.
   const all = pooledSD(ranked.flatMap(entry => [...taskScores(cells.get(entry.key)).values()].map(task => task.values)));
+  const pooledObjects = new Set(ranked.flatMap(entry => cells.get(entry.key).map(attempt => attempt.object))).size;
   const objectSD = median(configurations.map(item => item.object_sd.sd)), pairSD = median(pairRows.map(row => row.difference_sd.sd));
   const parts = [];
   if (finite(objectSD)) parts.push('scores of one configuration spread between objects with SD ' + fixed(objectSD) + ' (median over configurations)');
@@ -788,7 +798,8 @@ function setVariance(ranked, cells, pairs, plannedObjects, { minObjects = 0 } = 
   const repeats = finite(all.sd) ? '' : ' No task was run more than once, so the noise between attempts cannot be separated from the rest: it is inside every number above.';
   return {
     planned_objects: plannedObjects, little_data_df: LITTLE_DATA_DF,
-    attempt_sd_pooled: sdEntry(all.sd, all.df, { tasks: all.groups, basis: 'all configurations of the set pooled' }),
+    attempt_sd_pooled: (pooled => pooledObjects < minObjects ? withoutIntervals(pooled) : pooled)(sdEntry(all.sd, all.df, { tasks: all.groups, objects: pooledObjects,
+      basis: 'all configurations of the set pooled' })),
     configurations, pairs: pairRows,
     summary: parts.length ? 'In this set, ' + parts.join(', ') + '.' + repeats : null,
   };
@@ -902,7 +913,7 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
     // and their no verdict on listed gaps, and it owes every one of its tasks.
     const ofSet = setTasks(set, inSet, collected.taskInfo);
     const realTier = ofSet.size > 0 && [...ofSet.values()].every(task => variantFamily(task.variant) === 'real');
-    const expected = realTier ? ofSet : owedTasks(ofSet, roster);
+    const expected = realTier ? new Map(ofSet) : owedTasks(ofSet, roster);
     // Real tier: the objects a configuration completed, every task of the
     // object in the set sampled and both real variants (r2 and r4) among them.
     const objectTasks = new Map();
@@ -910,9 +921,17 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
       if (!objectTasks.has(info.object)) objectTasks.set(info.object, []);
       objectTasks.get(info.object).push(task);
     }
+    // Every object owes both real variants; one with no task of a variant in
+    // these batches is a gap of every configuration, owed under a placeholder
+    // id (the task does not exist here to be named).
     if (realTier) {
-      const lacking = REAL_VARIANTS.filter(variant => ![...ofSet.values()].some(task => task.variant === variant));
-      if (lacking.length) problems.push('set ' + set + ' (real tier) has no ' + lacking.join(' or ') + ' task in these batches: no object is complete, so no pair is decided');
+      const kinds = new Set([...ofSet.values()].map(task => task.object + '|' + task.variant));
+      const uncovered = [...objectTasks.keys()].sort().flatMap(object => REAL_VARIANTS.filter(variant => !kinds.has(object + '|' + variant)).map(variant => ({ object, variant })));
+      for (const { object, variant } of uncovered) expected.set(object + ' ' + variant + ' (no task in these batches)', { object, variant });
+      if (uncovered.length) {
+        problems.push('set ' + set + ' (real tier) has no task in these batches for ' + uncovered.length + ' object × variant' + (uncovered.length === 1 ? '' : 's') + ' (' +
+          firstFew(uncovered.map(({ object, variant }) => object + ' ' + variant)) + '): every formal configuration owes them, so its pairs get no verdict');
+      }
     }
     const completed = new Map(realTier ? [...cells].map(([key, attempts]) => {
       const sampled = new Set(attempts.map(attempt => attempt.task_id)), kinds = new Set(attempts.map(attempt => attempt.object + '|' + attempt.variant));
@@ -927,7 +946,7 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
       if (realTier) {
         const complete = completedOf(key), enough = complete.size >= REAL_TIER_MIN_OBJECTS;
         const figures = cellEntry(key, set, attempts.filter(attempt => complete.has(attempt.object)), seed, options);
-        for (const name of REAL_TIER_FIGURES) entry[name] = enough ? figures[name] : withoutIntervals(figures[name]);
+        for (const name of REAL_TIER_FIGURES) entry[name] = gateIntervals(figures[name], complete.size);
         entry.real_tier = { complete_objects: complete.size, sampled_objects: entry.objects, intervals: enough };
       }
       return entry;

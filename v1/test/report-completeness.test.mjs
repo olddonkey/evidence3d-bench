@@ -321,8 +321,11 @@ test('real tier: an object is complete only with both r2 and r4; scores use comp
   const r2only = buildLeaderboard(design(FOUR, { set: 'real', variants: ['r2'] }), { now: NOW, roster: roster({}, { required_variants: ['r2', 'r4'] }) });
   const lone = r2only.sets[0];
   assert.equal(lone.tier, 'real');
-  assert.ok(r2only.problems.some(problem => /set real \(real tier\) has no r4 task in these batches/.test(problem)));
-  assert.ok(lone.pairwise.pairs.every(pair => pair.complete_objects === 0 && pair.incomplete === 'few_complete_objects' && pair.ci95 === null));
+  assert.ok(r2only.problems.some(problem => /set real \(real tier\) has no task in these batches for 12 object × variants \(o0 r4, o1 r4, o10 r4, \.\.\.\): every formal configuration owes them/.test(problem)));
+  // Every configuration owes the r4 placeholders: unlisted gaps, so no pair is decided (and none has an interval).
+  assert.equal(lone.completeness.expected_tasks, 24);
+  assert.ok(lone.completeness.configurations.every(record => record.unlisted.length === 12 && record.unlisted.includes('o3 r4 (no task in these batches)')));
+  assert.ok(lone.pairwise.pairs.every(pair => pair.complete_objects === 0 && pair.incomplete === 'unlisted_gaps' && pair.ci95 === null));
   // No complete object: no score and no rank, but still listed and in every family.
   assert.ok(r2only.entries.every(entry => entry.rank === null && entry.score.mean === null && entry.real_tier.complete_objects === 0));
   assert.equal(lone.pairwise.correction.comparisons, 6);
@@ -460,4 +463,42 @@ test('a ladder family whose members are all absent is shown; so is a configurati
   assert.deepEqual([record.present, record.complete_objects, record.unlisted.length], [false, 0, 0]);
   assert.match(indexPage(real), /no complete object<\/span>/);
   assert.match(summaryMarkdown(real), new RegExp(OPUS_MAX.replace(/[/]/g, '\\/') + '.*no complete object'));
+});
+
+test('real tier: an object missing one variant is a gap of everyone; each summary and the pooled SD keep intervals only from 8 objects', () => {
+  // Nine objects with r2 and r4, a tenth with r2 only.
+  const data = design(FOUR, { set: 'real', variants: ['r2', 'r4'], objects: 10 });
+  data.attempts = data.attempts.filter(attempt => attempt.task_id !== 'o9-r4');
+  const board = buildLeaderboard(data, { now: NOW, roster: roster() });
+  const set = board.sets[0];
+  assert.equal(set.completeness.expected_tasks, 20);
+  assert.ok(board.problems.some(problem => /has no task in these batches for 1 object × variant \(o9 r4\)/.test(problem)));
+  assert.ok(set.completeness.configurations.every(record => record.sampled === 19 && record.unlisted[0] === 'o9 r4 (no task in these batches)'));
+  assert.ok(set.pairwise.pairs.every(pair => pair.incomplete === 'unlisted_gaps' && pair.complete_objects === 9));
+
+  // Ten complete objects in two archetypes of five: the configuration keeps its
+  // interval, each archetype row does not; seven usable objects on a curve point neither.
+  const mixed = design(FOUR, { set: 'real', variants: ['r2', 'r4'], objects: 10 });
+  for (const attempt of mixed.attempts) {
+    const o = Number(attempt.object.slice(1));
+    Object.assign(attempt, { archetype: o < 5 ? 'house' : 'shop', wall_limit_seconds: 600, wall_seconds: 550,
+      snapshots: { interval_seconds: 300, points: [{ t: 300, ...(o < 3 ? { status: 'score_error' } : { score: attempt.score / 2 }) }] } });
+  }
+  // Repeated attempts so the pooled attempt SD is estimated.
+  mixed.attempts.push(...mixed.attempts.map(attempt => ({ ...attempt, attempt: 2, score: attempt.score + 1, report: { ...attempt.report, score: attempt.score + 1 } })));
+  const wide = buildLeaderboard(mixed, { now: NOW, roster: roster() });
+  const astra = wide.entries.find(entry => entry.key === ASTRA);
+  assert.ok(astra.score.ci95, 'ten complete objects');
+  assert.deepEqual([astra.archetypes.house.objects, astra.archetypes.house.ci95, astra.archetypes.shop.ci95], [5, null, null]);
+  const early = astra.time_curve.points.find(point => point.t === 300);
+  assert.deepEqual([early.objects, early.ci95], [7, null]);
+  assert.ok(astra.time_curve.points.find(point => point.t === 600).ci95, 'the final point rests on ten objects');
+  assert.ok(wide.sets[0].variance.attempt_sd_pooled.ci95, 'pooled over ten objects: a range');
+
+  // Seven objects in all, every one complete: the pooled SD has no range either.
+  const seven = design(FOUR, { set: 'real', variants: ['r2', 'r4'], objects: 7 });
+  seven.attempts.push(...seven.attempts.map(attempt => ({ ...attempt, attempt: 2, score: attempt.score + 1, report: { ...attempt.report, score: attempt.score + 1 } })));
+  const pooled = buildLeaderboard(seven, { now: NOW, roster: roster() }).sets[0].variance.attempt_sd_pooled;
+  assert.ok(Number.isFinite(pooled.sd));
+  assert.deepEqual([pooled.objects, pooled.ci95], [7, null]);
 });
