@@ -75,7 +75,7 @@ function completenessMarkdown(set) {
   if (!info) return [];
   if (!info.expected_tasks) return ['Completeness: the roster\'s required variants (' + (info.required_variants ?? []).join(', ') + ') ask nothing of this set.', ''];
   const status = record => record.demoted ? 'demoted: ' + record.demoted : record.unlisted.length ? 'gaps not in the roster (data problem; no verdict)'
-    : record.missing.length ? 'missing tasks (ranked; pairs incomplete)' : 'complete';
+    : record.missing.length ? (set.tier === 'real' ? 'missing tasks (ranked; pairs use the objects both completed)' : 'missing tasks (ranked; pairs incomplete)') : 'complete';
   const lines = ['#### Completeness', '', 'Roster configurations against the ' + plural(info.expected_tasks, 'task') + ' this set asks of each' +
     (info.required_variants ? ' (variants ' + info.required_variants.join(', ') + ')' : '') + '.', '',
   table(['Configuration', 'Sampled', 'Missing (roster)', 'Not listed', 'Status'], info.configurations.map(record => [record.key + (record.present ? '' : ' (no counted attempt)'),
@@ -100,10 +100,12 @@ function setMarkdown(board, set) {
   lines.push(...laddersMarkdown(board, set));
   const variants = VARIANT_ORDER.filter(variant => entries.some(entry => entry.variants[variant]));
   lines.push('### Leaderboard', '', table(['#', 'Configuration', 'Score', ...variants, 'Shape', 'Detail', 'Success'],
-    entries.map(entry => [entry.reference ? 'ref' : entry.demoted ? 'dem' : entry.rank, entry.key, stat(entry.score), ...variants.map(variant => stat(entry.variants[variant])), stat(entry.shape), stat(entry.detail),
+    entries.map(entry => [entry.reference ? 'ref' : entry.demoted ? 'dem' : entry.rank ?? '–', entry.key, stat(entry.score), ...variants.map(variant => stat(entry.variants[variant])), stat(entry.shape), stat(entry.detail),
       entry.success.valid + ' / ' + entry.success.attempts]), 2), '');
   lines.push('Mean over objects with a 95% bootstrap interval over objects; attempts averaged within a task, tasks within an object; failures count as 0. † fewer than 3 objects.' +
-    (set.demoted_configurations?.length ? ' dem: demoted by the roster for missing tasks: not ranked, still in every corrected family (its pairs are incomplete).' : '') +
+    (set.demoted_configurations?.length ? ' dem: demoted by the roster: not ranked, still in every corrected family (its pairs are incomplete).' : '') +
+    (set.tier === 'real' ? ' Real tier: each configuration is scored on the objects where it has every r2 and r4 task, with an interval only from ' + REAL_TIER_MIN_OBJECTS +
+      ' of them; – = no such object, no score and no rank.' : '') +
     (set.reference_configurations?.length ? ' ref: reference row, not in the roster: not ranked, in no corrected family.' : ''), '');
   if (set.unranked.length) lines.push('Not ranked (every attempt excluded): ' + set.unranked.map(item => item.key + ' (' + item.excluded_attempts + ')').join(', ') + '.', '');
   lines.push(...completenessMarkdown(set));

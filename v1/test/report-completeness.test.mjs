@@ -300,3 +300,76 @@ test('collectRuns places planned and roster-listed tasks in their sets, run or n
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('constant decimal differences leave t undefined despite rounding', async () => {
+  const { tTestP, sampleSD } = await import('../lib/report/index.mjs');
+  const twelve = Array(12).fill(2.3);
+  assert.ok(sampleSD(twelve) > 0, 'rounding leaves a tiny SD (' + sampleSD(twelve) + ')');
+  assert.equal(tTestP(twelve), null);
+  assert.equal(tTestP(twelve.map((value, index) => value + (index % 2 ? 4e-15 : -4e-15))), null);
+  assert.ok(tTestP([2.3, 2.3, 2.3000001, 2.3]) !== null, 'a real, if small, variation is tested');
+  // In a leaderboard: B scores 2.3 below A on every task of every object.
+  const set = buildLeaderboard(design([['codex', 'a', 'high', 61.7], ['codex', 'b', 'high', 59.4]], { score: (base, o) => base + 1.1 * o }), { now: NOW }).sets[0];
+  const pair = set.pairwise.pairs[0];
+  near(pair.mean_difference, 2.3, 1e-9);
+  assert.deepEqual([pair.p_t, pair.verdict, pair.incomplete, pair.holm.verdict], [null, 'incomplete', 'undefined_test', 'incomplete']);
+});
+
+test('real tier: an object is complete only with both r2 and r4; scores use complete objects, intervals from 8', () => {
+  const real = { set: 'real', variants: ['r2', 'r4'] };
+  // Only r2 ran: no object is complete, whatever required_variants says.
+  const r2only = buildLeaderboard(design(FOUR, { set: 'real', variants: ['r2'] }), { now: NOW, roster: roster({}, { required_variants: ['r2', 'r4'] }) });
+  const lone = r2only.sets[0];
+  assert.equal(lone.tier, 'real');
+  assert.ok(r2only.problems.some(problem => /set real \(real tier\) has no r4 task in these batches/.test(problem)));
+  assert.ok(lone.pairwise.pairs.every(pair => pair.complete_objects === 0 && pair.incomplete === 'few_complete_objects' && pair.ci95 === null));
+  // No complete object: no score and no rank, but still listed and in every family.
+  assert.ok(r2only.entries.every(entry => entry.rank === null && entry.score.mean === null && entry.real_tier.complete_objects === 0));
+  assert.equal(lone.pairwise.correction.comparisons, 6);
+  assert.match(indexPage(r2only), /no object with every r2 and r4 task sampled, so no score/);
+  assert.match(summaryMarkdown(r2only), /\| – \| codex \/ astra \/ high \|/);
+
+  // Opus misses r4 on 3 of 10 objects (listed): scored on its 7 complete objects, a point estimate only.
+  const gaps = ['o0-r4', 'o4-r4', 'o9-r4'];
+  const board = buildLeaderboard(design(FOUR, { ...real, objects: 10, skip: { [OPUS]: gaps } }), { now: NOW,
+    roster: roster({ [OPUS]: { missing_tasks: gaps.map(task => ({ task, reason: 'photographs withdrawn' })) } }) });
+  const opus = board.entries.find(entry => entry.key === OPUS), astra = board.entries.find(entry => entry.key === ASTRA);
+  assert.deepEqual([opus.real_tier, opus.score.objects, opus.score.ci95, opus.shape.ci95, opus.variants.r2.objects], [{ complete_objects: 7, sampled_objects: 10, intervals: false }, 7, null, null, 7]);
+  assert.ok(Number.isInteger(opus.rank));
+  assert.deepEqual([astra.real_tier.complete_objects, astra.score.objects], [10, 10]);
+  assert.ok(astra.score.ci95, 'ten complete objects: an interval');
+  assert.match(indexPage(board), /missing tasks<\/span><small>ranked; its pairs use the objects both completed/);
+  assert.match(summaryMarkdown(board), /missing tasks \(ranked; pairs use the objects both completed\)/);
+});
+
+test('families stay frozen when every formal attempt of a set is excluded', () => {
+  const data = design([...FOUR, ['grok', 'g', 'high', 50]]);
+  for (const attempt of data.attempts) if (attempt.system !== 'grok') Object.assign(attempt, { excluded: true, status: 'infra_error' });
+  const board = buildLeaderboard(data, { now: NOW, roster: roster() });
+  const set = board.sets[0];
+  assert.deepEqual(set.absent_configurations.sort(), [ASTRA, ASTRA_MAX, OPUS, OPUS_MAX].sort());
+  assert.equal(set.pairwise.correction.comparisons, 6);
+  assert.equal(set.pairwise.correction.incomplete, 6);
+  assert.equal(set.completeness.configurations.length, 4);
+  assert.deepEqual(set.unranked.map(item => item.key).sort(), [ASTRA, ASTRA_MAX, OPUS, OPUS_MAX].sort());
+});
+
+test('required_variants must name variants by their own string keys; an unplaceable planned task is reported', async () => {
+  for (const bad of [[['t2']], ['toString'], [7]]) {
+    assert.throws(() => parseRoster({ schema: 'e3d-roster-v1', required_variants: bad, configurations: [{ system: 'codex', model: 'a' }] }), /required_variants: unknown variant/);
+  }
+  const root = await mkdtemp(join(tmpdir(), 'e3d-completeness-'));
+  try {
+    const dataRoot = join(root, 'data');
+    await writeSampleRuns(dataRoot, { withModels: false, withInputs: false });
+    const file = join(layout(dataRoot).runs, 'demo-claude', 'manifest.json'), manifest = JSON.parse(await readFile(file, 'utf8'));
+    manifest.tasks.push({ id: 'ghost-t2', attempts: [] }, { id: '../escape', attempts: [] });
+    await writeFile(file, JSON.stringify(manifest));
+    const collected = await collectRuns({ dataRoot, batches: ['demo-claude'] });
+    assert.ok(!collected.taskInfo.has('ghost-t2'));
+    assert.ok(collected.problems.some(problem => problem.startsWith('batch demo-claude planned task ghost-t2, but it has no truth.json')));
+    assert.ok(collected.problems.some(problem => problem.startsWith('batch demo-claude planned task ../escape, but it has no truth.json')));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

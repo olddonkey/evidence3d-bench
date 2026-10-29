@@ -177,8 +177,9 @@ report never infers one.
   the set an attempt ran, a batch's manifest planned (run or not) or the
   roster lists as missing, restricted to `required_variants` when given (main
   sets only: a real-tier set owes all its tasks, every formal configuration ×
-  object × `r2`, `r4`).
-  Per roster configuration, `set.completeness.configurations[]` = `{ key,
+  object × `r2`, `r4`). A planned task without a `truth.json` naming its
+  object and variant cannot be placed in a set; it is reported as a data
+  problem. Per roster configuration, `set.completeness.configurations[]` = `{ key,
   present, expected, sampled, missing: [{ task, reason }], unlisted,
   listed_but_sampled, demoted }`, shown on the page and in `summary.md` as the
   set's Completeness table.
@@ -194,8 +195,8 @@ report never infers one.
   table of all pairs and on its ladders. Within the limit it stays ranked and
   its pairs are incomplete. Demoting within the limit, or listing a task that
   has a counted sample, is reported.
-- **Families are frozen**: with a roster, once any roster configuration ran
-  in a set, every pair of roster configurations is in the set's families,
+- **Families are frozen**: with a roster, once any roster configuration took
+  part in a set (an attempt, counted or excluded), every pair of roster configurations is in the set's families,
   absent and demoted ones included; m never shrinks because a configuration
   failed to deliver.
 - **Incomplete pair** (`pair.verdict: 'incomplete'`, `pair.incomplete` = the
@@ -206,13 +207,21 @@ report never infers one.
   than 2 objects run by both); `undefined_test` (the per-object differences do
   not vary, so t is undefined: `tTestP` returns null). The last two apply
   without a roster too. The gap and its intervals are kept where they exist.
-- **Real tier** (`set.tier: 'real'`, a set of `r2` / `r4` tasks only): a pair
-  is compared only on the objects both configurations completed (every task
-  of the object in the set, `pair.complete_objects`), and needs at least
-  `REAL_TIER_MIN_OBJECTS` (8) of them; below that it is incomplete with no
-  intervals, whatever the reason. Listed missing tasks only shrink those
-  objects (no veto) and never require demotion, and a roster demotion does not
-  apply there: the configuration is ranked and judged on its complete objects.
+- **Real tier** (`set.tier: 'real'`, a set of `r2` / `r4` tasks only). A
+  configuration completed an object when it has a counted sample on every
+  task of the object in the set, `r2` and `r4` both among them (a set with
+  no `r4` task at all, say, has no complete object, and says so).
+  - A configuration's own scores (`entry.score`, shape, detail, per variant)
+    use its complete objects only (`entry.real_tier = { complete_objects,
+    sampled_objects, intervals }`); below `REAL_TIER_MIN_OBJECTS` (8) they are
+    point estimates without an interval, and with none it has no score and
+    no rank (shown as –), but stays in every family.
+  - A pair is compared only on the objects both configurations completed
+    (`pair.complete_objects`) and needs at least 8 of them; below that it is
+    incomplete with no intervals, whatever the reason.
+  - Listed missing tasks only shrink those objects (no veto) and never
+    require demotion, and a roster demotion does not apply there: the
+    configuration is ranked and judged on its complete objects.
 - **Which reports take the roster**: only the main-set report and the
   real-tier report. The extras and regression reports read other batches;
   with `--roster` they would list absent configurations and report gaps that

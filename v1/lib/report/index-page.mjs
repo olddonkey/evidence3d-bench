@@ -16,7 +16,8 @@ const plural = (count, word) => count + ' ' + word + (count === 1 ? '' : 's');
 const identityHead = '<th class="num">#</th><th>System</th><th>Model</th><th>Effort</th>';
 // A reference row (a configuration not in the roster) and a demoted one have no rank.
 const identity = (entry, rank) => '<td class="num">' + (entry.reference ? '<span class="na" title="reference row: not in the roster, not ranked">ref</span>'
-  : entry.demoted ? '<span class="na" title="demoted by the roster: ' + esc(entry.demoted) + '">dem</span>' : rank) +
+  : entry.demoted ? '<span class="na" title="demoted by the roster: ' + esc(entry.demoted) + '">dem</span>'
+  : entry.rank === null && entry.real_tier ? '<span class="na" title="real tier: no object with every r2 and r4 task sampled, so no score">&ndash;</span>' : rank) +
   '</td><td>' + esc(entry.system) + '</td><td>' + esc(entry.model) + '</td><td>' + (entry.effort === null ? NOT_EVALUATED : esc(entry.effort)) + '</td>';
 
 // One row per configuration of the set, `cells(entry)` giving the rest;
@@ -251,7 +252,8 @@ function completenessSection(set) {
       record.missing.map(gap => '<li><code>' + esc(gap.task) + '</code>: ' + esc(gap.reason) + '</li>').join('') + '</ul></details>' : '0';
     const status = record.demoted ? '<span class="na">demoted</span><small>' + esc(record.demoted) + '</small>'
       : record.unlisted.length ? '<span class="bad">gaps not in the roster</span><small>' + plural(record.unlisted.length, 'task') + ': a data problem; no verdict</small>'
-        : record.missing.length ? '<span class="low">missing tasks</span><small>ranked; its pairs are incomplete</small>' : '<span class="good">complete</span>';
+        : record.missing.length ? '<span class="low">missing tasks</span><small>' + (set.tier === 'real' ? 'ranked; its pairs use the objects both completed' : 'ranked; its pairs are incomplete') + '</small>'
+          : '<span class="good">complete</span>';
     return '<tr><td>' + esc(record.key) + (record.present ? '' : '<small>no counted attempt in this set</small>') + '</td><td class="num">' + record.sampled + ' / ' + record.expected +
       '</td><td class="num">' + missing + '</td><td class="num">' + record.unlisted.length + '</td><td>' + status + '</td></tr>';
   }).join('\n');
@@ -438,7 +440,7 @@ function setSection(board, set) {
   const unranked = set.unranked.length ? '<p class="legend bad">Not ranked, every attempt excluded: ' +
     set.unranked.map(item => esc(item.key) + ' (' + item.excluded_attempts + ')').join(', ') + '.</p>' : '';
   const multi = entries.some(entry => entry.attempts_per_task.max > 1);
-  const formal = entries.filter(entry => entry.rank !== null), demoted = entries.filter(entry => entry.demoted && !entry.reference);
+  const formal = entries.filter(entry => !entry.reference && !entry.demoted), demoted = entries.filter(entry => entry.demoted && !entry.reference);
   const reference = entries.filter(entry => entry.reference);
   const demotedRows = demoted.length ? '<h4>Demoted</h4><p class="legend">Demoted by the roster (its reason is in the Completeness table below): shown, not ranked, still in every corrected family, where their pairs are incomplete.</p>' +
     scoreTable(demoted) : '';
@@ -456,7 +458,7 @@ ${demotedRows}
 ${references}
 ${unranked}
 ${completenessSection(set)}
-<p class="legend">Each cell: mean, 95% bootstrap interval over objects (variants of one object are not independent), and sample size.
+<p class="legend">Each cell: mean, 95% bootstrap interval over objects (variants of one object are not independent), and sample size.${set.tier === 'real' ? ' <strong>Real tier</strong>: each configuration is scored on the objects where it has every r2 and r4 task, with an interval only from ' + REAL_TIER_MIN_OBJECTS + ' of them; &ndash; = no such object, so no score and no rank.' : ''}
 <strong>Score</strong> = the scorer&rsquo;s report.score, (shape score + detail score) / 2; attempts that produced no valid model count as 0, as do their shape and detail scores.
 ${toleranceNote(set.tolerances)}
 Attempts are averaged within a task and tasks within an object, so every object weighs the same however many attempts it has${multi ? ' (configurations here ran different numbers of attempts per task)' : ''}.

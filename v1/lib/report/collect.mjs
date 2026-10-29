@@ -273,7 +273,7 @@ export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT
     }
     return objectCache.get(objectId);
   };
-  const planned = new Set();
+  const planned = new Map();
   for (const batch of batchIds) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(batch)) { problems.push('invalid batch id ' + JSON.stringify(batch)); continue; }
     const batchDir = join(paths.runs, batch);
@@ -283,7 +283,7 @@ export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT
     const preflight = await readJSONIfPresent(join(batchDir, 'preflight.json'), problems);
     // Every task the batch was prepared with, run or not: a task nobody has run
     // yet is still one the configuration owes.
-    for (const task of Array.isArray(manifest?.tasks) ? manifest.tasks : []) if (typeof task?.id === 'string' && task.id) planned.add(task.id);
+    for (const task of Array.isArray(manifest?.tasks) ? manifest.tasks : []) if (typeof task?.id === 'string' && task.id && !planned.has(task.id)) planned.set(task.id, batch);
     const mine = [];
     let unfinished = 0, archivedTries = 0;
     for (const taskDirName of await directories(batchDir)) {
@@ -365,10 +365,17 @@ export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT
   for (const dirs of seen.values()) if (dirs.length > 1) problems.push('byte-identical submissions in ' + dirs.join(', ') + ': a copied batch would be counted twice');
   const setFiles = await readSetFiles(paths.root, problems);
   const taskInfo = new Map(attempts.map(attempt => [attempt.task_id, { set: attempt.set, object: attempt.object, variant: attempt.variant }]));
-  for (const taskId of [...planned, ...alsoTasks.filter(id => typeof id === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id))]) {
+  for (const taskId of [...planned.keys(), ...alsoTasks.filter(id => typeof id === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id))]) {
     if (taskInfo.has(taskId)) continue;
-    const truth = await truthFor(taskId);
-    if (truth?.object && VARIANTS[truth.variant]) taskInfo.set(taskId, { set: setOf(truth, taskId, problems), object: truth.object, variant: truth.variant });
+    const truth = /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(taskId) ? await truthFor(taskId) : null;
+    if (truth?.object && typeof truth.variant === 'string' && Object.hasOwn(VARIANTS, truth.variant)) {
+      taskInfo.set(taskId, { set: setOf(truth, taskId, problems), object: truth.object, variant: truth.variant });
+    } else if (planned.has(taskId)) {
+      // A task owed but impossible to place would silently shrink what every
+      // configuration owes; say so. (A roster-listed one is reported by the leaderboard.)
+      problems.push('batch ' + planned.get(taskId) + ' planned task ' + taskId + ', but it has no truth.json naming its object and variant: ' +
+        'the report cannot place it in a set, so no configuration is checked against it');
+    }
   }
   return { attempts, batches: batchInfo, problems: [...new Set(problems)], truths: truthCache, objects: objectCache, setFiles, taskInfo };
 }

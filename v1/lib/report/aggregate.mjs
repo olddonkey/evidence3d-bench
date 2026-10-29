@@ -26,6 +26,7 @@ export const PLANNED_OBJECTS = 72;
 // completed (every task of the object), and decides only with at least this
 // many (docs/V1-ROUND4-PLAN.md section 3); below it, no interval either.
 export const REAL_TIER_MIN_OBJECTS = 8;
+const REAL_VARIANTS = Object.keys(VARIANTS).filter(variant => VARIANTS[variant].real);
 
 // What a named set is, where the report knows more than its name. A set is
 // recorded per task in truth.json; the dev set's objects were used while the
@@ -531,11 +532,11 @@ function setLadders(order, entryOf, pairs, roster, cells) {
     members.set(ladder.id, on);
     const rows = [];
     for (let i = 0; i < on.length; i++) for (let j = i + 1; j < on.length; j++) rows.push(pairOf(on[i], on[j]));
-    // Ranked members first, in score order, then the demoted ones (no rank).
-    const present = on.filter(key => entryOf.has(key));
+    // Ranked members first, in score order, then those without a leaderboard
+    // rank (demoted, or in the real tier without a complete object).
+    const present = on.filter(key => entryOf.has(key)), unranked = key => entryOf.get(key).rank === null;
     let rank = 0;
-    const entries = [...present.filter(key => !entryOf.get(key).demoted), ...present.filter(key => entryOf.get(key).demoted)]
-      .map(key => ({ key, rank: entryOf.get(key).demoted ? null : ++rank }));
+    const entries = [...present.filter(key => !unranked(key)), ...present.filter(unranked)].map(key => ({ key, rank: unranked(key) ? null : ++rank }));
     return { id: ladder.id, label: ladder.label, entries,
       // Listed in the roster for this ladder, but no counted attempt in this set.
       missing: roster ? roster.configurations.filter(item => item.ladders.includes(ladder.id) && !cells.has(item.key)).map(item => item.key) : [],
@@ -557,6 +558,19 @@ function setTasks(set, inSet, taskInfo) {
   for (const attempt of inSet) tasks.set(attempt.task_id, { object: attempt.object, variant: attempt.variant });
   for (const [task, info] of taskInfo ?? []) if (info.set === set && !tasks.has(task)) tasks.set(task, { object: info.object, variant: info.variant });
   return tasks;
+}
+
+// A real-tier configuration's own scores (docs/V1-ROUND4-PLAN.md section 3):
+// the entry was built on its complete objects; without one it has no score
+// (and no rank), below REAL_TIER_MIN_OBJECTS a point estimate only.
+const pointOnly = stat => stat ? { ...stat, ci95: null } : stat;
+const noScore = stat => stat ? { ...stat, mean: null, ci95: null, objects: 0 } : stat;
+function realTierScores(entry, complete, sampled) {
+  entry.real_tier = { complete_objects: complete, sampled_objects: sampled, intervals: complete >= REAL_TIER_MIN_OBJECTS };
+  if (complete >= REAL_TIER_MIN_OBJECTS) return;
+  const strip = complete ? pointOnly : noScore;
+  for (const name of ['score', 'shape', 'detail']) entry[name] = strip(entry[name]);
+  for (const variant of Object.keys(entry.variants)) entry.variants[variant] = strip(entry.variants[variant]);
 }
 
 // The tasks a main set asks of every formal configuration: all of them, or
@@ -874,17 +888,42 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
     const deltaPairs = variantPairs([...new Set(counted.map(attempt => attempt.variant))]);
     const archetypeIds = [...new Set(counted.map(attempt => attempt.archetype))].sort((p, q) => (p === UNKNOWN_ARCHETYPE) - (q === UNKNOWN_ARCHETYPE) || p.localeCompare(q));
     const categoryIds = detailCategories(counted);
-    const ranked = [...cells].map(([key, attempts]) => cellEntry(key, set, attempts, seed, { deltaPairs, archetypes: archetypeIds, categories: categoryIds }));
-    ranked.sort((a, b) => (b.score.mean ?? -Infinity) - (a.score.mean ?? -Infinity) || a.key.localeCompare(b.key));
     // The real tier: a set of real-building tasks only (docs/V1-ROUND4-PLAN.md
     // section 3). Its own completeness rule replaces the main sets' 5 % demotion
     // and their no verdict on listed gaps, and it owes every one of its tasks.
     const ofSet = setTasks(set, inSet, collected.taskInfo);
     const realTier = ofSet.size > 0 && [...ofSet.values()].every(task => variantFamily(task.variant) === 'real');
     const expected = realTier ? ofSet : owedTasks(ofSet, roster);
-    // Formal configurations are ranked; reference rows (not in the roster) and
-    // demoted ones (main sets only) keep their place in score order for the
-    // pairwise orientation but get no rank.
+    // Real tier: the objects a configuration completed, every task of the
+    // object in the set sampled and both real variants (r2 and r4) among them.
+    const objectTasks = new Map();
+    for (const [task, info] of ofSet) {
+      if (!objectTasks.has(info.object)) objectTasks.set(info.object, []);
+      objectTasks.get(info.object).push(task);
+    }
+    if (realTier) {
+      const lacking = REAL_VARIANTS.filter(variant => ![...ofSet.values()].some(task => task.variant === variant));
+      if (lacking.length) problems.push('set ' + set + ' (real tier) has no ' + lacking.join(' or ') + ' task in these batches: no object is complete, so no pair is decided');
+    }
+    const completed = new Map(realTier ? [...cells].map(([key, attempts]) => {
+      const sampled = new Set(attempts.map(attempt => attempt.task_id)), kinds = new Set(attempts.map(attempt => attempt.object + '|' + attempt.variant));
+      return [key, new Set([...objectTasks].filter(([object, tasks]) => tasks.every(task => sampled.has(task)) &&
+        REAL_VARIANTS.every(variant => kinds.has(object + '|' + variant))).map(([object]) => object))];
+    }) : []);
+    const completedOf = key => completed.get(key) ?? new Set();
+    // In the real tier a configuration's own scores use its complete objects
+    // only, with intervals from REAL_TIER_MIN_OBJECTS of them (section 3).
+    const ranked = [...cells].map(([key, attempts]) => {
+      const scored = realTier ? attempts.filter(attempt => completedOf(key).has(attempt.object)) : attempts;
+      const entry = cellEntry(key, set, scored.length ? scored : attempts, seed, { deltaPairs, archetypes: archetypeIds, categories: categoryIds });
+      if (realTier) realTierScores(entry, completedOf(key).size, new Set(attempts.map(attempt => attempt.object)).size);
+      return entry;
+    });
+    ranked.sort((a, b) => (b.score.mean ?? -Infinity) - (a.score.mean ?? -Infinity) || a.key.localeCompare(b.key));
+    // Formal configurations are ranked; reference rows (not in the roster),
+    // demoted ones (main sets only) and real-tier ones without a complete
+    // object keep their place in score order for the pairwise orientation but
+    // get no rank.
     const placement = roster ? null : inferLadders(ranked.map(({ key, system, model, effort }) => ({ key, system, model, effort })));
     let rank = 0;
     for (const entry of ranked) {
@@ -892,7 +931,7 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
       entry.reference = roster ? !listed : false;
       entry.demoted = realTier ? null : listed?.demoted ?? null;
       entry.ladders = roster ? listed?.ladders ?? [] : placement.ladders.get(entry.key);
-      entry.rank = entry.reference || entry.demoted ? null : ++rank;
+      entry.rank = entry.reference || entry.demoted || !finite(entry.score.mean) ? null : ++rank;
     }
     for (const entry of ranked) {
       entry.provenance_conflicts = disagreements(entry.batches.map(id => batchById.get(id)).filter(Boolean),
@@ -907,26 +946,16 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
     const unranked = [...new Set(inSet.filter(attempt => attempt.excluded).map(cellKey))].filter(key => !cells.has(key)).sort()
       .map(key => ({ key, excluded_attempts: inSet.filter(attempt => cellKey(attempt) === key).length }));
 
-    // With a roster the families are frozen: once any roster configuration ran
-    // in this set, every roster configuration belongs to it, present or not.
-    const frozen = Boolean(roster) && ranked.some(entry => !entry.reference);
+    // With a roster the families are frozen: once any roster configuration took
+    // part in this set (an attempt, counted or excluded), every roster
+    // configuration belongs to it, present or not.
+    const frozen = Boolean(roster) && inSet.some(attempt => roster.keys.has(cellKey(attempt)));
     const completeness = frozen ? roster.configurations.map(item => completenessOf(item, cells.get(item.key) ?? [], expected, { demotable: !realTier })) : [];
     const byKey = new Map(completeness.map(record => [record.key, record]));
     for (const record of completeness) checkCompleteness(record, { set, realTier, roster, problems });
     const absent = frozen ? roster.configurations.filter(item => !cells.has(item.key)).map(item => item.key) : [];
     const order = [...ranked.map(entry => entry.key), ...absent];
     const isReference = key => Boolean(roster) && !roster.keys.has(key);
-    // Real tier: per configuration, the objects it completed (every task of the
-    // object in the set sampled).
-    const objectTasks = new Map();
-    for (const [task, info] of ofSet) {
-      if (!objectTasks.has(info.object)) objectTasks.set(info.object, []);
-      objectTasks.get(info.object).push(task);
-    }
-    const completed = new Map(order.map(key => {
-      const sampled = new Set((cells.get(key) ?? []).map(attempt => attempt.task_id));
-      return [key, new Set([...objectTasks].filter(([, tasks]) => tasks.every(task => sampled.has(task))).map(([object]) => object))];
-    }));
     // Why a pair cannot be decided, in the order of INCOMPLETE_REASONS; null when it can.
     const incompleteReason = pair => {
       const records = [byKey.get(pair.a), byKey.get(pair.b)];
@@ -944,7 +973,7 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
       for (let j = i + 1; j < order.length; j++) {
         const a = order[i], b = order[j];
         let attemptsA = cells.get(a) ?? [], attemptsB = cells.get(b) ?? [];
-        const both = realTier ? new Set([...completed.get(a)].filter(object => completed.get(b).has(object))) : null;
+        const both = realTier ? new Set([...completedOf(a)].filter(object => completedOf(b).has(object))) : null;
         if (both) { attemptsA = attemptsA.filter(attempt => both.has(attempt.object)); attemptsB = attemptsB.filter(attempt => both.has(attempt.object)); }
         const pairSeed = seed + '/pairwise/' + (set === UNNAMED_SET ? '' : set + '/') + a + '|' + b;
         const pair = comparePair({ key: a, attempts: attemptsA }, { key: b, attempts: attemptsB }, { seed: pairSeed });
@@ -1022,7 +1051,9 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
       // Only pairs of configurations with counted attempts carry a paired SD.
       variance: setVariance(ranked, cells, pairs.filter(pair => cells.has(pair.a) && cells.has(pair.b)), plannedObjects),
     });
-    entries.push(...ranked.filter(entry => entry.rank !== null), ...ranked.filter(entry => entry.demoted && !entry.reference), ...ranked.filter(entry => entry.reference));
+    // Ranked rows, then formal rows without a rank (demoted, or in the real
+    // tier without a complete object), then reference rows.
+    entries.push(...ranked.filter(entry => entry.rank !== null), ...ranked.filter(entry => entry.rank === null && !entry.reference), ...ranked.filter(entry => entry.reference));
   }
 
   // A roster entry no batch ran is usually a misspelt system, model or effort.

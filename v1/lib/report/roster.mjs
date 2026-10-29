@@ -57,9 +57,10 @@ export function parseRoster(data, { file = null, sha256 = null } = {}) {
   if (data.required_variants !== undefined && data.required_variants !== null) {
     const list = Array.isArray(data.required_variants) ? data.required_variants : [];
     if (!list.length) problems.push('required_variants must be a non-empty list of variants, or absent');
-    for (const variant of list) if (!VARIANTS[variant]) problems.push('required_variants: unknown variant ' + JSON.stringify(variant));
+    const known = variant => typeof variant === 'string' && Object.hasOwn(VARIANTS, variant);
+    for (const variant of list) if (!known(variant)) problems.push('required_variants: unknown variant ' + JSON.stringify(variant));
     if (new Set(list).size < list.length) problems.push('required_variants lists a variant twice');
-    requiredVariants = [...new Set(list.filter(variant => VARIANTS[variant]))];
+    requiredVariants = [...new Set(list.filter(known))];
   }
   const configurations = [], keys = new Map(), onLadder = new Map();
   for (const [index, item] of (Array.isArray(data.configurations) ? data.configurations : []).entries()) {
