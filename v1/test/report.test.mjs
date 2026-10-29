@@ -5,7 +5,7 @@ import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { rng } from '../lib/rng.mjs';
 import { decodePNG } from '../lib/png.mjs';
-import { aggregate, buildLeaderboard, writeReport, bootstrapMean, conflictShare, normaliseUsage, comparePair, pairedBootstrap, tInterval,
+import { PLANNED_OBJECTS, aggregate, buildLeaderboard, writeReport, bootstrapMean, conflictShare, normaliseUsage, comparePair, pairedBootstrap, tInterval,
   studentQuantile, chiSquareQuantile, sdRange, pooledSD, detectableDifference, pickRepresentatives, variantPairs, summaryMarkdown, attemptShareText,
   varianceStatement, variantFamily, probeErrors, categoryScore, detailCategories, spread, CONFLICT_KINDS, LADDER } from '../lib/report/index.mjs';
 import { writeSampleRuns, syntheticDesign, SAMPLE_ATTEMPTS } from '../lib/report/sample-runs.mjs';
@@ -134,7 +134,7 @@ test('aggregate writes deterministic JSON and survives bad files', async () => {
     const first = await aggregate({ dataRoot, batches: ['demo-codex', 'demo-claude'], now: NOW });
     const path = join(dataRoot, 'reports', 'demo-codex+demo-claude', 'leaderboard.json');
     const written = JSON.parse(await readFile(path, 'utf8'));
-    assert.equal(written.schema, 'e3d-leaderboard-v3');
+    assert.equal(written.schema, 'e3d-leaderboard-v4');
     assert.deepEqual(written, JSON.parse(JSON.stringify(first)));
     const again = await aggregate({ dataRoot, batches: ['demo-codex', 'demo-claude'], outFile: null, now: NOW });
     assert.deepEqual(JSON.parse(JSON.stringify(again)), written);
@@ -634,7 +634,7 @@ test('variance from files: attempt noise is recovered and its share of a paired 
     const strongSecond = variance.pairs.find(row => [row.a, row.b].includes(strong.key) && [row.a, row.b].includes(second.key));
     assert.ok(strongSecond.attempt_share > 0.5, 'attempt share ' + strongSecond.attempt_share);
     assert.ok(strongSecond.without_attempt_noise.sd < strongSecond.difference_sd.sd);
-    assert.equal(strongSecond.projected.objects, 24);
+    assert.equal(strongSecond.projected.objects, PLANNED_OBJECTS);
     assert.ok(strongSecond.projected.detectable < strongSecond.detectable);
   });
 });

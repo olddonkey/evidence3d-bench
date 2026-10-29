@@ -246,7 +246,12 @@ function setOf(truth, taskId, problems) {
   return UNKNOWN_SET;
 }
 
-export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT_EXCLUDED_STATUSES } = {}) {
+// `alsoTasks`: task ids to place in their sets beside the batches' own (a
+// roster's missing tasks). -> { attempts, batches, problems, truths, objects,
+// setFiles, taskInfo: Map(task id -> { set, object, variant }) } where
+// taskInfo covers every task an attempt ran, every task a batch's manifest
+// planned (run or not), and `alsoTasks`.
+export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT_EXCLUDED_STATUSES, alsoTasks = [] } = {}) {
   if (typeof dataRoot !== 'string' || !dataRoot) throw new Error('collectRuns needs dataRoot');
   const paths = layout(resolve(dataRoot)), problems = [], attempts = [], batchInfo = [];
   const requested = batches?.length ? [...batches] : await directories(paths.runs);
@@ -268,6 +273,7 @@ export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT
     }
     return objectCache.get(objectId);
   };
+  const planned = new Set();
   for (const batch of batchIds) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(batch)) { problems.push('invalid batch id ' + JSON.stringify(batch)); continue; }
     const batchDir = join(paths.runs, batch);
@@ -275,6 +281,9 @@ export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT
     const summary = await readJSONIfPresent(join(batchDir, 'summary.json'), problems);
     const manifest = await readJSONIfPresent(join(batchDir, 'manifest.json'), problems);
     const preflight = await readJSONIfPresent(join(batchDir, 'preflight.json'), problems);
+    // Every task the batch was prepared with, run or not: a task nobody has run
+    // yet is still one the configuration owes.
+    for (const task of Array.isArray(manifest?.tasks) ? manifest.tasks : []) if (typeof task?.id === 'string' && task.id) planned.add(task.id);
     const mine = [];
     let unfinished = 0, archivedTries = 0;
     for (const taskDirName of await directories(batchDir)) {
@@ -355,7 +364,13 @@ export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT
   }
   for (const dirs of seen.values()) if (dirs.length > 1) problems.push('byte-identical submissions in ' + dirs.join(', ') + ': a copied batch would be counted twice');
   const setFiles = await readSetFiles(paths.root, problems);
-  return { attempts, batches: batchInfo, problems: [...new Set(problems)], truths: truthCache, objects: objectCache, setFiles };
+  const taskInfo = new Map(attempts.map(attempt => [attempt.task_id, { set: attempt.set, object: attempt.object, variant: attempt.variant }]));
+  for (const taskId of [...planned, ...alsoTasks.filter(id => typeof id === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id))]) {
+    if (taskInfo.has(taskId)) continue;
+    const truth = await truthFor(taskId);
+    if (truth?.object && VARIANTS[truth.variant]) taskInfo.set(taskId, { set: setOf(truth, taskId, problems), object: truth.object, variant: truth.variant });
+  }
+  return { attempts, batches: batchInfo, problems: [...new Set(problems)], truths: truthCache, objects: objectCache, setFiles, taskInfo };
 }
 
 // One batch's provenance: what its manifest froze plus what its attempts show

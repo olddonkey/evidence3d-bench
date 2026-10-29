@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { VARIANTS } from '../contract.mjs';
 
 // Which configurations a round ranks, and on which ladder. A configuration is
 // a system ladder entry: client + model + effort. Effort moves a model about as
@@ -14,8 +15,19 @@ import { fileURLToPath } from 'node:url';
 // batches is a reference row: shown, never ranked, in no corrected family.
 // Without a roster every configuration is formal and the ladders are inferred
 // from the effort recorded per attempt.
+//
+// Completeness (docs/V1-ROUND4-PLAN.md section 2) is the roster's to record,
+// not the report's to infer: when a round's window closes, each formal
+// configuration's permanently missing tasks are listed (`missing_tasks`, each
+// with its reason), and one missing more than MISSING_SHARE_LIMIT of a main
+// set's tasks is marked `demoted` (with the reason): no rank, but it stays in
+// every corrected family. `required_variants` names the variants whose tasks
+// every formal configuration must complete (default: every task of the set in
+// the batches read).
 
 export const ROSTER_SCHEMA = 'e3d-roster-v1';
+// Share of a main set's tasks a formal configuration may miss and stay ranked.
+export const MISSING_SHARE_LIMIT = 0.05;
 export const LADDERS = [
   { id: 'default', label: 'Each client’s default effort' },
   { id: 'top', label: 'Each client’s top effort' },
@@ -34,13 +46,21 @@ export const CLIENT_DEFAULT_EFFORT = { codex: 'high', 'claude-code': 'high', gro
 const keyOf = ({ system, model, effort }) => [system, model, effort ?? '-'].join(' / ');
 const text = value => typeof value === 'string' && value.trim() ? value.trim() : null;
 
-// -> { schema, round, decided_at, decisions, note, configurations: [{ key, system, model, effort, ladders }], keys: Map }.
-// Every problem is reported at once; a roster with any problem is refused.
+// -> { schema, round, decided_at, decisions, note, required_variants, configurations: [{ key, system, model, effort, ladders,
+// missing_tasks: [{ task, reason }], demoted }], keys: Map }. Every problem is reported at once; a roster with any problem is refused.
 export function parseRoster(data, { file = null, sha256 = null } = {}) {
   const problems = [];
   if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('roster' + (file ? ' ' + file : '') + ': not a JSON object');
   if (data.schema !== ROSTER_SCHEMA) problems.push('schema must be "' + ROSTER_SCHEMA + '"');
   if (!Array.isArray(data.configurations) || !data.configurations.length) problems.push('configurations must be a non-empty list');
+  let requiredVariants = null;
+  if (data.required_variants !== undefined && data.required_variants !== null) {
+    const list = Array.isArray(data.required_variants) ? data.required_variants : [];
+    if (!list.length) problems.push('required_variants must be a non-empty list of variants, or absent');
+    for (const variant of list) if (!VARIANTS[variant]) problems.push('required_variants: unknown variant ' + JSON.stringify(variant));
+    if (new Set(list).size < list.length) problems.push('required_variants lists a variant twice');
+    requiredVariants = [...new Set(list.filter(variant => VARIANTS[variant]))];
+  }
   const configurations = [], keys = new Map(), onLadder = new Map();
   for (const [index, item] of (Array.isArray(data.configurations) ? data.configurations : []).entries()) {
     const where = 'configurations[' + index + ']';
@@ -63,13 +83,24 @@ export function parseRoster(data, { file = null, sha256 = null } = {}) {
       if (onLadder.has(slot)) problems.push(where + ': ' + system + ' / ' + model + ' is on the ' + ladder + ' ladder twice (' + onLadder.get(slot) + ', ' + key + ')');
       else onLadder.set(slot, key);
     }
-    const entry = { key, system, model, effort, ladders };
+    const missing = [];
+    if (item.missing_tasks !== undefined && item.missing_tasks !== null) {
+      if (!Array.isArray(item.missing_tasks)) problems.push(where + ': missing_tasks must be a list of { task, reason }');
+      for (const [n, gap] of (Array.isArray(item.missing_tasks) ? item.missing_tasks : []).entries()) {
+        const task = text(gap?.task), reason = text(gap?.reason);
+        if (!task || !reason) { problems.push(where + '.missing_tasks[' + n + ']: needs a task id and a reason'); continue; }
+        if (missing.some(other => other.task === task)) { problems.push(where + ': missing task ' + task + ' is listed twice'); continue; }
+        missing.push({ task, reason });
+      }
+    }
+    if (item.demoted !== undefined && item.demoted !== null && !text(item.demoted)) problems.push(where + ': demoted must be the reason, or absent');
+    const entry = { key, system, model, effort, ladders, missing_tasks: missing, demoted: text(item.demoted) };
     configurations.push(entry);
     keys.set(key, entry);
   }
   if (problems.length) throw new Error('roster' + (file ? ' ' + file : '') + ' refused:\n  ' + problems.join('\n  '));
   return { schema: ROSTER_SCHEMA, round: text(data.round), decided_at: text(data.decided_at), decisions: text(data.decisions), note: text(data.note),
-    file, sha256, configurations, keys };
+    required_variants: requiredVariants, file, sha256, configurations, keys };
 }
 
 // The file is recorded relative to the repository root, or by its name alone
@@ -90,7 +121,8 @@ export async function readRoster(file) {
 
 // What the leaderboard records about the roster it was given.
 export const rosterProvenance = roster => roster ? { file: roster.file, sha256: roster.sha256, round: roster.round, decided_at: roster.decided_at,
-  decisions: roster.decisions, configurations: roster.configurations.map(({ key, system, model, effort, ladders }) => ({ key, system, model, effort, ladders })) } : null;
+  decisions: roster.decisions, required_variants: roster.required_variants,
+  configurations: roster.configurations.map(({ key, system, model, effort, ladders, missing_tasks, demoted }) => ({ key, system, model, effort, ladders, missing_tasks, demoted })) } : null;
 
 const effortRank = effort => EFFORT_ORDER.indexOf(effort);
 

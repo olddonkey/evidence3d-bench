@@ -166,12 +166,15 @@ export function tInterval(values, level = 0.95) {
 
 // Two-sided p-value of the one-sample t test of mean = 0 (on paired
 // differences, the paired t test): the t interval at level 1 - p just touches
-// zero. Identical nonzero values give 0, all zeros 1; null below two values.
+// zero. null below two values or when the values do not vary.
 export function tTestP(values) {
   const list = values.filter(finite);
   if (list.length < 2) return null;
   const centre = mean(list), sd = sampleSD(list);
-  if (!(sd > 0)) return Math.abs(centre) > 0 ? 0 : 1;
+  // Differences that do not vary leave t undefined (0 / 0 or x / 0): no p-value,
+  // rather than the 0 or NaN an implementation would compute
+  // (docs/V1-ROUND4-PLAN.md section 4); such a pair cannot be decided.
+  if (!(sd > 0)) return null;
   const t = centre / (sd / Math.sqrt(list.length));
   return Math.min(1, 2 * (1 - studentCDF(Math.abs(t), list.length - 1)));
 }

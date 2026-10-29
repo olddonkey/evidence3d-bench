@@ -1,0 +1,286 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { rng } from '../lib/rng.mjs';
+import { layout } from '../lib/contract.mjs';
+import { writeSampleRuns, taskIdFor } from '../lib/report/sample-runs.mjs';
+import { buildLeaderboard, summaryMarkdown, collectRuns, parseRoster, rosterProvenance, rosterTasks, INCOMPLETE_REASONS, REAL_TIER_MIN_OBJECTS, MISSING_SHARE_LIMIT,
+  FAMILY_ALPHA } from '../lib/report/index.mjs';
+import { indexPage } from '../lib/report/index-page.mjs';
+
+// Completeness, demotion and incomplete pairs (docs/V1-ROUND4-PLAN.md sections 2 to 4).
+
+const near = (actual, expected, tolerance = 1e-9) => assert.ok(Math.abs(actual - expected) <= tolerance, actual + ' is not within ' + tolerance + ' of ' + expected);
+const NOW = new Date('2026-10-29T12:00:00Z');
+const keyOf = (system, model, effort) => [system, model, effort ?? '-'].join(' / ');
+
+// Hand-made attempts, one per task, on `objects` objects and the given
+// variants. Each configuration is [system, model, effort, mean]; `skip` maps a
+// configuration key to the task ids it has no counted sample on.
+function design(configurations, { objects = 12, noise = 3, set = 'test', variants = ['t2', 't4', 'c1'], skip = {}, seed = 'completeness-tests', score = null } = {}) {
+  const random = rng(seed);
+  const normal = () => Math.sqrt(-2 * Math.log(1 - random.next())) * Math.cos(2 * Math.PI * random.next());
+  const attempts = [];
+  for (let o = 0; o < objects; o++) {
+    const objectEffect = 8 * normal();
+    for (const [system, model, effort, base] of configurations) {
+      const key = keyOf(system, model, effort);
+      for (const variant of variants) {
+        const task = 'o' + o + '-' + variant, value = score ? score(base, o) : Math.max(0, Math.min(100, base + objectEffect + noise * normal()));
+        if (skip[key]?.includes(task)) continue;
+        attempts.push({ batch: [system, model, effort ?? 'none'].join('-'), task_id: task, attempt: 1, system, model, effort, status: 'ok', excluded: false,
+          valid: true, score: value, object: 'o' + o, variant, set, archetype: 'house', scale_evidence: 'none', usage: null, wall_seconds: null, cost_usd: null,
+          report: { valid: true, score: value, alignment: { frame_error: { offset_fraction: 0, offset_m: 0, yaw_deg: 0 } }, detail: { score: 0 }, shape: { scale: 1 } } });
+      }
+    }
+  }
+  return { attempts, batches: [], problems: [] };
+}
+
+const FOUR = [['codex', 'astra', 'high', 70], ['codex', 'astra', 'max', 76], ['claude-code', 'opus', 'high', 66], ['claude-code', 'opus', 'max', 72]];
+const ASTRA = keyOf('codex', 'astra', 'high'), ASTRA_MAX = keyOf('codex', 'astra', 'max'), OPUS = keyOf('claude-code', 'opus', 'high'), OPUS_MAX = keyOf('claude-code', 'opus', 'max');
+// The four configurations on their ladders; `extra` is merged into one configuration by key.
+function roster(extra = {}, top = {}) {
+  const item = (system, model, effort, ladder) => ({ system, model, effort, ladder, ...(extra[keyOf(system, model, effort)] ?? {}) });
+  return parseRoster({ schema: 'e3d-roster-v1', round: 'test', ...top, configurations: [item('codex', 'astra', 'high', 'default'), item('codex', 'astra', 'max', 'top'),
+    item('claude-code', 'opus', 'high', 'default'), item('claude-code', 'opus', 'max', 'top')] }, { file: 'rounds/test.json' });
+}
+const pairOf = (set, a, b) => set.pairwise.pairs.find(pair => (pair.a === a && pair.b === b) || (pair.a === b && pair.b === a));
+const involves = key => pair => pair.a === key || pair.b === key;
+
+test('a roster records missing tasks, demotions and required variants, and refuses malformed ones', () => {
+  assert.throws(() => parseRoster({ schema: 'e3d-roster-v1', required_variants: [], configurations: [{ system: 'codex', model: 'a', effort: 'high' }] }),
+    /required_variants must be a non-empty list/);
+  assert.throws(() => parseRoster({ schema: 'e3d-roster-v1', required_variants: ['t2', 'x9', 't2'], configurations: [
+    { system: 'codex', model: 'a', effort: 'high', missing_tasks: 'o1-t2' },
+    { system: 'codex', model: 'b', effort: 'high', missing_tasks: [{ task: 'o1-t2' }, { task: 'o2-t2', reason: 'quota' }, { task: 'o2-t2', reason: 'again' }] },
+    { system: 'codex', model: 'c', effort: 'high', demoted: '  ' },
+  ] }), error => {
+    assert.match(error.message, /unknown variant "x9"/);
+    assert.match(error.message, /required_variants lists a variant twice/);
+    assert.match(error.message, /configurations\[0\]: missing_tasks must be a list/);
+    assert.match(error.message, /configurations\[1\]\.missing_tasks\[0\]: needs a task id and a reason/);
+    assert.match(error.message, /missing task o2-t2 is listed twice/);
+    assert.match(error.message, /configurations\[2\]: demoted must be the reason/);
+    return true;
+  });
+  const parsed = parseRoster({ schema: 'e3d-roster-v1', required_variants: ['t4', 't2'], configurations: [
+    { system: 'codex', model: 'a', effort: 'high', missing_tasks: [{ task: ' o1-t2 ', reason: ' usage limit until the window closed ' }] },
+    { system: 'codex', model: 'b', effort: 'high', demoted: 'missed 30 of 216 tasks' }, { system: 'codex', model: 'c', effort: 'high' }] });
+  assert.deepEqual(parsed.required_variants, ['t4', 't2']);
+  assert.deepEqual(parsed.configurations.map(item => [item.missing_tasks, item.demoted]),
+    [[[{ task: 'o1-t2', reason: 'usage limit until the window closed' }], null], [[], 'missed 30 of 216 tasks'], [[], null]]);
+  assert.deepEqual(rosterTasks(parsed), ['o1-t2']);
+  const provenance = rosterProvenance(parsed);
+  assert.deepEqual(provenance.required_variants, ['t4', 't2']);
+  assert.deepEqual(provenance.configurations[1].demoted, 'missed 30 of 216 tasks');
+  assert.equal(parseRoster({ schema: 'e3d-roster-v1', configurations: [{ system: 'codex', model: 'a' }] }).required_variants, null);
+  assert.equal(MISSING_SHARE_LIMIT, 0.05);
+});
+
+test('listed missing tasks within 5 %: still ranked, but its pairs are incomplete, in m with p = 1', () => {
+  const data = design(FOUR, { skip: { [OPUS]: ['o3-t4'] } });
+  const board = buildLeaderboard(data, { now: NOW, roster: roster({ [OPUS]: { missing_tasks: [{ task: 'o3-t4', reason: 'usage limit until the window closed' }] } }) });
+  const set = board.sets[0];
+  assert.equal(set.tier, 'main');
+  // 1 of 36 tasks (2.8 %) is within the limit: ranked, nothing demoted, no data problem.
+  assert.ok(Number.isInteger(board.entries.find(entry => entry.key === OPUS).rank));
+  assert.deepEqual(set.demoted_configurations, []);
+  assert.ok(!board.problems.some(problem => /does not list as missing|refused/.test(problem)), board.problems.join('\n'));
+  const record = set.completeness.configurations.find(item => item.key === OPUS);
+  assert.deepEqual([record.expected, record.sampled, record.missing, record.unlisted], [36, 35, [{ task: 'o3-t4', reason: 'usage limit until the window closed' }], []]);
+  assert.equal(set.completeness.missing_share_limit, MISSING_SHARE_LIMIT);
+  // Its three pairs: no verdict, intervals kept, p = 1 in a family that still has all six pairs.
+  for (const pair of set.pairwise.pairs.filter(involves(OPUS))) {
+    assert.equal(pair.verdict, 'incomplete');
+    assert.equal(pair.incomplete, 'missing_tasks');
+    assert.ok(pair.ci95 && pair.t_ci95, 'the gap keeps its intervals');
+    assert.equal(pair.holm.verdict, 'incomplete');
+    near(pair.holm.p_adjusted, 1);
+    assert.match(pair.statement, /incomplete, no verdict: tasks the roster lists as missing/);
+  }
+  assert.deepEqual([set.pairwise.correction.comparisons, set.pairwise.correction.incomplete], [6, 3]);
+  // The other pairs keep their uncorrected numbers, and m stays six: the
+  // incomplete pairs make no other pair easier to separate.
+  const plain = buildLeaderboard(design(FOUR), { now: NOW, roster: roster() }).sets[0];
+  for (const pair of set.pairwise.pairs.filter(pair => !involves(OPUS)(pair))) {
+    const same = pairOf(plain, pair.a, pair.b);
+    assert.deepEqual([pair.mean_difference, pair.ci95, pair.p_t, pair.verdict], [same.mean_difference, same.ci95, same.p_t, same.verdict]);
+    assert.equal(pair.holm.comparisons, 6);
+    assert.ok(pair.holm.p_adjusted >= same.holm.p_adjusted - 1e-12);
+  }
+  // On the default ladder (Astra high vs Opus high) the only pair is incomplete too.
+  const ladder = set.ladders.find(item => item.id === 'default');
+  assert.deepEqual(ladder.pairwise.pairs.map(pair => pair.verdict), ['incomplete']);
+  assert.equal(ladder.pairwise.correction.incomplete, 1);
+  // The effort pair of Opus as well; Astra's is decided.
+  assert.equal(set.effort.pairs.find(pair => pair.model === 'opus').verdict, 'incomplete');
+  assert.notEqual(set.effort.pairs.find(pair => pair.model === 'astra').verdict, 'incomplete');
+});
+
+test('a formal configuration missing more than 5 % is refused unless the roster demotes it', () => {
+  const gaps = ['o3-t4', 'o7-c1'], listed = gaps.map(task => ({ task, reason: 'usage limit' }));
+  const data = design(FOUR, { skip: { [OPUS]: gaps } });
+  assert.throws(() => buildLeaderboard(data, { now: NOW, roster: roster({ [OPUS]: { missing_tasks: listed } }) }),
+    /roster rounds\/test.json refused: in set test, claude-code \/ opus \/ high misses 2 of 36 tasks \(5\.6 %\), more than 5 %; the roster must mark it demoted/);
+
+  const board = buildLeaderboard(data, { now: NOW, roster: roster({ [OPUS]: { missing_tasks: listed, demoted: 'missed 2 of 36 tasks (usage limit)' } }) });
+  const set = board.sets[0], opus = board.entries.find(entry => entry.key === OPUS);
+  // No rank, but listed, and in every family it belongs to.
+  assert.equal(opus.rank, null);
+  assert.equal(opus.demoted, 'missed 2 of 36 tasks (usage limit)');
+  assert.equal(opus.reference, false);
+  assert.deepEqual(set.demoted_configurations, [OPUS]);
+  assert.ok(!set.configurations.includes(OPUS));
+  assert.deepEqual(board.entries.map(entry => entry.rank), [1, 2, 3, null], 'ranked rows first, then the demoted one');
+  for (const pair of set.pairwise.pairs.filter(involves(OPUS))) {
+    assert.equal(pair.incomplete, 'demoted');
+    assert.equal(pair.holm.verdict, 'incomplete');
+  }
+  assert.equal(set.pairwise.correction.comparisons, 6);
+  const ladder = set.ladders.find(item => item.id === 'default');
+  assert.deepEqual(ladder.entries, [{ key: ASTRA, rank: 1 }, { key: OPUS, rank: null }]);
+  assert.equal(ladder.pairwise.correction.comparisons, 1, 'the demoted configuration stays in the ladder family');
+  assert.equal(ladder.pairwise.pairs[0].verdict, 'incomplete');
+  assert.ok(!board.problems.some(problem => /demotes/.test(problem)));
+
+  // Demoting within the limit is allowed, but reported.
+  const within = buildLeaderboard(design(FOUR, { skip: { [OPUS]: ['o3-t4'] } }), { now: NOW,
+    roster: roster({ [OPUS]: { missing_tasks: [listed[0]], demoted: 'judged unreliable' } }) });
+  assert.ok(within.problems.some(problem => /demotes claude-code \/ opus \/ high, but in set test it misses only 1 of 36 listed tasks \(2\.8 %\)/.test(problem)));
+  assert.equal(within.entries.find(entry => entry.key === OPUS).rank, null);
+});
+
+test('a gap the roster does not list is a data problem: the configuration keeps its rank, its pairs get no verdict', () => {
+  const board = buildLeaderboard(design(FOUR, { skip: { [ASTRA_MAX]: ['o0-t2', 'o1-t2'] } }), { now: NOW, roster: roster() });
+  const set = board.sets[0];
+  assert.ok(board.problems.some(problem => problem === 'set test: codex / astra / max has no counted sample on 2 tasks that the roster does not list as missing (o0-t2, o1-t2); its pairs get no verdict'));
+  assert.ok(Number.isInteger(board.entries.find(entry => entry.key === ASTRA_MAX).rank));
+  for (const pair of set.pairwise.pairs.filter(involves(ASTRA_MAX))) assert.equal(pair.incomplete, 'unlisted_gaps');
+  assert.equal(set.pairwise.correction.incomplete, 3);
+  assert.deepEqual(set.completeness.configurations.find(item => item.key === ASTRA_MAX).unlisted, ['o0-t2', 'o1-t2']);
+
+  // A listed task that has a counted sample after all: the sample counts, and the roster is told.
+  const stale = buildLeaderboard(design(FOUR), { now: NOW, roster: roster({ [ASTRA]: { missing_tasks: [{ task: 'o2-c1', reason: 'thought lost' }] } }) });
+  assert.ok(stale.problems.some(problem => /lists o2-c1 as missing for codex \/ astra \/ high, but set test has a counted sample; the sample counts/.test(problem)));
+  assert.ok(stale.sets[0].pairwise.pairs.every(pair => pair.verdict !== 'incomplete'));
+
+  // A planned task nobody ran (a manifest's, through taskInfo) is owed by every
+  // formal configuration: unlisted, every pair is incomplete.
+  const planned = design(FOUR);
+  planned.taskInfo = new Map([['o12-t2', { set: 'test', object: 'o12', variant: 't2' }]]);
+  const owed = buildLeaderboard(planned, { now: NOW, roster: roster() }).sets[0];
+  assert.equal(owed.completeness.expected_tasks, 37);
+  assert.ok(owed.pairwise.pairs.every(pair => pair.incomplete === 'unlisted_gaps'));
+  // A missing task no batch planned and no truth.json places is reported.
+  const unplaced = buildLeaderboard(design(FOUR), { now: NOW, roster: roster({ [OPUS]: { missing_tasks: [{ task: 'zz9-t2', reason: 'typo' }] } }) });
+  assert.ok(unplaced.problems.some(problem => /lists missing tasks that no batch planned and no truth.json places in a set: zz9-t2/.test(problem)));
+});
+
+test('required_variants: only those variants are owed', () => {
+  const skipC1 = Array.from({ length: 12 }, (_, o) => 'o' + o + '-c1');
+  const data = design(FOUR, { skip: { [OPUS_MAX]: skipC1 } });
+  const strict = buildLeaderboard(data, { now: NOW, roster: roster() });
+  assert.ok(strict.problems.some(problem => /opus \/ max has no counted sample on 12 tasks that the roster does not list/.test(problem)));
+  const relaxed = buildLeaderboard(data, { now: NOW, roster: roster({}, { required_variants: ['t2', 't4'] }) });
+  const set = relaxed.sets[0];
+  assert.ok(!relaxed.problems.some(problem => /does not list as missing/.test(problem)), relaxed.problems.join('\n'));
+  assert.deepEqual([set.completeness.expected_tasks, set.completeness.required_variants], [24, ['t2', 't4']]);
+  assert.ok(set.pairwise.pairs.every(pair => pair.verdict !== 'incomplete'));
+  // Opus max is compared with the others on the tasks both ran: t2 and t4.
+  assert.equal(pairOf(set, ASTRA, OPUS_MAX).tasks, 24);
+  assert.equal(pairOf(set, ASTRA, OPUS).tasks, 36);
+});
+
+test('an undecidable test is incomplete without a roster too: no common object, one object, differences that do not vary', () => {
+  // Every task of B scores exactly 4 below A's: t is undefined (no variation).
+  const flat = design([['codex', 'a', 'high', 60], ['codex', 'b', 'high', 56], ['codex', 'c', 'high', 40]],
+    { score: (base, o) => base === 40 ? 40 + 3 * ((o * 7) % 5) : base + 2 * o });
+  const set = buildLeaderboard(flat, { now: NOW }).sets[0];
+  const ab = pairOf(set, keyOf('codex', 'a', 'high'), keyOf('codex', 'b', 'high'));
+  assert.equal(ab.p_t, null);
+  assert.deepEqual([ab.verdict, ab.incomplete, ab.holm.verdict], ['incomplete', 'undefined_test', 'incomplete']);
+  near(ab.mean_difference, 4);
+  assert.equal(set.pairwise.correction.comparisons, 3);
+  assert.equal(set.pairwise.correction.incomplete, 1);
+  assert.notEqual(pairOf(set, keyOf('codex', 'a', 'high'), keyOf('codex', 'c', 'high')).verdict, 'incomplete');
+
+  const one = buildLeaderboard(design([['codex', 'a', 'high', 60], ['codex', 'b', 'high', 50]], { objects: 1 }), { now: NOW }).sets[0];
+  assert.deepEqual([one.pairwise.pairs[0].verdict, one.pairwise.pairs[0].incomplete, one.pairwise.correction.comparisons], ['incomplete', 'few_objects', 1]);
+  assert.equal(one.completeness, null, 'no roster: nothing to check completeness against');
+  assert.deepEqual(Object.keys(INCOMPLETE_REASONS), ['demoted', 'missing_tasks', 'unlisted_gaps', 'few_complete_objects', 'few_objects', 'undefined_test']);
+});
+
+test('real tier: compared on the objects both completed, at least 8 of them; missing tasks give no veto and no demotion', () => {
+  const real = { set: 'real', variants: ['r2', 'r4'] };
+  // Opus misses one task on each of 3 of 12 objects (3 of 24 tasks, 12.5 %): no
+  // refusal and no demotion in the real tier; 9 objects complete on both sides.
+  const gaps = ['o0-r4', 'o4-r2', 'o9-r4'], listed = gaps.map(task => ({ task, reason: 'photographs withdrawn' }));
+  const board = buildLeaderboard(design(FOUR, { ...real, skip: { [OPUS]: gaps } }), { now: NOW, roster: roster({ [OPUS]: { missing_tasks: listed } }) });
+  const set = board.sets[0];
+  assert.equal(set.tier, 'real');
+  assert.equal(set.completeness.missing_share_limit, null);
+  assert.deepEqual(set.demoted_configurations, []);
+  assert.ok(!board.problems.some(problem => /refused|demotes|does not list as missing/.test(problem)), board.problems.join('\n'));
+  const decided = pairOf(set, ASTRA, OPUS);
+  assert.deepEqual([decided.objects, decided.complete_objects, decided.tasks, decided.incomplete], [9, 9, 18, null]);
+  assert.notEqual(decided.verdict, 'incomplete');
+  assert.ok(decided.ci95 && finiteP(decided.p_t));
+  // A pair of two complete configurations uses all 12 objects.
+  assert.equal(pairOf(set, ASTRA, ASTRA_MAX).complete_objects, 12);
+
+  // On 10 objects the same gaps leave 7 complete: below the minimum, no verdict and no intervals.
+  const small = buildLeaderboard(design(FOUR, { ...real, objects: 10, skip: { [OPUS]: gaps } }), { now: NOW, roster: roster({ [OPUS]: { missing_tasks: listed } }) }).sets[0];
+  const few = pairOf(small, ASTRA, OPUS);
+  assert.equal(REAL_TIER_MIN_OBJECTS, 8);
+  assert.deepEqual([few.complete_objects, few.verdict, few.incomplete, few.ci95, few.t_ci95], [7, 'incomplete', 'few_complete_objects', null, null]);
+  assert.match(few.statement, /fewer than 8 objects both completed/);
+  near(few.holm.p_adjusted, 1);
+  assert.ok(small.pairwise.pairs.filter(pair => !involves(OPUS)(pair)).every(pair => pair.complete_objects === 10 && pair.verdict !== 'incomplete'));
+  // An unlisted real-tier gap is still a data problem.
+  const unlisted = buildLeaderboard(design(FOUR, { ...real, skip: { [OPUS]: ['o0-r4'] } }), { now: NOW, roster: roster() });
+  assert.ok(unlisted.problems.some(problem => /set real: claude-code \/ opus \/ high has no counted sample on 1 task that the roster does not list/.test(problem)));
+  assert.equal(pairOf(unlisted.sets[0], ASTRA, OPUS).incomplete, 'unlisted_gaps');
+  // Required variants that leave the real set nothing to owe (Round 3's roster
+  // names the test set's t2, t4, c1) change nothing of the real tier's rule.
+  const unowed = buildLeaderboard(design(FOUR, { ...real, skip: { [OPUS]: gaps } }), { now: NOW, roster: roster({}, { required_variants: ['t2', 't4', 'c1'] }) });
+  const owedNothing = unowed.sets[0];
+  assert.deepEqual([owedNothing.tier, owedNothing.completeness.expected_tasks], ['real', 0]);
+  assert.ok(!unowed.problems.some(problem => /does not list as missing/.test(problem)));
+  assert.deepEqual([pairOf(owedNothing, ASTRA, OPUS).complete_objects, pairOf(owedNothing, ASTRA, OPUS).incomplete], [9, null]);
+  assert.match(indexPage(unowed), /required variants \(t2, t4, c1\) ask nothing of this set/);
+});
+const finiteP = value => typeof value === 'number' && Number.isFinite(value);
+
+test('the page and summary.md show incomplete pairs, the demoted row and the completeness table', () => {
+  const gaps = ['o3-t4', 'o7-c1'];
+  const board = buildLeaderboard(design(FOUR, { skip: { [OPUS]: gaps } }), { now: NOW,
+    roster: roster({ [OPUS]: { missing_tasks: gaps.map(task => ({ task, reason: 'usage limit' })), demoted: 'missed 2 of 36 tasks' } }) });
+  const page = indexPage(board), summary = summaryMarkdown(board);
+  for (const text of ['incomplete', '<h4>Demoted</h4>', 'Completeness', 'missed 2 of 36 tasks', 'usage limit', 'in m with p = 1']) assert.ok(page.includes(text), 'index.html has ' + text);
+  for (const text of ['incomplete', 'Completeness', '| dem |', 'missed 2 of 36 tasks', 'p = 1']) assert.ok(summary.includes(text), 'summary.md has ' + text);
+  assert.ok(FAMILY_ALPHA === 0.05);
+});
+
+test('collectRuns places planned and roster-listed tasks in their sets, run or not', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'e3d-completeness-'));
+  try {
+    const dataRoot = join(root, 'data');
+    await writeSampleRuns(dataRoot, { withModels: false, withInputs: false });
+    // demo-claude was also prepared with a task it never ran (one of Codex's).
+    const file = join(layout(dataRoot).runs, 'demo-claude', 'manifest.json'), manifest = JSON.parse(await readFile(file, 'utf8'));
+    const planned = taskIdFor('demo-house-c', 't2'), listed = taskIdFor('demo-house-a', 'c1');
+    manifest.tasks.push({ id: planned, attempts: [] });
+    await writeFile(file, JSON.stringify(manifest));
+    const collected = await collectRuns({ dataRoot, batches: ['demo-claude'], alsoTasks: [listed, 'no-such-task', '../escape'] });
+    assert.ok(!collected.attempts.some(attempt => attempt.task_id === planned || attempt.task_id === listed));
+    assert.deepEqual(collected.taskInfo.get(planned), { set: collected.taskInfo.get(taskIdFor('demo-house-a', 't1')).set, object: 'demo-house-c', variant: 't2' });
+    assert.equal(collected.taskInfo.get(listed).variant, 'c1');
+    assert.ok(!collected.taskInfo.has('no-such-task') && !collected.taskInfo.has('../escape'));
+    for (const attempt of collected.attempts) assert.equal(collected.taskInfo.get(attempt.task_id).object, attempt.object);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
