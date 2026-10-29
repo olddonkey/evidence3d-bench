@@ -128,7 +128,7 @@ node v1/cli.mjs report --batches A,B,C --out .local/v1/reports/NAME --roster v1/
   level), or absent (a formal configuration on no ladder). A client and model
   may appear on a ladder once.
 - `missing_tasks` (optional, per configuration): the tasks it permanently
-  lacks once the round's window has closed, each with its reason; `demoted`
+  lacks once the round's window has closed, each a task id with its reason; `demoted`
   (optional): the reason it is not ranked. `required_variants` (optional,
   top level): the variants whose tasks every configuration owes; absent, it
   owes every task of the set. See *Completeness* below.
@@ -213,7 +213,8 @@ report never infers one.
   task of the object in the set, `r2` and `r4` both among them. An object
   with no task of one of them in these batches is owed by every formal
   configuration under a placeholder id (`<object> r4 (no task in these
-  batches)`): an unlisted gap of everyone, reported, so no pair is decided.
+  batches)`, which no roster can list): an unlisted gap of everyone,
+  reported, so no pair is decided, with or without a roster.
   - A configuration's own figures (score, shape, detail, per variant and
     archetype, evidence deltas, diagnostics, the score-over-time curve, its
     and its pairs' rows in *Where the noise is*) use
@@ -221,7 +222,8 @@ report never infers one.
     sampled_objects, intervals }`); a summary resting on fewer than
     `REAL_TIER_MIN_OBJECTS` (8) objects (the configuration's, or its own: an
     archetype row, a curve point) is a point estimate without an interval
-    (bootstrap, Student-t or SD range), the set's pooled attempt SD likewise,
+    (bootstrap, Student-t or SD range); an attempt SD (a configuration's or
+    the set's pooled one) is judged on the objects with a repeated task,
     and with no complete object a configuration has no score and
     no rank (shown as –), but stays in every family. Bookkeeping (attempts,
     success, statuses, time, tokens, cost, batches and their provenance)

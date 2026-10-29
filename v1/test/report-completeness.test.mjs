@@ -502,3 +502,24 @@ test('real tier: an object missing one variant is a gap of everyone; each summar
   assert.ok(Number.isFinite(pooled.sd));
   assert.deepEqual([pooled.objects, pooled.ci95], [7, null]);
 });
+
+test('real tier: an uncovered variant vetoes verdicts without a roster too; attempt SDs need 8 objects with a repeated task; placeholders cannot be listed', () => {
+  const data = design(FOUR, { set: 'real', variants: ['r2', 'r4'], objects: 10 });
+  data.attempts = data.attempts.filter(attempt => attempt.task_id !== 'o9-r4');
+  const plain = buildLeaderboard(data, { now: NOW });
+  assert.ok(plain.problems.some(problem => /has no task in these batches for 1 object × variant \(o9 r4\)/.test(problem)));
+  assert.ok(plain.sets[0].pairwise.pairs.every(pair => pair.incomplete === 'unlisted_gaps' && pair.holm.verdict === 'incomplete'));
+
+  // Ten complete objects, but only one has a task run twice.
+  const once = design(FOUR, { set: 'real', variants: ['r2', 'r4'], objects: 10 });
+  once.attempts.push(...once.attempts.filter(attempt => attempt.object === 'o0').map(attempt => ({ ...attempt, attempt: 2, score: attempt.score + 2 })));
+  const variance = buildLeaderboard(once, { now: NOW, roster: roster() }).sets[0].variance;
+  assert.ok(Number.isFinite(variance.attempt_sd_pooled.sd));
+  assert.deepEqual([variance.attempt_sd_pooled.objects, variance.attempt_sd_pooled.ci95], [1, null]);
+  const row = variance.configurations.find(item => item.key === ASTRA);
+  assert.ok(Number.isFinite(row.attempt_sd.sd) && row.attempt_sd.ci95 === null);
+  assert.ok(row.object_sd.ci95, 'the object SD rests on ten objects');
+
+  assert.throws(() => parseRoster({ schema: 'e3d-roster-v1', configurations: [{ system: 'codex', model: 'a', effort: 'high',
+    missing_tasks: [{ task: 'o9 r4 (no task in these batches)', reason: 'trying to excuse a placeholder' }] }] }), /"o9 r4 \(no task in these batches\)" is not a task id/);
+});

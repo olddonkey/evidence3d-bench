@@ -43,6 +43,8 @@ export const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'
 // null ran without an effort flag, so at its client's default.
 export const CLIENT_DEFAULT_EFFORT = { codex: 'high', 'claude-code': 'high', grok: 'high' };
 
+// A task id as the data root names its directories (collect.mjs reads only these).
+const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const keyOf = ({ system, model, effort }) => [system, model, effort ?? '-'].join(' / ');
 const text = value => typeof value === 'string' && value.trim() ? value.trim() : null;
 
@@ -90,6 +92,7 @@ export function parseRoster(data, { file = null, sha256 = null } = {}) {
       for (const [n, gap] of (Array.isArray(item.missing_tasks) ? item.missing_tasks : []).entries()) {
         const task = text(gap?.task), reason = text(gap?.reason);
         if (!task || !reason) { problems.push(where + '.missing_tasks[' + n + ']: needs a task id and a reason'); continue; }
+        if (!TASK_ID.test(task)) { problems.push(where + '.missing_tasks[' + n + ']: ' + JSON.stringify(task) + ' is not a task id (letters, digits, . _ -)'); continue; }
         if (missing.some(other => other.task === task)) { problems.push(where + ': missing task ' + task + ' is listed twice'); continue; }
         missing.push({ task, reason });
       }

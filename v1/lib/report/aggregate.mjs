@@ -771,12 +771,19 @@ export function varianceStatement(row) {
   return text;
 }
 
-// `minObjects`: below it a row keeps its point figures but no interval or
-// range (the real tier's minimum; its cells hold complete objects only).
+// The objects an attempt SD rests on: those with a task run at least twice.
+const repeatedObjects = attempts => new Set([...taskScores(attempts).values()].filter(task => task.values.length >= 2).map(task => task.object));
+
+// `minObjects`: below it a figure keeps its point value but no interval or
+// range (the real tier's minimum; its cells hold complete objects only). Each
+// figure is judged on the objects it rests on: an object SD on the objects, an
+// attempt SD on the objects with a repeated task, a pair on its paired objects.
 function setVariance(ranked, cells, pairs, plannedObjects, { minObjects = 0 } = {}) {
   const configurations = ranked.map(entry => {
     const row = configurationVariance(entry, cells.get(entry.key));
-    return row.object_sd.objects < minObjects ? withoutIntervals(row) : row;
+    if (row.object_sd.objects < minObjects) row.object_sd = withoutIntervals(row.object_sd);
+    if (repeatedObjects(cells.get(entry.key)).size < minObjects) row.attempt_sd = withoutIntervals(row.attempt_sd);
+    return row;
   });
   const noise = new Map(configurations.map(item => [item.key, item.attempt_sd]));
   const pairRows = pairs.map(pair => {
@@ -788,7 +795,7 @@ function setVariance(ranked, cells, pairs, plannedObjects, { minObjects = 0 } = 
   });
   // One sentence on where the noise is, from the medians across configurations and pairs.
   const all = pooledSD(ranked.flatMap(entry => [...taskScores(cells.get(entry.key)).values()].map(task => task.values)));
-  const pooledObjects = new Set(ranked.flatMap(entry => cells.get(entry.key).map(attempt => attempt.object))).size;
+  const pooledObjects = new Set(ranked.flatMap(entry => [...repeatedObjects(cells.get(entry.key))])).size;
   const objectSD = median(configurations.map(item => item.object_sd.sd)), pairSD = median(pairRows.map(row => row.difference_sd.sd));
   const parts = [];
   if (finite(objectSD)) parts.push('scores of one configuration spread between objects with SD ' + fixed(objectSD) + ' (median over configurations)');
@@ -924,9 +931,9 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
     // Every object owes both real variants; one with no task of a variant in
     // these batches is a gap of every configuration, owed under a placeholder
     // id (the task does not exist here to be named).
+    const kinds = new Set([...ofSet.values()].map(task => task.object + '|' + task.variant));
+    const uncovered = !realTier ? [] : [...objectTasks.keys()].sort().flatMap(object => REAL_VARIANTS.filter(variant => !kinds.has(object + '|' + variant)).map(variant => ({ object, variant })));
     if (realTier) {
-      const kinds = new Set([...ofSet.values()].map(task => task.object + '|' + task.variant));
-      const uncovered = [...objectTasks.keys()].sort().flatMap(object => REAL_VARIANTS.filter(variant => !kinds.has(object + '|' + variant)).map(variant => ({ object, variant })));
       for (const { object, variant } of uncovered) expected.set(object + ' ' + variant + ' (no task in these batches)', { object, variant });
       if (uncovered.length) {
         problems.push('set ' + set + ' (real tier) has no task in these batches for ' + uncovered.length + ' object × variant' + (uncovered.length === 1 ? '' : 's') + ' (' +
@@ -995,7 +1002,8 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
       if (records.some(record => record?.demoted)) return 'demoted';
       // The real tier's missing tasks only shrink its completed objects.
       if (!realTier && records.some(record => record?.missing.length)) return 'missing_tasks';
-      if (records.some(record => record?.unlisted.length)) return 'unlisted_gaps';
+      // An object without one of the real variants is everyone's gap, roster or not.
+      if (records.some(record => record?.unlisted.length) || uncovered.length) return 'unlisted_gaps';
       if (realTier && pair.objects < REAL_TIER_MIN_OBJECTS) return 'few_complete_objects';
       if (pair.objects < 2) return 'few_objects';
       if (!finite(pair.p_t)) return 'undefined_test';
