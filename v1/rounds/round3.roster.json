@@ -3,16 +3,47 @@
   "round": "round3",
   "decided_at": null,
   "decisions": "docs/V1-ROUND3.md",
-  "note": "Reconstructed on 2026-10-28 from docs/V1-ROUND3.md section 5 to re-report Round 3 with two ladders and Holm's correction; it reproduces the ladders that document reports, and is not a decision taken before the data. Default ladder: each client at high (Claude Code's Haiku ran without an effort flag); top ladder: the highest effort each client was asked for (max; Codex ultra and Grok xhigh were not run). Model ids are as result.json records them.",
+  "required_variants": ["t2", "t4", "c1"],
+  "note": "Reconstructed on 2026-10-28 from docs/V1-ROUND3.md section 5 to re-report Round 3 with two ladders and Holm's correction; it reproduces the ladders that document reports, and is not a decision taken before the data. Default ladder: each client at high (Claude Code's Haiku ran without an effort flag); top ladder: the highest effort each client was asked for (max; Codex ultra and Grok xhigh were not run). Model ids are as result.json records them. Required variants: the three variants every configuration ran on the test set (its three-variant headline); t1 and t3 were run by some configurations only, so they are not owed, and the memory set owes nothing (the real set, a real tier, owes all its tasks). The six configurations that did not run the real-building set list its four tasks as missing, so the real tier reports them as permanently missing rather than as unlisted gaps.",
   "configurations": [
     { "system": "codex", "model": "gpt-6-astra", "effort": "high", "ladder": "default" },
-    { "system": "codex", "model": "gpt-6-astra", "effort": "max", "ladder": "top" },
-    { "system": "codex", "model": "gpt-6.1-sol", "effort": "high", "ladder": "default" },
-    { "system": "codex", "model": "gpt-6.1-sol", "effort": "max", "ladder": "top" },
+    { "system": "codex", "model": "gpt-6-astra", "effort": "max", "ladder": "top", "missing_tasks": [
+        { "task": "real-0001-r2", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" },
+        { "task": "real-0001-r4", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" },
+        { "task": "real-0002-r2", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" },
+        { "task": "real-0002-r4", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" }
+    ] },
+    { "system": "codex", "model": "gpt-6.1-sol", "effort": "high", "ladder": "default", "missing_tasks": [
+        { "task": "real-0001-r2", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" },
+        { "task": "real-0001-r4", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" },
+        { "task": "real-0002-r2", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" },
+        { "task": "real-0002-r4", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" }
+    ] },
+    { "system": "codex", "model": "gpt-6.1-sol", "effort": "max", "ladder": "top", "missing_tasks": [
+        { "task": "real-0001-r2", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" },
+        { "task": "real-0001-r4", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" },
+        { "task": "real-0002-r2", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" },
+        { "task": "real-0002-r4", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" }
+    ] },
     { "system": "claude-code", "model": "claude-opus-5-5", "effort": "high", "ladder": "default" },
-    { "system": "claude-code", "model": "claude-opus-5-5", "effort": "max", "ladder": "top" },
-    { "system": "codex", "model": "gpt-6-sol", "effort": "high", "ladder": "default" },
-    { "system": "grok", "model": "grok-4.7-build-fast", "effort": "high", "ladder": "default" },
+    { "system": "claude-code", "model": "claude-opus-5-5", "effort": "max", "ladder": "top", "missing_tasks": [
+        { "task": "real-0001-r2", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" },
+        { "task": "real-0001-r4", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" },
+        { "task": "real-0002-r2", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" },
+        { "task": "real-0002-r4", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" }
+    ] },
+    { "system": "codex", "model": "gpt-6-sol", "effort": "high", "ladder": "default", "missing_tasks": [
+        { "task": "real-0001-r2", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" },
+        { "task": "real-0001-r4", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" },
+        { "task": "real-0002-r2", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" },
+        { "task": "real-0002-r4", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" }
+    ] },
+    { "system": "grok", "model": "grok-4.7-build-fast", "effort": "high", "ladder": "default", "missing_tasks": [
+        { "task": "real-0001-r2", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" },
+        { "task": "real-0001-r4", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" },
+        { "task": "real-0002-r2", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" },
+        { "task": "real-0002-r4", "reason": "not run: Round 3 ran the real-building set with six configurations only (docs/V1-ROUND3.md section 3)" }
+    ] },
     { "system": "grok", "model": "grok-4.6", "effort": "high", "ladder": "default" },
     { "system": "grok", "model": "grok-4.7", "effort": "high", "ladder": "default" },
     { "system": "codex", "model": "gpt-5.6-luna", "effort": "high", "ladder": "default" },

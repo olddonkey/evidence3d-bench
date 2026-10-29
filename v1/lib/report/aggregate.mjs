@@ -4,11 +4,13 @@ import { layout, VARIANTS, CONFLICT_VARIANTS, PROTOCOL } from '../contract.mjs';
 import { collectRuns, DEFAULT_EXCLUDED_STATUSES, UNNAMED_SET, UNKNOWN_SET, UNKNOWN_ARCHETYPE, scorerIdentity } from './collect.mjs';
 import { finite, mean, median, spread, sampleSD, summarise, pairedBootstrap, tInterval, tTestP, holmAdjust, pooledSD, sdRange, detectableDifference,
   BOOTSTRAP_SAMPLES, PAIRWISE_SAMPLES, LOW_EVIDENCE_OBJECTS, SMALL_SAMPLE_OBJECTS, TIE_TOLERANCE, FAMILY_ALPHA } from './stats.mjs';
-import { LADDERS, LADDER_RULE, inferLadders, parseRoster, rosterProvenance } from './roster.mjs';
+import { LADDERS, LADDER_RULE, MISSING_SHARE_LIMIT, inferLadders, parseRoster, rosterProvenance } from './roster.mjs';
 import { timeCurve, T95_SHARE, T95_MIN_FINAL, ON_TIME_SECONDS } from './curves.mjs';
 
 // v3: ladders, Holm-corrected verdicts, reference rows (rank null) when a roster is given.
-export const LEADERBOARD_SCHEMA = 'e3d-leaderboard-v3';
+// v4: incomplete pairs (verdict 'incomplete', in every family with p = 1), frozen
+// families, demoted configurations (rank null) and set.completeness.
+export const LEADERBOARD_SCHEMA = 'e3d-leaderboard-v4';
 export const VARIANT_ORDER = Object.keys(VARIANTS);
 // Adjacent rungs of the evidence ladder (kept for readers of earlier
 // leaderboards); evidence_deltas covers every pair of variants present.
@@ -17,8 +19,14 @@ export const LADDER = [['t2', 't1'], ['t3', 't2'], ['t4', 't3']];
 // shown with its range and marked as resting on little data: at 10 df its 95 %
 // range is still about x0.69 to x1.75, at 4 df x0.60 to x2.9.
 export const LITTLE_DATA_DF = 10;
-// The test run's planned size; variance projections are made to this many objects.
-export const PLANNED_OBJECTS = 24;
+// The next round's planned size (Round 4: 72 objects, docs/V1-ROUND4-PLAN.md
+// section 3); variance projections are made to this many objects.
+export const PLANNED_OBJECTS = 72;
+// The real tier compares two configurations only on the objects both
+// completed (every task of the object), and decides only with at least this
+// many (docs/V1-ROUND4-PLAN.md section 3); below it, no interval either.
+export const REAL_TIER_MIN_OBJECTS = 8;
+const REAL_VARIANTS = Object.keys(VARIANTS).filter(variant => VARIANTS[variant].real);
 
 // What a named set is, where the report knows more than its name. A set is
 // recorded per task in truth.json; the dev set's objects were used while the
@@ -266,7 +274,7 @@ function cellEntry(key, set, attempts, seed, { deltaPairs = [], archetypes = [],
   const perTask = taskMeans(attempts);
   const attemptCounts = [...perTask.values()].map(task => task.attempts);
   return {
-    key, set, system: first.system, model: first.model, effort: first.effort,
+    key, set, system: first?.system ?? null, model: first?.model ?? null, effort: first?.effort ?? null,
     batches: [...new Set(attempts.map(attempt => attempt.batch))].sort(),
     attempts: attempts.length,
     tasks: new Set(attempts.map(attempt => attempt.task_id)).size,
@@ -420,25 +428,54 @@ export function pairStatement(row) {
 //   effort         top minus default effort of one client and model.
 // A pair is separated after correction when its Holm-adjusted p is below
 // FAMILY_ALPHA and its uncorrected verdict already separates it (both 95 %
-// intervals exclude zero), so correction only ever removes separations. A
-// pair with fewer than two objects is untestable and is not counted in m. The
+// intervals exclude zero), so correction only ever removes separations. The
 // same pair can stay separated in a small family and not in a large one: the
 // larger table makes more claims, and every table states its m.
+//
+// A family's members are fixed by the roster (docs/V1-ROUND4-PLAN.md section
+// 4): every pair it implies counts in m, also one that cannot be decided. Such
+// a pair is `incomplete`: it keeps its gap (and, where they exist, its
+// intervals) but gets no verdict and enters Holm with p = 1, so it can never
+// make another pair easier to separate. The reasons, in the order checked:
+
+export const INCOMPLETE_REASONS = {
+  demoted: 'a configuration the roster demoted',
+  missing_tasks: 'tasks the roster lists as missing',
+  unlisted_gaps: 'tasks without a counted sample that the roster does not list as missing (a data problem)',
+  few_complete_objects: 'fewer than ' + REAL_TIER_MIN_OBJECTS + ' objects both completed (real tier)',
+  few_objects: 'fewer than 2 objects run by both',
+  undefined_test: 'the paired t test is undefined (the per-object differences do not vary)',
+};
 
 const SEPARATED = new Set(['a_higher', 'b_higher']);
 
-// -> one entry per row, in order: { family, comparisons, p_adjusted, verdict }, null when untestable.
+// -> one entry per row, in order: { family, comparisons, p_adjusted, verdict }.
+// Every row counts in m; an incomplete one enters with p = 1.
 export function correctFamily(rows, family) {
-  const tested = rows.map(row => row.verdict !== 'not_evaluated' && finite(row.p_t) ? row.p_t : null);
-  const adjusted = holmAdjust(tested), comparisons = tested.filter(finite).length;
-  return rows.map((row, index) => adjusted[index] === null ? null : { family, comparisons, p_adjusted: adjusted[index],
-    verdict: adjusted[index] < FAMILY_ALPHA && SEPARATED.has(row.verdict) ? row.verdict : 'not_separated' });
+  const tested = rows.map(row => row.verdict === 'incomplete' || !finite(row.p_t) ? 1 : row.p_t);
+  const adjusted = holmAdjust(tested), comparisons = rows.length;
+  return rows.map((row, index) => ({ family, comparisons, p_adjusted: adjusted[index],
+    verdict: row.verdict === 'incomplete' ? 'incomplete' : adjusted[index] < FAMILY_ALPHA && SEPARATED.has(row.verdict) ? row.verdict : 'not_separated' }));
 }
 
 function familySummary(rows, family) {
   const tested = rows.filter(row => row.holm);
   return { family, method: 'holm', alpha: FAMILY_ALPHA, test: 'paired t test, two-sided', comparisons: tested.length,
-    separated_uncorrected: tested.filter(row => SEPARATED.has(row.verdict)).length, separated: tested.filter(row => SEPARATED.has(row.holm.verdict)).length };
+    separated_uncorrected: tested.filter(row => SEPARATED.has(row.verdict)).length, separated: tested.filter(row => SEPARATED.has(row.holm.verdict)).length,
+    incomplete: tested.filter(row => row.verdict === 'incomplete').length };
+}
+
+// Marks a pair as undecidable, keeping its gap; `intervals: false` also drops
+// its intervals (the real tier gives none below its object minimum).
+function makeIncomplete(pair, reason, { intervals = true } = {}) {
+  if (!intervals) Object.assign(pair, { ci95: null, t_ci95: null, share_a_higher: null, share_b_higher: null, samples: null, excludes_zero: false, t_excludes_zero: false });
+  pair.verdict = 'incomplete';
+  pair.incomplete = reason;
+  pair.statement = pair.a + ' vs ' + pair.b + ': incomplete, no verdict: ' + INCOMPLETE_REASONS[reason] + '. ' +
+    (pair.objects ? 'A - B = ' + signedText(pair.mean_difference) + ' points per object over ' + pair.objects + ' object' + (pair.objects === 1 ? '' : 's') +
+      (pair.ci95 ? ' (95% bootstrap interval ' + intervalText(pair.ci95) + (pair.t_ci95 ? ', Student-t ' + intervalText(pair.t_ci95) : '') + ')' : '') + '.'
+      : 'No object run by both.');
+  return pair;
 }
 
 // A p-value as printed: three decimals, below 0.001 as a bound.
@@ -446,8 +483,10 @@ export const pText = p => !finite(p) ? 'n/a' : p < 0.001 ? '< 0.001' : '= ' + p.
 
 export function holmSentence(row) {
   if (!row.holm) return '';
+  const pairs = row.holm.comparisons + (row.holm.comparisons === 1 ? ' pair' : ' pairs');
+  if (row.holm.verdict === 'incomplete') return ' It counts among the ' + pairs + ' of Holm\'s correction for this table with p = 1.';
   const after = SEPARATED.has(row.holm.verdict) ? 'still separated' : SEPARATED.has(row.verdict) ? 'no longer separated' : 'not separated';
-  return ' After Holm\'s correction over the ' + row.holm.comparisons + ' pairs of this table (adjusted p ' + pText(row.holm.p_adjusted) + '): ' + after + '.';
+  return ' After Holm\'s correction over the ' + pairs + ' of this table (adjusted p ' + pText(row.holm.p_adjusted) + '): ' + after + '.';
 }
 
 // For a set: pair -> a note when the same pair, in the table of every formal
@@ -458,15 +497,16 @@ export function allPairsNote(set) {
   for (const pair of set.pairwise.pairs) if (pair.holm) holms.set(pair.a + '|' + pair.b, pair.holm).set(pair.b + '|' + pair.a, pair.holm);
   return pair => {
     const other = pair.holm ? holms.get(pair.a + '|' + pair.b) : null;
-    if (!other || other === pair.holm || SEPARATED.has(other.verdict) === SEPARATED.has(pair.holm.verdict)) return '';
+    if (!other || other === pair.holm || other.verdict === 'incomplete' || pair.holm.verdict === 'incomplete' ||
+      SEPARATED.has(other.verdict) === SEPARATED.has(pair.holm.verdict)) return '';
     return (SEPARATED.has(other.verdict) ? 'separated' : 'not separated') + ' in the table of all ' + other.comparisons + ' pairs (adj. p ' + pText(other.p_adjusted) + ')';
   };
 }
 
 // A pair without its per-object rows, for the ladder and effort tables.
 const slimPair = pair => ({ a: pair.a, b: pair.b, objects: pair.objects, tasks: pair.tasks, mean_difference: pair.mean_difference, ci95: pair.ci95,
-  t_ci95: pair.t_ci95, p_t: pair.p_t, won: pair.won, tied: pair.tied, lost: pair.lost, verdict: pair.verdict, small_sample: pair.small_sample,
-  low_evidence: pair.low_evidence });
+  t_ci95: pair.t_ci95, p_t: pair.p_t, won: pair.won, tied: pair.tied, lost: pair.lost, verdict: pair.verdict, incomplete: pair.incomplete ?? null,
+  small_sample: pair.small_sample, low_evidence: pair.low_evidence });
 
 // The same comparison read the other way round, B - A.
 const flip = ci => ci ? [-ci[1], -ci[0]] : null;
@@ -474,33 +514,116 @@ const OPPOSITE = { a_higher: 'b_higher', b_higher: 'a_higher' };
 const reversed = pair => ({ ...pair, a: pair.b, b: pair.a, mean_difference: finite(pair.mean_difference) ? -pair.mean_difference : pair.mean_difference,
   ci95: flip(pair.ci95), t_ci95: flip(pair.t_ci95), won: pair.lost, lost: pair.won, verdict: OPPOSITE[pair.verdict] ?? pair.verdict });
 
-// The two ladders of one set and the effort pairs between them. `ranked` is
-// in score order, so a ladder's pairs keep the pairwise table's orientation.
-function setLadders(ranked, pairs, roster, cells) {
+// The two ladders of one set and the effort pairs between them. `order` is
+// the set's configurations in score order (then roster configurations with no
+// counted attempt), so a ladder's pairs keep the pairwise table's orientation.
+// With a roster a ladder's members are the roster's, present or not, demoted
+// or not: its family is fixed. A ladder ranks its present, undemoted members.
+function setLadders(order, entryOf, pairs, roster, cells) {
   const byKeys = new Map(pairs.map(pair => [pair.a + '|' + pair.b, pair]));
   const pairOf = (a, b) => byKeys.has(a + '|' + b) ? slimPair(byKeys.get(a + '|' + b)) : reversed(slimPair(byKeys.get(b + '|' + a)));
+  const infoOf = key => roster?.keys.get(key) ?? entryOf.get(key);
   const corrected = (rows, family) => {
     correctFamily(rows, family).forEach((holm, index) => { rows[index].holm = holm; });
     return { pairs: rows, correction: familySummary(rows, family) };
   };
   const members = new Map();
   const ladders = LADDERS.map(ladder => {
-    const on = ranked.filter(entry => !entry.reference && entry.ladders.includes(ladder.id));
+    const on = order.filter(key => !(roster && !roster.keys.has(key)) && (infoOf(key)?.ladders ?? []).includes(ladder.id));
     members.set(ladder.id, on);
     const rows = [];
-    for (let i = 0; i < on.length; i++) for (let j = i + 1; j < on.length; j++) rows.push(pairOf(on[i].key, on[j].key));
-    return { id: ladder.id, label: ladder.label, entries: on.map((entry, index) => ({ key: entry.key, rank: index + 1 })),
+    for (let i = 0; i < on.length; i++) for (let j = i + 1; j < on.length; j++) rows.push(pairOf(on[i], on[j]));
+    // Ranked members first, in score order, then those without a leaderboard
+    // rank (demoted, or in the real tier without a complete object).
+    const present = on.filter(key => entryOf.has(key)), unranked = key => entryOf.get(key).rank === null;
+    let rank = 0;
+    const entries = [...present.filter(key => !unranked(key)), ...present.filter(unranked)].map(key => ({ key, rank: unranked(key) ? null : ++rank }));
+    return { id: ladder.id, label: ladder.label, entries,
       // Listed in the roster for this ladder, but no counted attempt in this set.
       missing: roster ? roster.configurations.filter(item => item.ladders.includes(ladder.id) && !cells.has(item.key)).map(item => item.key) : [],
       pairwise: corrected(rows, ladder.id) };
   });
   const effort = [];
   for (const top of members.get('top')) {
-    const base = members.get('default').find(entry => entry.system === top.system && entry.model === top.model);
-    if (!base || base.key === top.key) continue;
-    effort.push({ system: top.system, model: top.model, default_effort: base.effort, top_effort: top.effort, ...pairOf(top.key, base.key) });
+    const high = infoOf(top), base = members.get('default').find(key => infoOf(key).system === high.system && infoOf(key).model === high.model);
+    if (!base || base === top) continue;
+    effort.push({ system: high.system, model: high.model, default_effort: infoOf(base).effort, top_effort: high.effort, ...pairOf(top, base) });
   }
   return { ladders, effort: corrected(effort, 'effort') };
+}
+
+// Every task of a set: those an attempt ran, and those a batch planned or the
+// roster lists (`taskInfo`, collectRuns), run or not.
+function setTasks(set, inSet, taskInfo) {
+  const tasks = new Map();
+  for (const attempt of inSet) tasks.set(attempt.task_id, { object: attempt.object, variant: attempt.variant });
+  for (const [task, info] of taskInfo ?? []) if (info.set === set && !tasks.has(task)) tasks.set(task, { object: info.object, variant: info.variant });
+  return tasks;
+}
+
+// A real-tier configuration's own figures (docs/V1-ROUND4-PLAN.md section 3)
+// use its complete objects only: every per-object summary of cellEntry below,
+// recomputed on those objects, each without intervals when it rests on fewer
+// than REAL_TIER_MIN_OBJECTS objects (an archetype row of five objects, say),
+// and empty without a complete object. Bookkeeping (attempts, success, statuses, time,
+// tokens, cost, batches) counts every counted attempt.
+const REAL_TIER_FIGURES = ['score', 'variants', 'archetypes', 'ladder', 'evidence_deltas', 'conflict', 'memory', 'shape', 'detail', 'detail_categories',
+  'probe_error', 'frame_error', 'scale_error_pct', 'time_curve'];
+const INTERVALS = new Set(['ci95', 't_ci95', 'detectable_range']);
+const withoutIntervals = value => Array.isArray(value) ? value.map(withoutIntervals) : value && typeof value === 'object'
+  ? Object.fromEntries(Object.entries(value).map(([name, item]) => [name, INTERVALS.has(name) ? null : withoutIntervals(item)])) : value;
+// The same per summary: one that records its `objects` is judged on them, one
+// that does not on those of the summary around it.
+const gateIntervals = (value, objects) => {
+  if (Array.isArray(value)) return value.map(item => gateIntervals(item, objects));
+  if (!value || typeof value !== 'object') return value;
+  const own = finite(value.objects) ? value.objects : objects;
+  return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, INTERVALS.has(name) && own < REAL_TIER_MIN_OBJECTS ? null : gateIntervals(item, own)]));
+};
+
+// The tasks a main set asks of every formal configuration: all of them, or
+// those of the roster's required variants when it names them. (A real-tier set
+// owes all of its tasks.)
+const owedTasks = (tasks, roster) => roster?.required_variants ? new Map([...tasks].filter(([, info]) => roster.required_variants.includes(info.variant))) : tasks;
+
+// One roster configuration against what the set asks: tasks with a counted
+// sample, the gaps the roster lists (with its reasons) and those it does not.
+// A demotion applies only where it can (`demotable`: not in the real tier).
+function completenessOf(item, attempts, expected, { demotable = true } = {}) {
+  const sampled = new Set(attempts.map(attempt => attempt.task_id)), listed = new Map(item.missing_tasks.map(gap => [gap.task, gap.reason]));
+  const gaps = [...expected.keys()].filter(task => !sampled.has(task)).sort();
+  return {
+    key: item.key, present: attempts.length > 0, expected: expected.size, sampled: expected.size - gaps.length,
+    missing: gaps.filter(task => listed.has(task)).map(task => ({ task, reason: listed.get(task) })),
+    unlisted: gaps.filter(task => !listed.has(task)),
+    listed_but_sampled: [...listed.keys()].filter(task => expected.has(task) && sampled.has(task)).sort(),
+    demoted: demotable ? item.demoted : null,
+  };
+}
+
+const share = (count, total) => total ? count / total : 0;
+const percentText = value => (Math.round(1000 * value) / 10) + ' %';
+const firstFew = (list, count = 3) => list.slice(0, count).join(', ') + (list.length > count ? ', ...' : '');
+
+// The roster's completeness rules (docs/V1-ROUND4-PLAN.md section 2). Over the
+// limit without being demoted refuses the roster; the rest are data problems.
+function checkCompleteness(record, { set, realTier, roster, problems }) {
+  const name = 'roster' + (roster.file ? ' ' + roster.file : ''), part = share(record.missing.length, record.expected);
+  if (!realTier && !record.demoted && part > MISSING_SHARE_LIMIT) {
+    throw new Error(name + ' refused: in set ' + set + ', ' + record.key + ' misses ' + record.missing.length + ' of ' + record.expected + ' tasks (' +
+      percentText(part) + '), more than ' + percentText(MISSING_SHARE_LIMIT) + '; the roster must mark it demoted, with the reason');
+  }
+  if (!realTier && record.demoted && part <= MISSING_SHARE_LIMIT) {
+    problems.push(name + ' demotes ' + record.key + ', but in set ' + set + ' it misses only ' + record.missing.length + ' of ' + record.expected + ' listed tasks (' +
+      percentText(part) + '), within the ' + percentText(MISSING_SHARE_LIMIT) + ' that keeps a configuration ranked');
+  }
+  if (record.unlisted.length) {
+    problems.push('set ' + set + ': ' + record.key + ' has no counted sample on ' + record.unlisted.length + ' task' + (record.unlisted.length === 1 ? '' : 's') +
+      ' that the roster does not list as missing (' + firstFew(record.unlisted) + '); its pairs get no verdict');
+  }
+  if (record.listed_but_sampled.length) {
+    problems.push(name + ' lists ' + firstFew(record.listed_but_sampled) + ' as missing for ' + record.key + ', but set ' + set + ' has a counted sample; the sample counts');
+  }
 }
 
 // --------------------------------------------------------------- variance
@@ -649,12 +772,31 @@ export function varianceStatement(row) {
   return text;
 }
 
-function setVariance(ranked, cells, pairs, plannedObjects) {
-  const configurations = ranked.map(entry => configurationVariance(entry, cells.get(entry.key)));
+// The objects an attempt SD rests on: those with a task run at least twice.
+const repeatedObjects = attempts => new Set([...taskScores(attempts).values()].filter(task => task.values.length >= 2).map(task => task.object));
+
+// `minObjects`: below it a figure keeps its point value but no interval or
+// range (the real tier's minimum; its cells hold complete objects only). Each
+// figure is judged on the objects it rests on: an object SD on the objects, an
+// attempt SD on the objects with a repeated task, a pair on its paired objects.
+function setVariance(ranked, cells, pairs, plannedObjects, { minObjects = 0 } = {}) {
+  const configurations = ranked.map(entry => {
+    const row = configurationVariance(entry, cells.get(entry.key));
+    if (row.object_sd.objects < minObjects) row.object_sd = withoutIntervals(row.object_sd);
+    if (repeatedObjects(cells.get(entry.key)).size < minObjects) row.attempt_sd = withoutIntervals(row.attempt_sd);
+    return row;
+  });
   const noise = new Map(configurations.map(item => [item.key, item.attempt_sd]));
-  const pairRows = pairs.map(pair => pairVariance(pair, cells.get(pair.a), cells.get(pair.b), noise.get(pair.a), noise.get(pair.b), plannedObjects));
+  const pairRows = pairs.map(pair => {
+    const row = pairVariance(pair, cells.get(pair.a), cells.get(pair.b), noise.get(pair.a), noise.get(pair.b), plannedObjects);
+    if (row.objects >= minObjects) return row;
+    const bare = withoutIntervals(row);
+    bare.statement = varianceStatement(bare);
+    return bare;
+  });
   // One sentence on where the noise is, from the medians across configurations and pairs.
   const all = pooledSD(ranked.flatMap(entry => [...taskScores(cells.get(entry.key)).values()].map(task => task.values)));
+  const pooledObjects = new Set(ranked.flatMap(entry => [...repeatedObjects(cells.get(entry.key))])).size;
   const objectSD = median(configurations.map(item => item.object_sd.sd)), pairSD = median(pairRows.map(row => row.difference_sd.sd));
   const parts = [];
   if (finite(objectSD)) parts.push('scores of one configuration spread between objects with SD ' + fixed(objectSD) + ' (median over configurations)');
@@ -664,7 +806,8 @@ function setVariance(ranked, cells, pairs, plannedObjects) {
   const repeats = finite(all.sd) ? '' : ' No task was run more than once, so the noise between attempts cannot be separated from the rest: it is inside every number above.';
   return {
     planned_objects: plannedObjects, little_data_df: LITTLE_DATA_DF,
-    attempt_sd_pooled: sdEntry(all.sd, all.df, { tasks: all.groups, basis: 'all configurations of the set pooled' }),
+    attempt_sd_pooled: (pooled => pooledObjects < minObjects ? withoutIntervals(pooled) : pooled)(sdEntry(all.sd, all.df, { tasks: all.groups, objects: pooledObjects,
+      basis: 'all configurations of the set pooled' })),
     configurations, pairs: pairRows,
     summary: parts.length ? 'In this set, ' + parts.join(', ') + '.' + repeats : null,
   };
@@ -756,7 +899,21 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
   // Attempts assembled by hand (tests, calibration) may carry no set or archetype.
   const all = collected.attempts.map(attempt => attempt.set && attempt.archetype ? attempt
     : { ...attempt, set: attempt.set || UNNAMED_SET, archetype: attempt.archetype || UNKNOWN_ARCHETYPE });
-  const setIds = [...new Set(all.map(attempt => attempt.set))]
+  // Roster configurations by the sets their batches were prepared for: taking
+  // part in a set needs no result.json (a batch that failed preflight, or has
+  // not finished its first attempt, still owes its tasks).
+  const preparedFor = new Map();
+  for (const plan of roster ? collected.plans ?? [] : []) {
+    const key = cellKey(plan);
+    if (!roster.keys.has(key)) continue;
+    for (const task of plan.tasks) {
+      const set = collected.taskInfo?.get(task)?.set;
+      if (!set) continue;
+      if (!preparedFor.has(set)) preparedFor.set(set, new Set());
+      preparedFor.get(set).add(key);
+    }
+  }
+  const setIds = [...new Set([...all.map(attempt => attempt.set), ...preparedFor.keys()])]
     .sort((p, q) => (p === UNKNOWN_SET) - (q === UNKNOWN_SET) || (p === UNNAMED_SET) - (q === UNNAMED_SET) || p.localeCompare(q));
   const entries = [], sets = [];
   for (const set of setIds) {
@@ -773,16 +930,71 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
     const deltaPairs = variantPairs([...new Set(counted.map(attempt => attempt.variant))]);
     const archetypeIds = [...new Set(counted.map(attempt => attempt.archetype))].sort((p, q) => (p === UNKNOWN_ARCHETYPE) - (q === UNKNOWN_ARCHETYPE) || p.localeCompare(q));
     const categoryIds = detailCategories(counted);
-    const ranked = [...cells].map(([key, attempts]) => cellEntry(key, set, attempts, seed, { deltaPairs, archetypes: archetypeIds, categories: categoryIds }));
+    // The real tier: a set of real-building tasks only (docs/V1-ROUND4-PLAN.md
+    // section 3). Its own completeness rule replaces the main sets' 5 % demotion
+    // and their no verdict on listed gaps, and it owes every one of its tasks.
+    const ofSet = setTasks(set, inSet, collected.taskInfo);
+    const realTier = ofSet.size > 0 && [...ofSet.values()].every(task => variantFamily(task.variant) === 'real');
+    const expected = realTier ? new Map(ofSet) : owedTasks(ofSet, roster);
+    // Real tier: the objects a configuration completed, every task of the
+    // object in the set sampled and both real variants (r2 and r4) among them.
+    const objectTasks = new Map();
+    for (const [task, info] of ofSet) {
+      if (!objectTasks.has(info.object)) objectTasks.set(info.object, []);
+      objectTasks.get(info.object).push(task);
+    }
+    // The variants every object owes: in the real tier both real variants; in
+    // a main set the roster's required variants of the families the object's
+    // own tasks belong to (none without required_variants). An object with no
+    // task of one in these batches is a gap of every configuration, owed under
+    // a placeholder id (the task does not exist here to be named).
+    const objectFamilies = new Map();
+    for (const task of ofSet.values()) {
+      if (!objectFamilies.has(task.object)) objectFamilies.set(task.object, new Set());
+      objectFamilies.get(task.object).add(variantFamily(task.variant));
+    }
+    const owedVariants = realTier ? REAL_VARIANTS : roster?.required_variants ?? [];
+    const kinds = new Set([...ofSet.values()].map(task => task.object + '|' + task.variant));
+    const uncovered = [...objectFamilies.keys()].sort().flatMap(object => owedVariants
+      .filter(variant => objectFamilies.get(object).has(variantFamily(variant)) && !kinds.has(object + '|' + variant)).map(variant => ({ object, variant })));
+    const uncoveredVariants = [...new Set(uncovered.map(gap => gap.variant))];
+    for (const { object, variant } of uncovered) expected.set(object + ' ' + variant + ' (no task in these batches)', { object, variant });
+    if (uncovered.length) {
+      problems.push('set ' + set + ' (' + (realTier ? 'real tier' : 'required variant' + (uncoveredVariants.length === 1 ? ' ' : 's ') + uncoveredVariants.join(', ')) + ') has no task in these batches for ' +
+        uncovered.length + ' object × variant' + (uncovered.length === 1 ? '' : 's') + ' (' +
+        firstFew(uncovered.map(({ object, variant }) => object + ' ' + variant)) + '): every formal configuration owes them, so its pairs get no verdict');
+    }
+    const completed = new Map(realTier ? [...cells].map(([key, attempts]) => {
+      const sampled = new Set(attempts.map(attempt => attempt.task_id)), kinds = new Set(attempts.map(attempt => attempt.object + '|' + attempt.variant));
+      return [key, new Set([...objectTasks].filter(([object, tasks]) => tasks.every(task => sampled.has(task)) &&
+        REAL_VARIANTS.every(variant => kinds.has(object + '|' + variant))).map(([object]) => object))];
+    }) : []);
+    const completedOf = key => completed.get(key) ?? new Set();
+    // In the real tier a configuration's own scores use its complete objects
+    // only, with intervals from REAL_TIER_MIN_OBJECTS of them (section 3).
+    const ranked = [...cells].map(([key, attempts]) => {
+      const options = { deltaPairs, archetypes: archetypeIds, categories: categoryIds }, entry = cellEntry(key, set, attempts, seed, options);
+      if (realTier) {
+        const complete = completedOf(key), enough = complete.size >= REAL_TIER_MIN_OBJECTS;
+        const figures = cellEntry(key, set, attempts.filter(attempt => complete.has(attempt.object)), seed, options);
+        for (const name of REAL_TIER_FIGURES) entry[name] = gateIntervals(figures[name], complete.size);
+        entry.real_tier = { complete_objects: complete.size, sampled_objects: entry.objects, intervals: enough };
+      }
+      return entry;
+    });
     ranked.sort((a, b) => (b.score.mean ?? -Infinity) - (a.score.mean ?? -Infinity) || a.key.localeCompare(b.key));
-    // Formal configurations are ranked; reference rows (not in the roster) keep
-    // their place in score order for the pairwise orientation but get no rank.
+    // Formal configurations are ranked; reference rows (not in the roster),
+    // demoted ones (main sets only) and real-tier ones without a complete
+    // object keep their place in score order for the pairwise orientation but
+    // get no rank.
     const placement = roster ? null : inferLadders(ranked.map(({ key, system, model, effort }) => ({ key, system, model, effort })));
     let rank = 0;
     for (const entry of ranked) {
-      entry.reference = roster ? !roster.keys.has(entry.key) : false;
-      entry.ladders = roster ? roster.keys.get(entry.key)?.ladders ?? [] : placement.ladders.get(entry.key);
-      entry.rank = entry.reference ? null : ++rank;
+      const listed = roster?.keys.get(entry.key);
+      entry.reference = roster ? !listed : false;
+      entry.demoted = realTier ? null : listed?.demoted ?? null;
+      entry.ladders = roster ? listed?.ladders ?? [] : placement.ladders.get(entry.key);
+      entry.rank = entry.reference || entry.demoted || !finite(entry.score.mean) ? null : ++rank;
     }
     for (const entry of ranked) {
       entry.provenance_conflicts = disagreements(entry.batches.map(id => batchById.get(id)).filter(Boolean),
@@ -796,22 +1008,59 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
     // rank and no score, but listed so they do not silently vanish.
     const unranked = [...new Set(inSet.filter(attempt => attempt.excluded).map(cellKey))].filter(key => !cells.has(key)).sort()
       .map(key => ({ key, excluded_attempts: inSet.filter(attempt => cellKey(attempt) === key).length }));
+
+    // With a roster the families are frozen: once any roster configuration took
+    // part in this set (an attempt, counted or excluded, or a batch prepared
+    // with tasks of the set), every roster configuration belongs to it,
+    // present or not.
+    const frozen = Boolean(roster) && (preparedFor.has(set) || inSet.some(attempt => roster.keys.has(cellKey(attempt))));
+    const completeness = frozen ? roster.configurations.map(item => ({ ...completenessOf(item, cells.get(item.key) ?? [], expected, { demotable: !realTier }),
+      ...(realTier ? { complete_objects: completedOf(item.key).size } : {}) })) : [];
+    const byKey = new Map(completeness.map(record => [record.key, record]));
+    for (const record of completeness) checkCompleteness(record, { set, realTier, roster, problems });
+    const absent = frozen ? roster.configurations.filter(item => !cells.has(item.key)).map(item => item.key) : [];
+    const order = [...ranked.map(entry => entry.key), ...absent];
+    const isReference = key => Boolean(roster) && !roster.keys.has(key);
+    // Why a pair cannot be decided, in the order of INCOMPLETE_REASONS; null when it can.
+    const incompleteReason = pair => {
+      const records = [byKey.get(pair.a), byKey.get(pair.b)];
+      if (records.some(record => record?.demoted)) return 'demoted';
+      // The real tier's missing tasks only shrink its completed objects.
+      if (!realTier && records.some(record => record?.missing.length)) return 'missing_tasks';
+      // An object without one of its owed variants is everyone's gap, roster or not.
+      if (records.some(record => record?.unlisted.length) || uncovered.length) return 'unlisted_gaps';
+      if (realTier && pair.objects < REAL_TIER_MIN_OBJECTS) return 'few_complete_objects';
+      if (pair.objects < 2) return 'few_objects';
+      if (!finite(pair.p_t)) return 'undefined_test';
+      return null;
+    };
     const pairs = [];
-    for (let i = 0; i < ranked.length; i++) {
-      for (let j = i + 1; j < ranked.length; j++) {
-        const pairSeed = seed + '/pairwise/' + (set === UNNAMED_SET ? '' : set + '/') + ranked[i].key + '|' + ranked[j].key;
-        const pair = comparePair({ key: ranked[i].key, attempts: cells.get(ranked[i].key) }, { key: ranked[j].key, attempts: cells.get(ranked[j].key) }, { seed: pairSeed });
-        pair.reference = ranked[i].reference || ranked[j].reference;
+    for (let i = 0; i < order.length; i++) {
+      for (let j = i + 1; j < order.length; j++) {
+        const a = order[i], b = order[j];
+        let attemptsA = cells.get(a) ?? [], attemptsB = cells.get(b) ?? [];
+        const both = realTier ? new Set([...completedOf(a)].filter(object => completedOf(b).has(object))) : null;
+        if (both) { attemptsA = attemptsA.filter(attempt => both.has(attempt.object)); attemptsB = attemptsB.filter(attempt => both.has(attempt.object)); }
+        const pairSeed = seed + '/pairwise/' + (set === UNNAMED_SET ? '' : set + '/') + a + '|' + b;
+        const pair = comparePair({ key: a, attempts: attemptsA }, { key: b, attempts: attemptsB }, { seed: pairSeed });
+        pair.reference = isReference(a) || isReference(b);
+        if (both) pair.complete_objects = both.size;
+        const reason = incompleteReason(pair);
+        pair.incomplete = null;
+        // The real tier gives no interval below its object minimum, whatever the reason.
+        if (reason) makeIncomplete(pair, reason, { intervals: !(realTier && pair.objects < REAL_TIER_MIN_OBJECTS) });
         pairs.push(pair);
       }
     }
-    // Holm over every pair of formal configurations; a pair with a reference row
-    // keeps its uncorrected verdict and belongs to no family.
+    // Holm over every pair of formal configurations (demoted and absent ones
+    // included); a pair with a reference row keeps its uncorrected verdict and
+    // belongs to no family.
     const formalPairs = pairs.filter(pair => !pair.reference);
     correctFamily(formalPairs, 'all').forEach((holm, index) => { formalPairs[index].holm = holm; formalPairs[index].statement += holmSentence(formalPairs[index]); });
     for (const pair of pairs) pair.holm ??= null;
     const correction = familySummary(formalPairs, 'all');
-    const { ladders, effort } = setLadders(ranked, pairs, roster, cells);
+    const entryOf = new Map(ranked.map(entry => [entry.key, entry]));
+    const { ladders, effort } = setLadders(order, entryOf, pairs, roster, cells);
     // Comparisons within a set are only fair if every configuration saw the
     // same tool kit and protocol and was scored by the same scorer.
     const setBatches = [...new Set(inSet.map(attempt => attempt.batch))].map(id => batchById.get(id)).filter(Boolean);
@@ -827,8 +1076,15 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
     sets.push({
       id: set, named: set !== UNNAMED_SET && set !== UNKNOWN_SET,
       description: describeSet(set, new Set(inSet.map(attempt => attempt.task_id)), collected.setFiles),
-      configurations: ranked.filter(entry => !entry.reference).map(entry => entry.key),
+      configurations: ranked.filter(entry => entry.rank !== null).map(entry => entry.key),
+      demoted_configurations: ranked.filter(entry => entry.demoted && !entry.reference).map(entry => entry.key),
       reference_configurations: ranked.filter(entry => entry.reference).map(entry => entry.key),
+      // Roster configurations with no counted attempt in this set: still in every family.
+      absent_configurations: absent,
+      tier: realTier ? 'real' : 'main',
+      // Per roster configuration, what the set asked of it and what it lacks (null without a roster).
+      completeness: frozen ? { expected_tasks: expected.size, required_variants: realTier ? null : roster.required_variants, missing_share_limit: realTier ? null : MISSING_SHARE_LIMIT,
+        configurations: completeness } : null,
       objects: new Set(inSet.map(attempt => attempt.object)).size,
       variants: VARIANT_ORDER.filter(variant => counted.some(attempt => attempt.variant === variant)),
       variant_pairs: deltaPairs.map(([high, low]) => high + '-' + low),
@@ -852,20 +1108,33 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
         multiple_comparisons: pairs.length > 1
           ? pairs.length + ' pairs, each with its own 95% interval: if no configuration truly differed, the chance that at least one uncorrected interval ' +
             'would still exclude zero is about ' + Math.round(100 * (1 - 0.95 ** pairs.length)) + '% (1 - 0.95^' + pairs.length + ', for independent pairs). ' +
-            'Holm\'s correction over the ' + correction.comparisons + ' testable pairs of formal configurations (family-wise ' + Math.round(100 * FAMILY_ALPHA) + '%) keeps ' +
+            'Holm\'s correction over the ' + correction.comparisons + ' pairs of formal configurations (family-wise ' + Math.round(100 * FAMILY_ALPHA) + '%' +
+            (correction.incomplete ? '; ' + correction.incomplete + ' of them incomplete, entered with p = 1' : '') + ') keeps ' +
             correction.separated + ' of the ' + correction.separated_uncorrected + ' pairs separated without correction' +
             (pairs.length > formalPairs.length ? '; the ' + (pairs.length - formalPairs.length) + ' pairs with a reference row are not corrected.' : '.')
           : null,
       },
-      variance: setVariance(ranked, cells, pairs, plannedObjects),
+      // Only pairs of configurations with counted attempts carry a paired SD;
+      // in the real tier, on complete objects only (pairs already are).
+      variance: setVariance(ranked, realTier ? new Map([...cells].map(([key, attempts]) => [key, attempts.filter(attempt => completedOf(key).has(attempt.object))])) : cells,
+        pairs.filter(pair => cells.has(pair.a) && cells.has(pair.b)), plannedObjects, { minObjects: realTier ? REAL_TIER_MIN_OBJECTS : 0 }),
     });
-    entries.push(...ranked.filter(entry => !entry.reference), ...ranked.filter(entry => entry.reference));
+    // Ranked rows, then formal rows without a rank (demoted, or in the real
+    // tier without a complete object), then reference rows.
+    entries.push(...ranked.filter(entry => entry.rank !== null), ...ranked.filter(entry => entry.rank === null && !entry.reference), ...ranked.filter(entry => entry.reference));
   }
 
   // A roster entry no batch ran is usually a misspelt system, model or effort.
   if (roster) {
-    const ran = new Set(all.map(cellKey));
-    for (const item of roster.configurations) if (!ran.has(item.key)) problems.push('roster ' + (roster.file ?? '') + ' lists ' + item.key + ', which no attempt in these batches ran');
+    const ran = new Set(all.map(cellKey)), known = new Set([...all.map(attempt => attempt.task_id), ...(collected.taskInfo?.keys() ?? [])]);
+    const prepared = new Set([...preparedFor.values()].flatMap(keys => [...keys]));
+    for (const item of roster.configurations) {
+      if (!ran.has(item.key)) problems.push('roster ' + (roster.file ?? '') + ' lists ' + item.key + ', which no attempt in these batches ran' +
+        (prepared.has(item.key) ? ' (a batch was prepared for it but wrote no result.json)' : ''));
+    }
+    // A missing task the report cannot place in a set is checked against nothing.
+    const unplaced = [...new Set(rosterTasks(roster))].filter(task => !known.has(task)).sort();
+    if (unplaced.length) problems.push('roster ' + (roster.file ?? '') + ' lists missing tasks that no batch planned and no truth.json places in a set: ' + firstFew(unplaced, 5));
   }
   const tasks = new Map();
   for (const attempt of all) {
@@ -903,8 +1172,9 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
         'share of resamples with A ahead; objects won / tied / lost. Intervals are not corrected for multiple comparisons; the corrected verdict is.',
       correction: 'Holm\'s step-down method at family-wise ' + Math.round(100 * FAMILY_ALPHA) + '% on the two-sided paired t p-value, within each family: all pairs of ' +
         'formal configurations of a set; the pairs of one ladder; the effort pairs (top minus default effort, same client and model). Separated after correction = ' +
-        'Holm-adjusted p < ' + FAMILY_ALPHA + ' and separated uncorrected (bootstrap and Student-t 95% intervals both exclude zero). Pairs with fewer than 2 objects ' +
-        'are not counted in a family; pairs with a reference row are in none',
+        'Holm-adjusted p < ' + FAMILY_ALPHA + ' and separated uncorrected (bootstrap and Student-t 95% intervals both exclude zero). With a roster the families are ' +
+        'fixed by it: every pair of roster configurations counts, demoted and absent ones included. A pair that cannot be decided is incomplete: no verdict, ' +
+        'counted in m with p = 1 (' + Object.values(INCOMPLETE_REASONS).join('; ') + '). Pairs with a reference row are in no family',
       ladders: 'two system ladders (client + model + effort) per set: ' + LADDERS.map(ladder => ladder.id + ' (' + ladder.label.toLowerCase() + ')').join(' and ') + '; ' +
         (roster ? LADDER_RULE.roster : LADDER_RULE.inferred) + '; a ladder ranks its configurations by the same score as the leaderboard',
       sets: 'tasks are grouped by the optional `set` of their truth.json ("' + UNNAMED_SET + '" when absent, "' + UNKNOWN_SET +
@@ -950,8 +1220,12 @@ export const reportName = batches => (batches?.length ? batches.join('+') : 'all
 
 // -> leaderboard object. Also written as JSON to `outFile`, by default
 // <data>/reports/<batches>/leaderboard.json; outFile: null writes nothing.
+// The tasks a roster lists as missing, so the report can place them in their sets.
+export const rosterTasks = roster => roster ? roster.configurations.flatMap(item => (item.missing_tasks ?? []).map(gap => gap.task)) : [];
+
 export async function aggregate({ dataRoot, batches, outFile, seed, now, excludeStatuses = DEFAULT_EXCLUDED_STATUSES, plannedObjects, roster } = {}) {
-  const collected = await collectRuns({ dataRoot, batches, excludeStatuses });
+  if (roster && !(roster.keys instanceof Map)) roster = parseRoster(roster);
+  const collected = await collectRuns({ dataRoot, batches, excludeStatuses, alsoTasks: rosterTasks(roster) });
   const board = buildLeaderboard(collected, { seed, now, excludeStatuses, plannedObjects, roster });
   const target = outFile === undefined ? join(layout(resolve(dataRoot)).reports, reportName(batches), 'leaderboard.json') : outFile;
   if (target) await writeJSON(target, board);

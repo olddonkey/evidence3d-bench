@@ -1,6 +1,6 @@
 import { VARIANTS } from '../contract.mjs';
 import { UNNAMED_SET, UNKNOWN_SET } from './collect.mjs';
-import { intervalText, attemptShareText, pText, allPairsNote, VARIANT_ORDER, CONFLICT_KINDS } from './aggregate.mjs';
+import { intervalText, attemptShareText, pText, allPairsNote, INCOMPLETE_REASONS, REAL_TIER_MIN_OBJECTS, VARIANT_ORDER, CONFLICT_KINDS } from './aggregate.mjs';
 import { esc, num, percent, statCell, medianCell, sdCell, slug, fractionLabel, page, NOT_EVALUATED } from './html.mjs';
 import { timeSection } from './time-chart.mjs';
 
@@ -14,8 +14,10 @@ const plural = (count, word) => count + ' ' + word + (count === 1 ? '' : 's');
 // ------------------------------------------------------------ leaderboard
 
 const identityHead = '<th class="num">#</th><th>System</th><th>Model</th><th>Effort</th>';
-// A reference row (a configuration not in the roster) has no rank.
-const identity = (entry, rank) => '<td class="num">' + (entry.reference ? '<span class="na" title="reference row: not in the roster, not ranked">ref</span>' : rank) +
+// A reference row (a configuration not in the roster) and a demoted one have no rank.
+const identity = (entry, rank) => '<td class="num">' + (entry.reference ? '<span class="na" title="reference row: not in the roster, not ranked">ref</span>'
+  : entry.demoted ? '<span class="na" title="demoted by the roster: ' + esc(entry.demoted) + '">dem</span>'
+  : entry.rank === null && entry.real_tier ? '<span class="na" title="real tier: no object with every r2 and r4 task sampled, so no score">&ndash;</span>' : rank) +
   '</td><td>' + esc(entry.system) + '</td><td>' + esc(entry.model) + '</td><td>' + (entry.effort === null ? NOT_EVALUATED : esc(entry.effort)) + '</td>';
 
 // One row per configuration of the set, `cells(entry)` giving the rest;
@@ -116,27 +118,33 @@ function archetypeTable(entries, set) {
 
 // ---------------------------------------------------------------- pairwise
 
-const verdictText = { a_higher: 'A higher', b_higher: 'B higher', not_separated: 'not separated', unsettled: 'unsettled', not_evaluated: 'not evaluated' };
+const verdictText = { a_higher: 'A higher', b_higher: 'B higher', not_separated: 'not separated', unsettled: 'unsettled', not_evaluated: 'not evaluated',
+  incomplete: 'incomplete' };
 const verdictNote = { a_higher: 'both intervals exclude 0', b_higher: 'both intervals exclude 0', not_separated: 'both intervals include 0',
   unsettled: 'the two intervals disagree', not_evaluated: 'fewer than 2 objects' };
+const noteOf = pair => pair.verdict === 'incomplete' ? 'no verdict: ' + (INCOMPLETE_REASONS[pair.incomplete] ?? pair.incomplete) : verdictNote[pair.verdict] ?? '';
 export const VERDICT_TEXT = verdictText;
 const separated = verdict => verdict === 'a_higher' || verdict === 'b_higher';
 // Same wording as the statements: a bound that rounds to zero keeps a digit.
 const interval = ci => ci ? esc(intervalText(ci)) : NOT_EVALUATED;
 const intervalCell = pair => '<td class="num">' + interval(pair.ci95) +
   (pair.t_ci95 ? '<small title="Student-t interval of the per-object differences">t ' + interval(pair.t_ci95) + '</small>' : '') + '</td>';
-const verdictCell = pair => '<td class="' + (separated(pair.verdict) ? 'good' : pair.verdict === 'unsettled' ? 'low' : 'na') + '">' + esc(verdictText[pair.verdict] ?? pair.verdict) +
-  '<small>' + esc(verdictNote[pair.verdict] ?? '') + (pair.small_sample && pair.verdict !== 'not_evaluated' ? '; only ' + pair.objects + ' objects' : '') + '</small></td>';
+const verdictCell = pair => '<td class="' + (separated(pair.verdict) ? 'good' : ['unsettled', 'incomplete'].includes(pair.verdict) ? 'low' : 'na') + '">' +
+  esc(verdictText[pair.verdict] ?? pair.verdict) + '<small>' + esc(noteOf(pair)) +
+  (pair.small_sample && !['not_evaluated', 'incomplete'].includes(pair.verdict) ? '; only ' + pair.objects + ' objects' : '') + '</small></td>';
 // The corrected verdict: separated or not after Holm within the pair's family;
 // `note` says when the table of all pairs corrects the same pair the other way.
 const holmCell = (pair, note = '') => !pair.holm ? '<td class="na">' + (pair.reference ? 'reference row' : 'not tested') + '</td>'
-  : '<td class="' + (separated(pair.holm.verdict) ? 'good' : 'na') + '" title="Holm over the ' + pair.holm.comparisons + ' testable pairs of this table">' +
+  : pair.holm.verdict === 'incomplete' ? '<td class="low" title="no verdict; counted among the ' + plural(pair.holm.comparisons, 'pair') + ' of this table with p = 1">incomplete' +
+    '<small>in m with p = 1</small></td>'
+  : '<td class="' + (separated(pair.holm.verdict) ? 'good' : 'na') + '" title="Holm over the ' + plural(pair.holm.comparisons, 'pair') + ' of this table">' +
     (separated(pair.holm.verdict) ? 'separated' : separated(pair.verdict) ? 'not separated<small>separated only uncorrected</small>' : 'not separated') +
     '<small>adj. p ' + esc(pText(pair.holm.p_adjusted)) + '</small>' + (note ? '<small class="low">' + esc(note) + '</small>' : '') + '</td>';
-const holmHead = correction => '<th title="Holm&rsquo;s step-down correction at family-wise 5% on the paired t p-value, over the testable pairs of this table">Holm' +
+const holmHead = correction => '<th title="Holm&rsquo;s step-down correction at family-wise 5% on the paired t p-value, over every pair of this table (an incomplete one with p = 1)">Holm' +
   '<small>m = ' + correction.comparisons + '</small></th>';
 const correctionLine = correction => correction.comparisons
-  ? correction.separated + ' of ' + correction.comparisons + ' pairs separated after Holm (' + correction.separated_uncorrected + ' uncorrected)' : 'no testable pair';
+  ? correction.separated + ' of ' + plural(correction.comparisons, 'pair') + ' separated after Holm (' + correction.separated_uncorrected + ' uncorrected' +
+    (correction.incomplete ? '; ' + correction.incomplete + ' incomplete, in m with p = 1' : '') + ')' : 'no pair';
 
 function pairwiseSection(set) {
   const pairs = set.pairwise.pairs;
@@ -171,7 +179,9 @@ function pairwiseSection(set) {
 const HOLM_LEGEND = '<strong>Holm</strong>: the same verdict corrected for the number of comparisons. The pairs of a table form one family; their two-sided paired t ' +
   'p-values are adjusted by Holm&rsquo;s step-down method (sorted, the k-th smallest of m multiplied by m &minus; k + 1, never below the one before), and a pair stays ' +
   'separated when its adjusted p is below 0.05 and it is separated uncorrected, so the chance of any false separation in the table is at most 5%. ' +
-  'm counts the pairs with at least two objects; a larger table corrects harder, so one pair can be separated on a ladder and not in the table of every configuration.';
+  'm counts every pair of the table: a larger table corrects harder, so one pair can be separated on a ladder and not in the table of every configuration. ' +
+  'A pair that cannot be decided is <strong>incomplete</strong> (a configuration demoted by the roster or missing tasks, too few objects, a t test that is undefined): ' +
+  'it shows its gap and, where they exist, its intervals, gets no verdict, and stays in m with p = 1, so it never makes another pair easier to separate.';
 
 // ----------------------------------------------------------------- ladders
 
@@ -195,12 +205,24 @@ function laddersSection(board, set) {
   const byKey = new Map(board.entries.filter(entry => entry.set === set.id).map(entry => [entry.key, entry])), note = allPairsNote(set);
   const parts = set.ladders.map(ladder => {
     const entries = ladder.entries.map(item => byKey.get(item.key)), ranks = new Map(ladder.entries.map(item => [item.key, item.rank]));
-    const missing = ladder.missing.length ? '<p class="legend low">In the roster for this ladder but with no counted attempt in this set: ' + ladder.missing.map(esc).join(', ') + '.</p>' : '';
-    if (!entries.length) return '<h4>' + esc(ladder.label) + '</h4><p class="muted">No configuration of this set is on this ladder.</p>' + missing;
+    const missing = ladder.missing.length ? '<p class="legend low">In the roster for this ladder but with no counted attempt in this set: ' + ladder.missing.map(esc).join(', ') +
+      '; ' + (ladder.missing.length === 1 ? 'its pairs stay' : 'their pairs stay') + ' in this ladder&rsquo;s family as incomplete.</p>' : '';
+    // The folded table lists every pair of the frozen family; it is needed even
+    // for one pair when that pair is not a gap between two ranked rungs (a
+    // demoted or absent member), and when every member is absent.
+    const adjacent = entries.filter((entry, index) => ranks.get(entry.key) !== null && index + 1 < entries.length && ranks.get(entries[index + 1].key) !== null).length;
+    const count = ladder.pairwise.pairs.length;
+    const all = count > 1 || count > adjacent ? '<details class="more"' + (count > adjacent && count === 1 ? ' open' : '') + '><summary>All ' + plural(count, 'pair') +
+      ' of this ladder</summary>' + ladderPairs(ladder.pairwise.pairs, ladder.pairwise.correction, { note }) + '</details>' : '';
+    if (!entries.length) {
+      return '<h4>' + esc(ladder.label) + (count ? ' <small>' + esc(correctionLine(ladder.pairwise.correction)) + '</small>' : '') + '</h4>' +
+        '<p class="muted">No configuration of this set is on this ladder with a counted attempt.</p>' + missing + all;
+    }
     // Each rung against the one below it: the gap a reader asks about first.
     const pairs = new Map(ladder.pairwise.pairs.map(pair => [pair.a + '|' + pair.b, pair]));
     const next = (entry, index) => {
-      const pair = index + 1 < entries.length ? pairs.get(entry.key + '|' + entries[index + 1].key) : null;
+      const below = ranks.get(entry.key) !== null && index + 1 < entries.length && ranks.get(entries[index + 1].key) !== null ? entries[index + 1] : null;
+      const pair = below ? pairs.get(entry.key + '|' + below.key) : null;
       return pair ? '<td class="num">' + num(pair.mean_difference, 1, { signed: true }) + '<small>' + interval(pair.t_ci95) + ' t</small></td>' + holmCell(pair, note(pair))
         : '<td class="num"></td><td></td>';
     };
@@ -210,8 +232,6 @@ function laddersSection(board, set) {
       const index = entries.indexOf(entry);
       return [statCell(entry.score), '<td class="num">' + percent(entry.success.rate) + '<small>' + entry.success.valid + ' / ' + entry.success.attempts + ' att.</small></td>', next(entry, index)];
     }, { rankOf: entry => ranks.get(entry.key) });
-    const all = ladder.pairwise.pairs.length > 1 ? '<details class="more"><summary>All ' + ladder.pairwise.pairs.length + ' pairs of this ladder</summary>' +
-      ladderPairs(ladder.pairwise.pairs, ladder.pairwise.correction, { note }) + '</details>' : '';
     return '<h4>' + esc(ladder.label) + ' <small>' + plural(entries.length, 'configuration') + ' · ' + esc(correctionLine(ladder.pairwise.correction)) + '</small></h4>' +
       table + missing + all;
   });
@@ -224,6 +244,39 @@ function laddersSection(board, set) {
     'down the ladder; its Holm verdict corrects over all pairs of the ladder (m in the header), and the folded table lists them all. ' +
     'Each table&rsquo;s Holm column corrects over that table&rsquo;s own pairs; where the table of all pairs, correcting over more, reaches the other verdict ' +
     'for the same pair, the cell says so.</p>' + notes;
+}
+
+// ------------------------------------------------------------ completeness
+
+// What the set asked of each roster configuration and what it lacks: the gaps
+// the roster lists (with its reasons), those it does not (a data problem), and
+// demotion. Only with a roster.
+function completenessSection(set) {
+  const info = set.completeness;
+  if (!info) return '';
+  if (!info.expected_tasks) return '<p class="legend">Completeness: the roster&rsquo;s required variants (' + (info.required_variants ?? []).map(esc).join(', ') + ') ask nothing of this set.</p>';
+  const rows = info.configurations.map(record => {
+    const missing = record.missing.length ? '<details><summary>' + record.missing.length + ' listed</summary><ul>' +
+      record.missing.map(gap => '<li><code>' + esc(gap.task) + '</code>: ' + esc(gap.reason) + '</li>').join('') + '</ul></details>' : '0';
+    const status = record.demoted ? '<span class="na">demoted</span><small>' + esc(record.demoted) + '</small>'
+      : record.unlisted.length ? '<span class="bad">gaps not in the roster</span><small>' + plural(record.unlisted.length, 'task') + ': a data problem; no verdict</small>'
+      : record.complete_objects === 0 ? '<span class="na">no complete object</span><small>no object with every r2 and r4 task: no score, no rank; its pairs are incomplete</small>'
+        : record.missing.length ? '<span class="low">missing tasks</span><small>' + (set.tier === 'real' ? 'ranked; its pairs use the objects both completed' : 'ranked; its pairs are incomplete') + '</small>'
+          : '<span class="good">complete</span>';
+    return '<tr><td>' + esc(record.key) + (record.present ? '' : '<small>no counted attempt in this set</small>') + '</td><td class="num">' + record.sampled + ' / ' + record.expected +
+      '</td><td class="num">' + missing + '</td><td class="num">' + record.unlisted.length + '</td><td>' + status + '</td></tr>';
+  }).join('\n');
+  return '<h4>Completeness <small>roster configurations against the ' + plural(info.expected_tasks, 'task') + ' this set asks of each' +
+    (info.required_variants ? ' (variants ' + info.required_variants.map(esc).join(', ') + ')' : '') + '</small></h4>' +
+    '<div class="scroll"><table><thead><tr><th>Configuration</th><th class="num" title="tasks with a counted sample, of those the set asks">Sampled</th>' +
+    '<th class="num" title="tasks the roster lists as permanently missing, with its reasons">Missing (roster)</th>' +
+    '<th class="num" title="tasks without a counted sample that the roster does not list">Not listed</th><th>Status</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
+    '<p class="legend">A configuration owes every task of the set an attempt ran or a batch planned' + (info.required_variants ? ', of the roster&rsquo;s required variants' : '') +
+    '. Only the roster records permanent gaps; a gap it does not list (still running, or a data problem) leaves the configuration&rsquo;s pairs without a verdict. ' +
+    (info.missing_share_limit !== null ? 'A configuration missing more than ' + Math.round(100 * info.missing_share_limit) + '% must be demoted by the roster: no rank, but its pairs stay in ' +
+      'every family as incomplete; one missing less is ranked and its pairs are incomplete. '
+      : 'Real tier: listed gaps only shrink the objects a pair is tested on (both configurations must have completed an object); a pair needs at least ' + REAL_TIER_MIN_OBJECTS + ' such objects. ') +
+    'Incomplete pairs count in Holm&rsquo;s m with p = 1.</p>';
 }
 
 // ---------------------------------------------------------------- variance
@@ -396,20 +449,25 @@ function setSection(board, set) {
   const unranked = set.unranked.length ? '<p class="legend bad">Not ranked, every attempt excluded: ' +
     set.unranked.map(item => esc(item.key) + ' (' + item.excluded_attempts + ')').join(', ') + '.</p>' : '';
   const multi = entries.some(entry => entry.attempts_per_task.max > 1);
-  const formal = entries.filter(entry => !entry.reference), reference = entries.filter(entry => entry.reference);
+  const formal = entries.filter(entry => !entry.reference && !entry.demoted), demoted = entries.filter(entry => entry.demoted && !entry.reference);
+  const reference = entries.filter(entry => entry.reference);
+  const demotedRows = demoted.length ? '<h4>Demoted</h4><p class="legend">Demoted by the roster (its reason is in the Completeness table below): shown, not ranked, still in every corrected family, where their pairs are incomplete.</p>' +
+    scoreTable(demoted) : '';
   const references = reference.length ? '<h4>Reference rows <small>not in the roster: shown, not ranked, in no corrected family</small></h4>' + scoreTable(reference) : '';
   return `<section id="${setAnchor(set.id)}">
 <h2>${setTitle(set)}</h2>
 ${setNotice(set)}
-<p class="muted">${plural(set.objects, 'object')} · ${plural(set.tasks, 'task')} · ${set.counted} of ${plural(set.attempts, 'attempt')} counted · ${plural(set.configurations.length, 'ranked configuration')}${set.reference_configurations?.length ? ' · ' + plural(set.reference_configurations.length, 'reference row') : ''} · batches ${set.batches.map(id => '<code>' + esc(id) + '</code>').join(', ')}${set.first_started_at ? ' · attempts ran ' + day(set.first_started_at) + ' to ' + day(set.last_finished_at) : ''}</p>
+<p class="muted">${plural(set.objects, 'object')} · ${plural(set.tasks, 'task')} · ${set.counted} of ${plural(set.attempts, 'attempt')} counted · ${plural(set.configurations.length, 'ranked configuration')}${set.demoted_configurations?.length ? ' · ' + set.demoted_configurations.length + ' demoted' : ''}${set.reference_configurations?.length ? ' · ' + plural(set.reference_configurations.length, 'reference row') : ''} · batches ${set.batches.map(id => '<code>' + esc(id) + '</code>').join(', ')}${set.first_started_at ? ' · attempts ran ' + day(set.first_started_at) + ' to ' + day(set.last_finished_at) : ''}</p>
 ${warnings}${mergedNote}
 <h3>Ladders</h3>
 ${laddersSection(board, set)}
 <h3>Leaderboard</h3>
 ${scoreTable(formal)}
+${demotedRows}
 ${references}
 ${unranked}
-<p class="legend">Each cell: mean, 95% bootstrap interval over objects (variants of one object are not independent), and sample size.
+${completenessSection(set)}
+<p class="legend">Each cell: mean, 95% bootstrap interval over objects (variants of one object are not independent), and sample size.${set.tier === 'real' ? ' <strong>Real tier</strong>: each configuration is scored on the objects where it has every r2 and r4 task, with an interval only from ' + REAL_TIER_MIN_OBJECTS + ' of them; &ndash; = no such object, so no score and no rank.' : ''}
 <strong>Score</strong> = the scorer&rsquo;s report.score, (shape score + detail score) / 2; attempts that produced no valid model count as 0, as do their shape and detail scores.
 ${toleranceNote(set.tolerances)}
 Attempts are averaged within a task and tasks within an object, so every object weighs the same however many attempts it has${multi ? ' (configurations here ran different numbers of attempts per task)' : ''}.

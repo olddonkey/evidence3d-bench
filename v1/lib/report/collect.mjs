@@ -57,6 +57,12 @@ async function directories(path) {
 }
 
 const text = value => typeof value === 'string' && value ? value : null;
+// A configuration as a result.json records it. The runner copies the
+// manifest's own top-level system, model and effort into every result.json
+// (an explicit null effort included, whatever the harness default), so a
+// manifest is read the same way.
+const configurationOf = record => ({ system: String(record.system ?? 'unknown'), model: String(record.model ?? 'unknown'),
+  effort: record.effort === undefined || record.effort === null ? null : String(record.effort) });
 const hash = value => typeof value === 'string' && HASH.test(value) ? value : null;
 const distinct = values => [...new Set(values.filter(value => value !== null && value !== undefined))].sort();
 
@@ -246,7 +252,13 @@ function setOf(truth, taskId, problems) {
   return UNKNOWN_SET;
 }
 
-export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT_EXCLUDED_STATUSES } = {}) {
+// `alsoTasks`: task ids to place in their sets beside the batches' own (a
+// roster's missing tasks). -> { attempts, batches, problems, truths, objects,
+// setFiles, taskInfo: Map(task id -> { set, object, variant }), plans } where
+// taskInfo covers every task an attempt ran, every task a batch's manifest
+// planned (run or not), and `alsoTasks`; plans: [{ batch, system, model,
+// effort, tasks }], the configuration each manifest froze and its task ids.
+export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT_EXCLUDED_STATUSES, alsoTasks = [] } = {}) {
   if (typeof dataRoot !== 'string' || !dataRoot) throw new Error('collectRuns needs dataRoot');
   const paths = layout(resolve(dataRoot)), problems = [], attempts = [], batchInfo = [];
   const requested = batches?.length ? [...batches] : await directories(paths.runs);
@@ -268,6 +280,7 @@ export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT
     }
     return objectCache.get(objectId);
   };
+  const planned = new Map(), plans = [];
   for (const batch of batchIds) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(batch)) { problems.push('invalid batch id ' + JSON.stringify(batch)); continue; }
     const batchDir = join(paths.runs, batch);
@@ -275,6 +288,13 @@ export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT
     const summary = await readJSONIfPresent(join(batchDir, 'summary.json'), problems);
     const manifest = await readJSONIfPresent(join(batchDir, 'manifest.json'), problems);
     const preflight = await readJSONIfPresent(join(batchDir, 'preflight.json'), problems);
+    // Every task the batch was prepared with, run or not: a task nobody has run
+    // yet is still one the configuration owes.
+    const plannedIds = (Array.isArray(manifest?.tasks) ? manifest.tasks : []).map(task => task?.id).filter(id => typeof id === 'string' && id);
+    for (const id of plannedIds) if (!planned.has(id)) planned.set(id, batch);
+    // Which configuration was prepared for which tasks: a formal one takes
+    // part in their sets before (or without) any result.json.
+    if (manifest && typeof manifest === 'object' && plannedIds.length) plans.push({ batch, ...configurationOf(manifest), tasks: plannedIds });
     const mine = [];
     let unfinished = 0, archivedTries = 0;
     for (const taskDirName of await directories(batchDir)) {
@@ -308,15 +328,14 @@ export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT
         if (valid && finite(result.score) && Math.abs(result.score - report.score) > 1e-6) {
           problems.push(attemptDir + ': result.score ' + result.score + ' differs from report.score ' + report.score + '; the report is used');
         }
-        const model = String(result.model ?? 'unknown'), modelReported = text(result.model_reported);
+        const { system, model, effort } = configurationOf(result), modelReported = text(result.model_reported);
         if (modelReported && modelReported !== model) {
           problems.push(attemptDir + ': requested model ' + model + ' but the harness reported ' + modelReported + '; ranked under the requested id');
         }
         const excluded = excludeStatuses.includes(status);
         const entry = {
           batch, task_id: taskId, attempt, slot: attemptName, dir: attemptDir,
-          system: String(result.system ?? 'unknown'), model, model_reported: modelReported,
-          effort: result.effort === undefined || result.effort === null ? null : String(result.effort),
+          system, model, model_reported: modelReported, effort,
           set: setOf(truth, taskId, problems),
           status, excluded, valid,
           // Why the harness failed, when the runner says (field name not fixed by the contract yet).
@@ -355,7 +374,20 @@ export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT
   }
   for (const dirs of seen.values()) if (dirs.length > 1) problems.push('byte-identical submissions in ' + dirs.join(', ') + ': a copied batch would be counted twice');
   const setFiles = await readSetFiles(paths.root, problems);
-  return { attempts, batches: batchInfo, problems: [...new Set(problems)], truths: truthCache, objects: objectCache, setFiles };
+  const taskInfo = new Map(attempts.map(attempt => [attempt.task_id, { set: attempt.set, object: attempt.object, variant: attempt.variant }]));
+  for (const taskId of [...planned.keys(), ...alsoTasks.filter(id => typeof id === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id))]) {
+    if (taskInfo.has(taskId)) continue;
+    const truth = /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(taskId) ? await truthFor(taskId) : null;
+    if (truth?.object && typeof truth.variant === 'string' && Object.hasOwn(VARIANTS, truth.variant)) {
+      taskInfo.set(taskId, { set: setOf(truth, taskId, problems), object: truth.object, variant: truth.variant });
+    } else if (planned.has(taskId)) {
+      // A task owed but impossible to place would silently shrink what every
+      // configuration owes; say so. (A roster-listed one is reported by the leaderboard.)
+      problems.push('batch ' + planned.get(taskId) + ' planned task ' + taskId + ', but it has no truth.json naming its object and variant: ' +
+        'the report cannot place it in a set, so no configuration is checked against it');
+    }
+  }
+  return { attempts, batches: batchInfo, problems: [...new Set(problems)], truths: truthCache, objects: objectCache, setFiles, taskInfo, plans };
 }
 
 // One batch's provenance: what its manifest froze plus what its attempts show

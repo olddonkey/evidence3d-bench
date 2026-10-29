@@ -45,8 +45,9 @@ test('Holm adjustment and the paired t p-value by hand', () => {
 
   // t = 3 / (sqrt(2.5) / sqrt(5)) = 4.243 on 4 df: p = 0.01324.
   near(tTestP([1, 2, 3, 4, 5]), 0.013236, 1e-5);
-  assert.equal(tTestP([2, 2, 2]), 0, 'identical nonzero differences');
-  assert.equal(tTestP([0, 0, 0]), 1, 'no difference at all');
+  // Differences that do not vary leave t undefined: no p-value (such a pair is incomplete).
+  assert.equal(tTestP([2, 2, 2]), null, 'identical nonzero differences');
+  assert.equal(tTestP([0, 0, 0]), null, 'no difference at all');
   assert.equal(tTestP([5]), null);
   // The t interval at level 1 - p just touches zero, so p < 0.05 exactly when
   // the 95 % t interval excludes zero.
@@ -63,14 +64,19 @@ test('Holm adjustment and the paired t p-value by hand', () => {
 });
 
 test('a corrected verdict separates only what Holm keeps and the uncorrected verdict already separates', () => {
-  const rows = [{ verdict: 'a_higher', p_t: 0.001 }, { verdict: 'a_higher', p_t: 0.03 }, { verdict: 'unsettled', p_t: 0.04 }, { verdict: 'not_evaluated', p_t: null },
+  const rows = [{ verdict: 'a_higher', p_t: 0.001 }, { verdict: 'a_higher', p_t: 0.03 }, { verdict: 'unsettled', p_t: 0.04 }, { verdict: 'incomplete', p_t: 0.0002 },
     { verdict: 'b_higher', p_t: 0.012 }, { verdict: 'unsettled', p_t: 0.0001 }];
   const holm = correctFamily(rows, 'all');
-  // m = 5 tested: 0.0001 x5, 0.001 x4, 0.012 x3, 0.03 x2, 0.04 x1 (raised to 0.06).
-  assert.deepEqual(holm.map(item => item?.verdict ?? null), ['a_higher', 'not_separated', 'not_separated', null, 'b_higher', 'not_separated']);
-  assert.ok(holm.every(item => item === null || (item.comparisons === 5 && item.family === 'all')));
-  near(holm[1].p_adjusted, 0.06);
-  near(holm[2].p_adjusted, 0.06);
+  // The incomplete pair stays in m with p = 1, whatever p it had: m = 6, sorted
+  // 0.0001 x6, 0.001 x5, 0.012 x4, 0.03 x3, 0.04 x2 (raised to 0.09), 1 x1.
+  assert.deepEqual(holm.map(item => item.verdict), ['a_higher', 'not_separated', 'not_separated', 'incomplete', 'b_higher', 'not_separated']);
+  assert.ok(holm.every(item => item.comparisons === 6 && item.family === 'all'));
+  near(holm[0].p_adjusted, 0.005);
+  near(holm[1].p_adjusted, 0.09);
+  near(holm[2].p_adjusted, 0.09);
+  near(holm[3].p_adjusted, 1);
+  // 0.012 x 4 (it would be x 3 with the incomplete pair left out of m).
+  near(holm[4].p_adjusted, 0.048);
   // An unsettled pair (the two intervals disagree) stays unseparated even with a tiny p.
   assert.ok(holm[5].p_adjusted < FAMILY_ALPHA);
 });
@@ -165,6 +171,14 @@ test('the Round 3 roster reproduces the ladders of docs/V1-ROUND3.md and matches
   assert.match(roster.sha256, /^[a-f0-9]{64}$/);
   const onLadder = id => roster.configurations.filter(item => item.ladders.includes(id)).map(item => item.key);
   assert.equal(roster.configurations.length, 12, '12 configurations, 66 pairs');
+  // Owed: the test set's three-variant headline; nothing demoted. The six
+  // configurations that never ran the real-building set list its four tasks.
+  assert.deepEqual(roster.required_variants, ['t2', 't4', 'c1']);
+  assert.ok(roster.configurations.every(item => item.demoted === null));
+  const missing = roster.configurations.filter(item => item.missing_tasks.length);
+  assert.deepEqual(missing.map(item => item.key).sort(), ['claude-code / claude-opus-5-5 / max', 'codex / gpt-6-astra / max', 'codex / gpt-6-sol / high',
+    'codex / gpt-6.1-sol / high', 'codex / gpt-6.1-sol / max', 'grok / grok-4.7-build-fast / high']);
+  assert.ok(missing.every(item => item.missing_tasks.map(gap => gap.task).join() === 'real-0001-r2,real-0001-r4,real-0002-r2,real-0002-r4'));
   // The keys exactly as the Round 3 result.json files record them (Haiku with its date suffix).
   assert.deepEqual(roster.configurations.map(item => item.key).sort(), [
     'claude-code / claude-haiku-4-5-20251001 / -', 'claude-code / claude-opus-5-5 / high', 'claude-code / claude-opus-5-5 / max',
@@ -218,20 +232,32 @@ test('with a roster: reference rows are listed, unranked and in no family; the u
   assert.deepEqual(board.entries.map(entry => entry.rank), [1, 2, 3, 4, null, null]);
   assert.ok(board.entries.slice(4).every(entry => entry.reference));
   // Same seeds, same pairs: the roster changes no uncorrected number.
-  const strip = pair => ({ ...pair, statement: undefined, holm: undefined, reference: undefined });
-  assert.deepEqual(set.pairwise.pairs.map(strip), plain.sets[0].pairwise.pairs.map(strip));
-  assert.equal(set.pairwise.correction.comparisons, 6, 'four formal configurations: six pairs');
+  const luna = 'codex / luna / high', ran = pair => pair.a !== luna && pair.b !== luna;
+  const strip = pair => ({ ...pair, statement: undefined, holm: undefined, reference: undefined, incomplete: undefined });
+  assert.deepEqual(set.pairwise.pairs.filter(ran).map(strip), plain.sets[0].pairwise.pairs.map(strip));
+  // The family is the roster's: Luna never ran, yet its four pairs with the
+  // other formal configurations count in m, undecided, with p = 1.
+  assert.deepEqual(set.absent_configurations, [luna]);
+  assert.equal(set.pairwise.correction.comparisons, 10, 'five roster configurations: ten pairs');
+  assert.equal(set.pairwise.correction.incomplete, 4);
   for (const pair of set.pairwise.pairs) {
     if (pair.reference) assert.equal(pair.holm, null);
-    else assert.equal(pair.holm.comparisons, 6);
+    else assert.equal(pair.holm.comparisons, 10);
+    if (!ran(pair)) {
+      assert.equal(pair.verdict, 'incomplete'); assert.equal(pair.incomplete, 'unlisted_gaps'); assert.equal(pair.objects, 0);
+      if (!pair.reference) { assert.equal(pair.holm.verdict, 'incomplete'); near(pair.holm.p_adjusted, 1); }
+    }
   }
-  assert.match(set.pairwise.multiple_comparisons, /the 9 pairs with a reference row are not corrected/);
+  assert.match(set.pairwise.multiple_comparisons, /4 of them incomplete, entered with p = 1/);
+  assert.match(set.pairwise.multiple_comparisons, /the 11 pairs with a reference row are not corrected/);
   const ladder = id => set.ladders.find(item => item.id === id);
-  assert.deepEqual(ladder('default').missing, ['codex / luna / high']);
+  assert.deepEqual(ladder('default').missing, [luna]);
   assert.deepEqual(ladder('top').missing, []);
   assert.equal(ladder('default').entries.length, 2);
+  assert.equal(ladder('default').pairwise.correction.comparisons, 3, 'Astra high, Opus high and the absent Luna');
   assert.equal(set.effort.pairs.length, 2);
   assert.ok(board.problems.some(problem => /roster rounds\/test.json lists codex \/ luna \/ high, which no attempt in these batches ran/.test(problem)));
+  assert.ok(board.problems.some(problem => /codex \/ luna \/ high has no counted sample on 36 tasks that the roster does not list as missing/.test(problem)));
   assert.equal(board.roster.file, 'rounds/test.json');
   assert.equal(board.roster.decided_at, '2026-10-28');
   assert.match(board.method.correction, /Holm/);

@@ -1,6 +1,6 @@
 # Results report (module G)
 
-Reads run batches, aggregates them into a leaderboard (`e3d-leaderboard-v3`)
+Reads run batches, aggregates them into a leaderboard (`e3d-leaderboard-v4`)
 and writes a static site that opens from disk: `index.html` (per task set:
 what the set is, the two ladders, leaderboard, pairwise comparison, where the
 noise is, evidence deltas, archetypes, detail by category, named dimensions,
@@ -24,8 +24,8 @@ const roster = await readRoster('v1/rounds/round3.roster.json'); // optional: fo
 `writeReport` returns only what a terminal should show (the CLI prints it):
 `{ outDir, index, summary, leaderboard, tasks, attempts, attempts_drawn,
 images, problems, sets: [{ id, kind, objects, tasks, counted, ranking: [{ rank,
-key, score, ci95, reference? }], ladders: [{ id, ranking: [{ rank, key }],
-separated }], pairs: [{ a, b, difference, ci95, t_ci95, verdict, holm }] }],
+key, score, ci95, reference?, demoted? }], ladders: [{ id, ranking: [{ rank, key }],
+separated }], pairs: [{ a, b, difference, ci95, t_ci95, verdict, incomplete?, holm }] }],
 timing: { collect_s, aggregate_s, parse_s, render_s, pages_s, total_s } }`.
 Everything else is in `leaderboard.json`.
 
@@ -110,10 +110,13 @@ node v1/cli.mjs report --batches A,B,C --out .local/v1/reports/NAME --roster v1/
   "round": "round4",
   "decided_at": "2026-11-03",
   "decisions": "docs/V1-ROUND4-PLAN.md",
+  "required_variants": ["t2", "t4", "c1", "r2", "r4"],
   "configurations": [
     { "system": "codex", "model": "gpt-6-astra", "effort": "high", "ladder": "default" },
-    { "system": "codex", "model": "gpt-6-astra", "effort": "max", "ladder": "top" },
-    { "system": "claude-code", "model": "claude-haiku-4-5-20251001", "effort": null, "ladder": "default" }
+    { "system": "codex", "model": "gpt-6-astra", "effort": "max", "ladder": "top",
+      "missing_tasks": [{ "task": "obj-17-c1", "reason": "usage limit until the window closed" }] },
+    { "system": "claude-code", "model": "claude-haiku-4-5-20251001", "effort": null, "ladder": "default",
+      "demoted": "missed 31 of 216 test tasks (account suspended 2026-11-09)" }
   ]
 }
 ```
@@ -124,20 +127,32 @@ node v1/cli.mjs report --batches A,B,C --out .local/v1/reports/NAME --roster v1/
 - `ladder` is `"default"`, `"top"`, a list of both (a model with one effort
   level), or absent (a formal configuration on no ladder). A client and model
   may appear on a ladder once.
+- `missing_tasks` (optional, per configuration): the tasks it permanently
+  lacks once the round's window has closed, each a task id with its reason; `demoted`
+  (optional): the reason it is not ranked. `required_variants` (optional,
+  top level): the variants whose tasks every configuration owes; absent, it
+  owes every task of the set. See *Completeness* below.
 - A roster with any problem is refused as a whole. A listed configuration
   that no attempt ran is a data problem (usually a misspelt id); one missing
-  from a set is listed under that set's ladder (`ladders[].missing`).
+  from a set is listed under that set's ladder (`ladders[].missing`,
+  `set.absent_configurations`) and its pairs stay in the families as
+  incomplete.
 - Configurations not in the roster are **reference rows**
   (`entry.reference: true`, `entry.rank: null`, `set.reference_configurations`):
   listed after the ranked rows, never ranked, in no corrected family. Their
   pairs keep their uncorrected numbers (folded on the page).
 - The leaderboard records the roster (`board.roster`: file relative to the
   repository root, or its name alone when it lies outside, whatever the
-  working directory; sha256, round, decided_at, configurations).
+  working directory; sha256, round, decided_at, required_variants,
+  configurations with their missing tasks and demotions).
 - `v1/rounds/round3.roster.json` reproduces the ladders of
   `docs/V1-ROUND3.md` §5 (default: high, Haiku without a flag; top: max for
   Astra, gpt-6.1-sol and Opus). It was written after that round's data, to
-  re-report it; it is not a pre-registered decision.
+  re-report it; it is not a pre-registered decision. It requires `t2`, `t4`
+  and `c1` (the test set's three-variant headline: `t1` and `t3` were run by
+  some configurations only), so the memory set owes nothing; the real set,
+  a real tier, owes all its tasks, and the six configurations that never ran
+  it list its four tasks as missing (not run).
 
 Without a roster every configuration is formal and the ladders are inferred
 (`inferLadders`, notes in `set.ladder_notes`): `default` is a run without an
@@ -154,6 +169,85 @@ A ladder ranks its configurations by the leaderboard's score; its pairs are
 the leaderboard's pairs (same numbers, same orientation), corrected over the
 ladder alone.
 
+## Completeness and incomplete pairs
+
+`docs/V1-ROUND4-PLAN.md` §2–4. Only the roster records a permanent gap; the
+report never infers one.
+
+- **Owed tasks** of a set (`set.completeness.expected_tasks`): every task of
+  the set an attempt ran, a batch's manifest planned (run or not) or the
+  roster lists as missing, restricted to `required_variants` when given (main
+  sets only: a real-tier set owes all its tasks, every formal configuration ×
+  object × `r2`, `r4`). With `required_variants`, every object of a main set
+  owes each required variant of the families its own tasks belong to (a test
+  object owes `t2`, `t4`, `c1`; a memory object none of them); an object with
+  no task of one in these batches is owed under a placeholder id
+  (`<object> c1 (no task in these batches)`, which no roster can list), so a
+  variant no batch ran is an unlisted gap of everyone, reported, and no pair
+  is decided. A planned task without a `truth.json` naming its
+  object and variant cannot be placed in a set; it is reported as a data
+  problem. Per roster configuration, `set.completeness.configurations[]` = `{ key,
+  present, expected, sampled, missing: [{ task, reason }], unlisted,
+  listed_but_sampled, demoted }`, shown on the page and in `summary.md` as the
+  set's Completeness table.
+- **Unlisted gap**: an owed task without a counted sample that the roster
+  does not list (still running, or a data problem). Reported as a data
+  problem; the configuration keeps its rank but its pairs get no verdict.
+- **Main sets** (not the real tier): a formal configuration whose listed
+  missing tasks exceed `MISSING_SHARE_LIMIT` (5 %; 10 of 216 is within it) of
+  the owed tasks must be `demoted`, or the roster is refused
+  (`buildLeaderboard` throws).
+  Demoted: `entry.rank: null`, `entry.demoted` = the reason,
+  `set.demoted_configurations`, listed after the ranked rows; it stays in the
+  table of all pairs and on its ladders. Within the limit it stays ranked and
+  its pairs are incomplete. Demoting within the limit, or listing a task that
+  has a counted sample, is reported.
+- **Families are frozen**: with a roster, once any roster configuration took
+  part in a set (an attempt, counted or excluded, or a batch whose
+  `manifest.json` was prepared with tasks of the set, even one that never
+  wrote a `result.json`; matched by the manifest's top-level system, model
+  and effort, which the runner copies into every `result.json`), every pair of roster configurations is in the set's families,
+  absent and demoted ones included; m never shrinks because a configuration
+  failed to deliver.
+- **Incomplete pair** (`pair.verdict: 'incomplete'`, `pair.incomplete` = the
+  reason; the plan's 缺题，无法判定): no verdict, in m with p = 1, so it can
+  never help another pair separate. Reasons, first that applies
+  (`INCOMPLETE_REASONS`): `demoted`; `missing_tasks` (main sets);
+  `unlisted_gaps`; `few_complete_objects` (real tier); `few_objects` (fewer
+  than 2 objects run by both); `undefined_test` (the per-object differences do
+  not vary, so t is undefined: `tTestP` returns null). The last two apply
+  without a roster too. The gap and its intervals are kept where they exist.
+- **Real tier** (`set.tier: 'real'`, a set of `r2` / `r4` tasks only). A
+  configuration completed an object when it has a counted sample on every
+  task of the object in the set, `r2` and `r4` both among them. An object
+  with no task of one of them in these batches is owed by every formal
+  configuration under a placeholder id (`<object> r4 (no task in these
+  batches)`, which no roster can list): an unlisted gap of everyone,
+  reported, so no pair is decided, with or without a roster.
+  - A configuration's own figures (score, shape, detail, per variant and
+    archetype, evidence deltas, diagnostics, the score-over-time curve, its
+    and its pairs' rows in *Where the noise is*) use
+    its complete objects only (`entry.real_tier = { complete_objects,
+    sampled_objects, intervals }`); a summary resting on fewer than
+    `REAL_TIER_MIN_OBJECTS` (8) objects (the configuration's, or its own: an
+    archetype row, a curve point) is a point estimate without an interval
+    (bootstrap, Student-t or SD range); an attempt SD (a configuration's or
+    the set's pooled one) is judged on the objects with a repeated task,
+    and with no complete object a configuration has no score and
+    no rank (shown as –), but stays in every family. Bookkeeping (attempts,
+    success, statuses, time, tokens, cost, batches and their provenance)
+    counts every counted attempt.
+  - A pair is compared only on the objects both configurations completed
+    (`pair.complete_objects`) and needs at least 8 of them; below that it is
+    incomplete with no intervals, whatever the reason.
+  - Listed missing tasks only shrink those objects (no veto) and never
+    require demotion, and a roster demotion does not apply there: the
+    configuration is ranked and judged on its complete objects.
+- **Which reports take the roster**: only the main-set report and the
+  real-tier report. The extras and regression reports read other batches;
+  with `--roster` they would list absent configurations and report gaps that
+  are not gaps.
+
 ## Multiple comparisons (Holm)
 
 Round 3 had 12 configurations, so 66 pairs: at 95 % each, if no configuration
@@ -167,8 +261,9 @@ uncorrected intervals, which stay as they were.
 - **Families**, each corrected on its own: all pairs of formal
   configurations in a set (`set.pairwise`, `holm.family: 'all'`); the pairs of
   one ladder (`ladders[].pairwise`, `'default'` / `'top'`); the effort pairs
-  (`set.effort`, `'effort'`). m counts the pairs with at least two objects;
-  untestable pairs and pairs with a reference row are in no family.
+  (`set.effort`, `'effort'`). m counts every pair of the family; an
+  incomplete pair enters with p = 1 (see *Completeness* above). Pairs with a
+  reference row are in no family.
 - **Holm's step-down method** (`holmAdjust`) at family-wise 5 %
   (`FAMILY_ALPHA`): sort the m p-values; the k-th smallest becomes
   (m − k + 1) · p, never below the one before, capped at 1.
@@ -178,7 +273,7 @@ uncorrected intervals, which stay as they were.
   unsettled pair stays unseparated whatever its p.
 - `pair.holm` = `{ family, comparisons, p_adjusted, verdict }`;
   `*.correction` = `{ family, method, alpha, test, comparisons,
-  separated_uncorrected, separated }`. The page prints the Holm column with
+  separated_uncorrected, separated, incomplete }`. The page prints the Holm column with
   m in its header; each pair's sentence says whether it is still separated.
 - A pair can be separated on a ladder and not in the table of every
   configuration: the larger table makes more claims and corrects harder.
@@ -210,7 +305,7 @@ All on `report.score`, failures as 0, excluded attempts left out.
   interval: the smallest observed difference whose interval excludes zero) and
   `detectable` (true difference found with 80 % power by a two-sided 95 % t
   test, `detectableDifference`), each with the range implied by the SD's own
-  uncertainty, `projected` to `PLANNED_OBJECTS` (24) objects with the same
+  uncertainty, `projected` to `PLANNED_OBJECTS` (72, Round 4's test set) objects with the same
   attempts and tasks per object, and the share of the paired variance that is
   attempt noise (`attempt_share`; `attempt_share_at_least` when only one side
   ran tasks twice; `without_attempt_noise`, the floor with attempts averaged

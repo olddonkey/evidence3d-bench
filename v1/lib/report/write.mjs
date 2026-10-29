@@ -8,7 +8,8 @@ import { soupFromModel, soupFromGLB, transformSoup, transformPoint } from '../so
 import { validateModel } from '../model.mjs';
 import { shadeSoup, standardViews, unionBounds } from '../render/shade.mjs';
 import { collectRuns, DEFAULT_EXCLUDED_STATUSES } from './collect.mjs';
-import { buildLeaderboard, cellKey, reportName } from './aggregate.mjs';
+import { buildLeaderboard, cellKey, reportName, rosterTasks } from './aggregate.mjs';
+import { parseRoster } from './roster.mjs';
 import { esc, slug, STYLE } from './html.mjs';
 import { indexPage } from './index-page.mjs';
 import { taskPage, candidateLabel, attemptLabel } from './task-page.mjs';
@@ -147,7 +148,8 @@ export async function writeReport({ dataRoot, batches, outDir, views = REPORT_VI
   const root = resolve(dataRoot), paths = layout(root);
   const target = resolve(outDir ?? join(paths.reports, reportName(batches)));
   let since = performance.now();
-  const collected = await collectRuns({ dataRoot: root, batches, excludeStatuses });
+  if (roster && !(roster.keys instanceof Map)) roster = parseRoster(roster);
+  const collected = await collectRuns({ dataRoot: root, batches, excludeStatuses, alsoTasks: rosterTasks(roster) });
   lap('collect_s', since);
   since = performance.now();
   const board = buildLeaderboard(collected, { seed, now, excludeStatuses, plannedObjects, roster });
@@ -329,11 +331,12 @@ export async function writeReport({ dataRoot, batches, outDir, views = REPORT_VI
     sets: board.sets.map(set => ({
       id: set.id, kind: set.description?.kind ?? null, development: set.description?.development ?? false, objects: set.objects, tasks: set.tasks, counted: set.counted,
       ranking: board.entries.filter(entry => entry.set === set.id).map(entry => ({ rank: entry.rank, key: entry.key, score: round(entry.score.mean), ci95: entry.score.ci95?.map(round) ?? null,
-        ...(entry.reference ? { reference: true } : {}) })),
+        ...(entry.reference ? { reference: true } : {}), ...(entry.demoted ? { demoted: entry.demoted } : {}) })),
       ladders: set.ladders.map(ladder => ({ id: ladder.id, ranking: ladder.entries.map(item => ({ rank: item.rank, key: item.key })),
-        separated: ladder.pairwise.correction.separated + ' of ' + ladder.pairwise.correction.comparisons + ' pairs after Holm' })),
+        separated: ladder.pairwise.correction.separated + ' of ' + ladder.pairwise.correction.comparisons + ' pairs after Holm' +
+          (ladder.pairwise.correction.incomplete ? ' (' + ladder.pairwise.correction.incomplete + ' incomplete)' : '') })),
       pairs: set.pairwise.pairs.map(pair => ({ a: pair.a, b: pair.b, difference: round(pair.mean_difference), ci95: pair.ci95?.map(round) ?? null,
-        t_ci95: pair.t_ci95?.map(round) ?? null, verdict: pair.verdict, holm: pair.holm?.verdict ?? null })),
+        t_ci95: pair.t_ci95?.map(round) ?? null, verdict: pair.verdict, ...(pair.incomplete ? { incomplete: pair.incomplete } : {}), holm: pair.holm?.verdict ?? null })),
     })),
     timing,
   };

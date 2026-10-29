@@ -164,14 +164,22 @@ export function tInterval(values, level = 0.95) {
   return [centre - half, centre + half];
 }
 
+// Relative spread below which values count as constant (floating-point noise).
+const CONSTANT_TOLERANCE = 1e-12;
+
 // Two-sided p-value of the one-sample t test of mean = 0 (on paired
 // differences, the paired t test): the t interval at level 1 - p just touches
-// zero. Identical nonzero values give 0, all zeros 1; null below two values.
+// zero. null below two values or when the values do not vary.
 export function tTestP(values) {
   const list = values.filter(finite);
   if (list.length < 2) return null;
   const centre = mean(list), sd = sampleSD(list);
-  if (!(sd > 0)) return Math.abs(centre) > 0 ? 0 : 1;
+  // Differences that do not vary leave t undefined (0 / 0 or x / 0): no p-value,
+  // rather than the 0 or NaN an implementation would compute
+  // (docs/V1-ROUND4-PLAN.md section 4); such a pair cannot be decided. Rounding
+  // leaves constant decimals an SD of about 1e-16 (twelve differences of 2.3
+  // give 4.6e-16), so "does not vary" is judged against the values' size.
+  if (!(sd > CONSTANT_TOLERANCE * Math.max(1, ...list.map(Math.abs)))) return null;
   const t = centre / (sd / Math.sqrt(list.length));
   return Math.min(1, 2 * (1 - studentCDF(Math.abs(t), list.length - 1)));
 }
