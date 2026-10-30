@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { appendFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { writeSampleRuns } from '../lib/report/sample-runs.mjs';
@@ -13,6 +16,7 @@ import {
   TIE_GAP, CANDIDATE_WEIGHTS, scoreGap, weightedScore, weightedGap, rescorePair, isOriginal, isCatch, isRepeat, latestVotes,
   qualifyRater, qualifyRaters, qualifyStudy, pluralityChoice, panelOriginals, percentileInterval, objectBootstrap, proportionInterval,
 } from '../lib/study/panel.mjs';
+import { lockVoting, VOTING_LOCK } from '../lib/study/votes.mjs';
 
 // Round 4 plan (docs/V1-ROUND4-PLAN.md): rater qualification and the panel
 // (section 5.1), gate G1 (section 5.2), intervals (section 4), catch pairs.
@@ -149,12 +153,14 @@ const sub = (shape, detail) => ({ score: Number(((shape + detail) / 2).toFixed(2
 //   shape   50/50 (59 v 60) and 35/65 rank B higher, 65/35 ranks A higher; the panel chose A.
 //   level   50/50 puts them level (55 v 55), 65/35 ranks A higher, 35/65 B; the panel chose A.
 //   split   the panel cannot tell (A, B and cannot tell).
+//   wrong   every weighting ranks A higher; the panel chose B.
 const KINDS = {
   agree: [sub(70, 70), sub(50, 50), ['a', 'a', 'a']],
   detail: [sub(80, 40), sub(60, 58), ['b', 'b', 'a']],
   shape: [sub(58, 60), sub(40, 80), ['a', 'a', 'tie']],
   level: [sub(60, 50), sub(50, 60), ['a', 'a', 'b']],
   split: [sub(70, 70), sub(50, 50), ['a', 'b', 'tie']],
+  wrong: [sub(70, 70), sub(50, 50), ['b', 'b', 'b']],
 };
 const PANEL = ['ann', 'bob', 'cy'], EVERYONE = [...PANEL, 'dan', 'eve'];
 // `objects`: per object the kinds of its original pairs. The first ten
@@ -266,6 +272,47 @@ test('G1 keeps 1.1.0 with fewer than 10 changed objects; the 70 % target is reac
   assert.deepEqual([all.candidates[0].agreement.estimate, all.candidates[0].agreement.available, all.target.verdict, all.decision.scorer], [1, false, 'not_confirmed', '1.1.0']);
   assert.equal(all.candidates[1].difference.reasons[0], 'interval not available (every resample gives the same value)');
   assert.match(analysisMarkdown(analyzeStudy({ ...g1Study(range(12, ['agree', 'agree'])), raters: PANEL, g1Seed: 'all' })), /100\.0% \(interval not available: observed 1: a proportion at the boundary\), is not confirmed to reach the 70 % target/);
+});
+
+test('G1: a difference that is the same on every resample has no interval, also when the agreement differs by object', () => {
+  // 20 objects of five originals: one detail pair (35/65 gains a point on it), then k agreeing and 4 - k wrong ones.
+  const objects = Array.from({ length: 20 }, (_, o) => ['detail', ...Array.from({ length: 4 }, (_, i) => i < o % 5 ? 'agree' : 'wrong')]);
+  const g1 = analyzeStudy({ ...g1Study(objects), raters: PANEL, g1Seed: 'constant' }).g1;
+  const difference = g1.candidates[2].difference;
+  assert.deepEqual([difference.estimate, difference.available, difference.objects_changed, difference.better], [0.2, false, 20, false]);
+  assert.equal(difference.reason, 'every resample gives the same value');
+  assert.equal(g1.candidates[0].agreement.available, true);
+  assert.deepEqual([g1.decision.scorer, g1.decision.weights], ['1.1.0', '50/50']);
+  // Values a rounding step apart are the same value.
+  assert.equal(percentileInterval(0.2, [0.19999999999999996, 0.2, 0.20000000000000007]).available, false);
+  assert.equal(percentileInterval(0.2, [0.19, 0.2, 0.21]).available, true);
+});
+
+test('G1 with an empty evaluation set keeps 1.1.0, also through the command line', async () => {
+  // Two qualified raters who never agree, or a panel that always says "cannot tell": no pair to compare on.
+  const study = g1Study(range(12, ['split', 'split']));
+  const g1 = analyzeStudy({ ...study, raters: PANEL, g1Seed: 's' }).g1;
+  assert.deepEqual([g1.run, g1.panel, g1.decision.scorer, g1.target.verdict], [false, PANEL, '1.1.0', 'not_confirmed']);
+  assert.match(g1.reason, /evaluation set is empty/);
+  assert.match(analysisMarkdown(analyzeStudy({ ...study, raters: PANEL, g1Seed: 's' })), /\*\*G1 not computed:\*\* the panel chose A or B on no original pair[^\n]*\n\n\*\*70 % target:\*\* the agreement of 50\/50, n\/a, is not confirmed/);
+  await withTemp(async root => {
+    const cli = fileURLToPath(new URL('../scripts/study.mjs', import.meta.url));
+    const run = (name, { key, votes }) => {
+      const dir = join(root, 'study', name);
+      return mkdir(dir, { recursive: true })
+        .then(() => writeFile(join(dir, 'key.json'), JSON.stringify(key)))
+        .then(() => writeFile(join(dir, 'votes.jsonl'), votes.map(vote => JSON.stringify(vote)).join('\n') + '\n'))
+        .then(() => spawnSync(process.execPath, [cli, 'analyze', '--name', name, '--data', root, '--raters', PANEL.join(','), '--g1-seed', 's'], { encoding: 'utf8' }));
+    };
+    const empty = await run('empty', study);
+    assert.equal(empty.status, 0, empty.stderr);
+    const printed = JSON.parse(empty.stdout.trim().split('\n').at(-1)).g1;
+    assert.deepEqual([printed.decision.scorer, printed.target], ['1.1.0', 'not_confirmed']);
+    const decided = await run('decided', g1Study([...range(10, ['agree', 'detail']), ...range(2, ['agree', 'agree'])]));
+    assert.equal(decided.status, 0, decided.stderr);
+    const summary = JSON.parse(decided.stdout.trim().split('\n').at(-1)).g1;
+    assert.deepEqual([summary.decision.weights, summary.agreement.map(item => item.weights)], ['35/65', ['50/50', '65/35', '35/65']]);
+  });
 });
 
 test('G1 needs two qualified raters and a seed; unqualified raters never vote in the panel', () => {
@@ -422,15 +469,41 @@ test('add-catch: six catch pairs after the last rated pair, votes untouched, dra
   });
 });
 
-test('add-catch refuses once a rater\'s votes came back, and is seeded', async () => {
+test('add-catch refuses once another rater has voted, stops voting while it runs, and is seeded', async () => {
   await withTemp(async root => {
     const dataRoot = join(root, 'data');
     await writeSampleRuns(dataRoot, { attempts: RUN_SPECS, withInputs: false });
-    for (const name of ['one', 'two', 'three']) await prepareStudy({ dataRoot, name, batches: ['demo-codex', 'demo-claude'], pairs: 8, seed: 'prep', size: { width: 48, height: 36 } });
-    const pairsOf = name => readFile(join(studyDir(dataRoot, name), 'pairs.json'), 'utf8');
-    await writeFile(join(studyDir(dataRoot, 'one'), 'votes-ann.jsonl'), JSON.stringify({ rater: 'ann', pair: JSON.parse(await pairsOf('one')).pairs[0].id, choice: 'a', ms: 1, at: 't' }) + '\n');
-    await assert.rejects(addCatchPairs({ dataRoot, name: 'one', objects: ['house-0011', 'hall-0014', 'structure-0015', 'retail-0012'], seed: 's' }), /votes-ann\.jsonl holds a rater's votes/);
+    for (const name of ['one', 'two', 'three', 'four', 'five']) await prepareStudy({ dataRoot, name, batches: ['demo-codex', 'demo-claude'], pairs: 8, seed: 'prep', size: { width: 48, height: 36 } });
     const objects = ['house-0011', 'hall-0014', 'structure-0015', 'retail-0012'];
+    const pairsOf = name => readFile(join(studyDir(dataRoot, name), 'pairs.json'), 'utf8');
+    const keyOf = name => readFile(join(studyDir(dataRoot, name), 'key.json'), 'utf8');
+    const idAt = (pairsText, index) => JSON.parse(pairsText).pairs[index].id;
+    const vote = (pair, rater) => JSON.stringify({ ...(rater ? { rater } : {}), pair, choice: 'a', ms: 1, at: 't' }) + '\n';
+    // A rater's votes sent back, or votes of another rater taking turns on this machine.
+    await writeFile(join(studyDir(dataRoot, 'one'), 'votes-ann.jsonl'), vote(idAt(await pairsOf('one'), 0), 'ann'));
+    await assert.rejects(addCatchPairs({ dataRoot, name: 'one', objects, seed: 's' }), /votes-ann\.jsonl holds a rater's votes/);
+    const four = await pairsOf('four');
+    await writeFile(join(studyDir(dataRoot, 'four'), 'votes.jsonl'), vote(idAt(four, 0)) + vote(idAt(four, 2), 'ann') + vote(idAt(four, 1), 'lls'));
+    await assert.rejects(addCatchPairs({ dataRoot, name: 'four', objects, seed: 's' }), /holds votes of ann, lls besides the owner \(r0\)[^\n]*--legacy-rater/);
+    await assert.rejects(addCatchPairs({ dataRoot, name: 'four', objects, seed: 's', legacyRater: 'lls' }), /holds votes of ann besides the owner \(lls\)/);
+    // With the owner named, their votes with and without the name are theirs: nothing goes before the last one.
+    await writeFile(join(studyDir(dataRoot, 'four'), 'votes.jsonl'), vote(idAt(four, 0)) + vote(idAt(four, 2), 'lls'));
+    assert.equal((await addCatchPairs({ dataRoot, name: 'four', objects, seed: 's', legacyRater: 'lls' })).after_position, 2);
+
+    // Voting stops while it runs: held by another step, it refuses; a vote saved while it drew stops it before anything is written.
+    const five = await pairsOf('five'), fiveDir = studyDir(dataRoot, 'five'), fiveKey = await keyOf('five');
+    await writeFile(join(fiveDir, 'votes.jsonl'), vote(idAt(five, 0)));
+    const unlock = await lockVoting(fiveDir);
+    await assert.rejects(addCatchPairs({ dataRoot, name: 'five', objects, seed: 's' }), /another step is changing this study/);
+    await unlock();
+    let late = false;
+    const log = () => { if (!late) { late = true; appendFileSync(join(fiveDir, 'votes.jsonl'), vote(idAt(five, 5))); } };
+    await assert.rejects(addCatchPairs({ dataRoot, name: 'five', objects, seed: 's', log }), /votes changed while the catch pairs were drawn/);
+    assert.deepEqual([await pairsOf('five'), await keyOf('five')], [five, fiveKey]);
+    assert.ok(!(await readdir(fiveDir)).includes(VOTING_LOCK), 'the lock is released');
+    assert.equal((await readdir(join(fiveDir, 'images'))).length, 9 * 3 * 4);
+    assert.equal((await addCatchPairs({ dataRoot, name: 'five', objects, seed: 's' })).after_position, 5);
+
     await addCatchPairs({ dataRoot, name: 'two', objects, seed: 's', now: () => new Date(0) });
     await addCatchPairs({ dataRoot, name: 'three', objects, seed: 's', now: () => new Date(0) });
     // With no votes the catch pairs may go anywhere, and the same seed puts them in the same places.

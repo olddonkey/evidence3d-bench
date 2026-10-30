@@ -10,7 +10,8 @@ import { generateModel, GENERATOR_VERSION } from '../generator/index.mjs';
 import { mutations } from '../score/mutations.mjs';
 import { studyCameras, renderViews, STUDY_VIEWS, STUDY_SIZE, STUDY_SHADING, FRAME_FILL, BACKGROUND } from './render.mjs';
 import { imageName, ROLES } from './select.mjs';
-import { voteFiles, readVoteFiles, VOTES_FILE } from './votes.mjs';
+import { voteFiles, readVoteFiles, lockVoting } from './votes.mjs';
+import { LEGACY_RATER } from './page/state.js';
 import { isCatch, isOriginal } from './panel.mjs';
 import { studyDir, DEFAULT_DATA_ROOT } from './index.mjs';
 
@@ -19,10 +20,13 @@ import { studyDir, DEFAULT_DATA_ROOT } from './index.mjs';
 // development-set object's truth on one side, the same truth with one massing
 // or roof group taken away on the other (calibrate's dropGroup defect), both
 // drawn exactly as the study draws a pair (same cameras on the truth's bounds,
-// same clay shading), the truth on side A in half of them. They are added to a prepared study, also one that
-// has votes: no pair is changed or moved before the last pair anyone has rated,
-// and no vote is touched. key.json marks them (`catch`), pairs.json does not,
-// and they count in no agreement, only in the qualification.
+// same clay shading), the truth on side A in half of them. They are added to a
+// prepared study, also one that the owner has started rating, but before any
+// other rater has voted: no pair is changed or moved before the last pair the
+// owner has rated, and no vote is touched. Voting stops while they are added
+// (votes.mjs VOTING_LOCK; a server started before refuses votes until it is
+// restarted). key.json marks them (`catch`), pairs.json does not, and they
+// count in no agreement, only in the qualification.
 
 export const CATCH_PAIRS = 6;
 export const CATCH_CATEGORIES = ['massing', 'roof'];
@@ -67,9 +71,12 @@ function shuffle(list, random) {
 
 //   objects: development-set object ids (v1/sets/dev.json), used in turn;
 //   seed: chooses the groups, the sides, the variants shown, the ids and the
-//     places (written into the private record with the objects).
+//     places (written into the private record with the objects);
+//   legacyRater: the owner's id, as for serve and analyze: votes without a
+//     rater, and votes under this id, are the owner's. Any other rater's vote
+//     stops add-catch.
 export async function addCatchPairs({ dataRoot = DEFAULT_DATA_ROOT, name, objects, seed, count = CATCH_PAIRS, minChangedShare = MIN_CHANGED_SHARE,
-  devSet = DEV_SET_FILE, now = () => new Date(), log = () => {} }) {
+  legacyRater = LEGACY_RATER, devSet = DEV_SET_FILE, now = () => new Date(), log = () => {} }) {
   if (!Array.isArray(objects) || !objects.length) throw new Error('add-catch needs at least one development-set object');
   if (new Set(objects).size !== objects.length) throw new Error('an object is named twice: ' + objects.join(','));
   if (seed === undefined || seed === null || seed === '') throw new Error('add-catch needs a seed');
@@ -81,15 +88,35 @@ export async function addCatchPairs({ dataRoot = DEFAULT_DATA_ROOT, name, object
     throw new Error('pairs.json and key.json do not list the same pairs in the same order');
   }
   if (key.pairs.some(isCatch)) throw new Error(dir + ' already has catch pairs');
-  // A rater's votes sent back mean their copy went out without the catch pairs.
-  for (const { file } of (await voteFiles(dir)).files) {
-    if (file !== VOTES_FILE && await exists(join(dir, file))) throw new Error(join(dir, file) + ' holds a rater\'s votes: catch pairs go in before the study is exported to any rater');
+  const unlock = await lockVoting(dir);
+  try {
+    return await addLocked({ dir, key, study, objects, seed, count, minChangedShare, legacyRater, devSet, now, log });
+  } finally {
+    await unlock();
   }
+}
 
-  // Nothing is placed before the last pair anyone has rated here.
+// The owner's votes, as text to compare (read before the pictures are drawn
+// and again before anything is written); throws on any other rater's.
+async function ownerVotes(dir, legacyRater) {
+  // A rater's votes sent back mean their copy went out without the catch pairs.
+  for (const { file, rater } of (await voteFiles(dir)).files) {
+    if (rater && rater !== legacyRater && await exists(join(dir, file))) throw new Error(join(dir, file) + ' holds a rater\'s votes: catch pairs go in before the study is exported to any rater');
+  }
+  const read = await readVoteFiles(dir, { legacyRater });
+  const others = [...new Set(read.votes.map(vote => vote.rater).filter(rater => rater !== legacyRater))].sort();
+  if (others.length) {
+    throw new Error(dir + ' holds votes of ' + others.join(', ') + ' besides the owner (' + legacyRater + '): catch pairs go in before anyone else rates' +
+      (legacyRater === LEGACY_RATER ? '; if those votes are yours, pass --legacy-rater <your id>' : ''));
+  }
+  return JSON.stringify(read.votes);
+}
+
+async function addLocked({ dir, key, study, objects, seed, count, minChangedShare, legacyRater, devSet, now, log }) {
+  // Nothing is placed before the last pair the owner has rated.
   const order = new Map(study.pairs.map((pair, index) => [pair.id, index]));
-  const { votes } = await readVoteFiles(dir);
-  const lastRated = votes.reduce((last, vote) => Math.max(last, order.get(vote.pair) ?? -1), -1);
+  const voted = await ownerVotes(dir, legacyRater);
+  const lastRated = JSON.parse(voted).reduce((last, vote) => Math.max(last, order.get(vote.pair) ?? -1), -1);
 
   const models = await devModels(devSet);
   const unknown = objects.filter(id => !models.has(id));
@@ -179,6 +206,9 @@ export async function addCatchPairs({ dataRoot = DEFAULT_DATA_ROOT, name, object
   });
   insert(tail);
   keyPairs.forEach((pair, position) => { pair.position = position; });
+
+  // A vote saved as voting stopped (a server answering just then) would move the last rated pair.
+  if (await ownerVotes(dir, legacyRater) !== voted) throw new Error('votes changed while the catch pairs were drawn: stop serve, then run add-catch again');
 
   // Images first, then key.json, then pairs.json (what the page reads).
   const imageDir = join(dir, 'images');

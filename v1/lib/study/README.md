@@ -11,7 +11,7 @@ apart from one person's taste).
 ```sh
 node v1/scripts/study.mjs prepare --name NAME --batches A,B,C --seed SEED [--pairs 100] [--repeat-share 0.1] [--data .local/v1] [--force]
 node v1/scripts/study.mjs serve   --name NAME [--port 4173] [--data .local/v1] [--legacy-rater ID]
-node v1/scripts/study.mjs add-catch --name NAME --objects ID,ID,... --seed SEED [--count 6] [--data .local/v1]
+node v1/scripts/study.mjs add-catch --name NAME --objects ID,ID,... --seed SEED [--count 6] [--data .local/v1] [--legacy-rater ID]
 node v1/scripts/study.mjs qualify --name NAME [--data .local/v1] [--legacy-rater ID] [--raters A,B,C]
 node v1/scripts/study.mjs analyze --name NAME [--data .local/v1] [--legacy-rater ID] [--raters A,B,C] [--g1-seed SEED]
 node v1/scripts/study.mjs export  --name NAME --out NEW_DIR [--data .local/v1]
@@ -73,8 +73,9 @@ study to decide whether scorer 1.1.0's 50/50 weighting of shape and detail
 stays. In order:
 
 1. `add-catch` (once, before the study is exported to any rater; the owner's
-   study, already rated in part, included): six catch pairs. Write the objects,
-   the seed and the groups it prints into the private record.
+   study, already rated in part, included; with `--legacy-rater <the owner's
+   id>` if the owner has voted under a name): six catch pairs. Write the
+   objects, the seed and the groups it prints into the private record.
 2. `export` for each outside rater; they rate and send back their votes.
 3. `qualify` at the deadline: who qualifies, from the votes, the repeats and
    the catch pairs only. Replace who does not (plan section 5.1).
@@ -102,18 +103,25 @@ stays. In order:
   groups it stops and says so. The truth is on side A in exactly half of them
   (the odd one by a coin). Title: the object's; variant: one of the study's,
   at random.
-- Places: only after the last pair anyone has rated (so the pairs the owner
-  rated and their order stay as they were); the remaining gaps are split into
-  six runs with one catch pair at a random gap of each. Votes files are not
-  touched. Every pair's `position` in key.json follows the new order.
+- Places: only after the last pair the owner has rated (so the pairs the
+  owner rated and their order stay as they were); the remaining gaps are split
+  into six runs with one catch pair at a random gap of each. Votes files are
+  not touched. Every pair's `position` in key.json follows the new order.
+- Voting stops while it runs: it holds `voting.lock` in the study directory
+  (with its process id), and `serve` refuses votes while that file names a
+  running process. A `serve` started before `add-catch` refuses every vote
+  afterwards (pairs.json changed), so it has to be restarted and the page
+  reloaded. If a vote still came in while the pictures were drawn, `add-catch`
+  stops without writing anything.
 - key.json marks each with `catch: { correct, object, set, archetype, seed,
   group, category, changed_share }` and gets a `catch_pairs` block (time,
   seed, objects, generator version, threshold, `after_position`); pairs.json
   entries look like every other (id, title, variant, images). The command
   prints the objects and groups, never which pairs are catch pairs.
-- Refused when the study already has catch pairs, when a `votes-<id>.jsonl`
-  holds votes (a copy went out without them), or for an object that is not in
-  the development set or already in the study. Restart `serve` afterwards.
+- Refused when the study already has catch pairs; when any rater other than
+  the owner has voted, in a `votes-<id>.jsonl` (a copy went out without them)
+  or in `votes.jsonl` (raters taking turns on this machine); and for an object
+  that is not in the development set or already in the study.
 
 ### Qualification and the panel (`panel.mjs`)
 
@@ -161,7 +169,11 @@ stays. In order:
 - Without `--raters` (the panel as the private record lists it, after the
   deadlines and replacements) or without `--g1-seed`, or with fewer than two
   qualified raters, the section says why G1 was not computed; only the last
-  case decides (1.1.0 stays).
+  case decides (1.1.0 stays). So does an empty evaluation set (the panel chose
+  A or B on no original): 1.1.0 stays and the 70 % target is not confirmed.
+- Resamples within 10⁻¹² of each other count as the same value (section 4: no
+  interval); differences are computed from whole half points, so a difference
+  that is the same on every resample is exactly the same number.
 
 ## Pair selection (`select.mjs`)
 
@@ -381,10 +393,13 @@ files say so.
 `node --test v1/test/study-g1.test.mjs`: tie gap and weighted scores, the
 panel's majority, qualification thresholds, the intervals' edge cases and the
 seeded bootstrap, G1 on hand-computed panels (a candidate that wins, one with
-too few changed objects, the 70 % target reached, missed and not confirmed,
-no seed, one qualified rater, unqualified raters left out, legacy votes with
-`--legacy-rater`), and add-catch on a prepared study (places after the last
-rated pair, votes untouched, renders, nothing in pairs.json, refusals, seeded).
+too few changed objects, a difference that is the same on every resample, the
+70 % target reached, missed and not confirmed, an empty evaluation set through
+the command line, no seed, panel not named, one qualified rater, unqualified
+raters left out, legacy votes with `--legacy-rater`), and add-catch on a
+prepared study (places after the last rated pair, votes untouched, renders,
+nothing in pairs.json, refusals for other raters' votes in either file, the
+voting lock, a vote that arrives while it draws, seeded).
 
 `node --test v1/test/study.test.mjs`: stratification, the per-task cap, t1
 skipped, cross-configuration preference, shortfall reporting, repeats
@@ -394,7 +409,8 @@ batches, models and private files, renders non-blank with one camera set per
 object (a part-model draws only on the reference's silhouette), the server
 (127.0.0.1, routes, key.json unreachable, votes appended with their rater and
 resumed per rater, legacy votes, bad votes and raters, cross-origin and
-foreign Host refused), the page logic and rater ids, merging the votes files,
+foreign Host refused, no vote under the voting lock or once pairs.json
+changed under it), the page logic and rater ids, merging the votes files,
 the export, and the analysis on hand-computed examples (Wilson intervals, last
 vote wins, strata, ties, self-consistency, disagreements; Cohen's and Fleiss'
 κ on textbook values; three raters: κ per two raters, Fleiss' κ, majority vote).

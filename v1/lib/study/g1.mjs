@@ -102,6 +102,11 @@ export function g1Analysis({ key, latestByRater, qualification, named = false, s
   const incomplete = verdicts.filter(item => item.votes !== panel.length).map(item => item.id);
   if (incomplete.length) return { ...base, run: false, reason: 'original pairs without every panel vote: ' + incomplete.join(', '), decision: null };
   const evaluation = verdicts.filter(item => item.choice === 'a' || item.choice === 'b');
+  // No pair to compare on: no candidate can beat 50/50, and its agreement has no estimate.
+  if (!evaluation.length) {
+    return { ...keep('the panel chose A or B on no original pair, so the evaluation set is empty: no candidate can beat 50/50 and scorer ' + CURRENT_SCORER + ' stays'),
+      target: { target: TARGET_AGREEMENT, agreement: null, verdict: targetVerdict(null) } };
+  }
   // The 50/50 weights must give back the scores key.json holds, or the halves are not what the score was made of.
   const mismatched = evaluation.filter(item => ['a', 'b'].some(role => weightedScore(item[role], CANDIDATE_WEIGHTS[0]) !== weightedScore(item[role], null))).map(item => item.id);
   const unscorable = evaluation.filter(item => CANDIDATE_WEIGHTS.some(weights => halfPoints(item, item.choice, weights) === null)).map(item => item.id);
@@ -115,13 +120,15 @@ export function g1Analysis({ key, latestByRater, qualification, named = false, s
   const clusters = byObject(scored).map(cluster => ({ object: cluster.object, n: cluster.items.length,
     sums: CANDIDATE_WEIGHTS.map((_, k) => cluster.items.reduce((sum, item) => sum + item.points[k], 0)) }));
   const others = CANDIDATE_WEIGHTS.slice(1);
-  // A(w) for every candidate, then A(w) - A(50/50) for the others, on the same resamples.
+  // A(w) for every candidate, then A(w) - A(50/50) for the others, on the same
+  // resamples. Both are a whole number of half points over 2n, divided once: a
+  // difference that is the same on every resample is then the same number, not
+  // two rates that differ in the last bit (section 4: no interval).
   const statistic = list => {
     let n = 0;
     const sums = CANDIDATE_WEIGHTS.map(() => 0);
     for (const cluster of list) { n += cluster.n; cluster.sums.forEach((value, k) => { sums[k] += value; }); }
-    const rates = sums.map(sum => sum / (2 * n));
-    return [...rates, ...others.map((_, k) => rates[k + 1] - rates[0])];
+    return [...sums.map(sum => sum / (2 * n)), ...others.map((_, k) => (sums[k + 1] - sums[0]) / (2 * n))];
   };
   const intervals = clusters.length ? objectBootstrap(clusters, statistic, { seed, samples, proportion: [...CANDIDATE_WEIGHTS.map(() => true), ...others.map(() => false)] }) : null;
 

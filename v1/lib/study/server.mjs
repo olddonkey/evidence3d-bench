@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { readFile, appendFile } from 'node:fs/promises';
 import { join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CHOICES, VOTES_FILE, readVoteFiles } from './votes.mjs';
+import { CHOICES, VOTES_FILE, readVoteFiles, votingLock, VOTING_LOCK } from './votes.mjs';
 import { isRater, LEGACY_RATER } from './page/state.js';
 
 // Local server for the rating page. It binds 127.0.0.1 only, serves the page
@@ -20,6 +20,10 @@ import { isRater, LEGACY_RATER } from './page/state.js';
 // rater and pair. GET /votes reads every votes file of the study (votes.jsonl
 // and votes-<id>.jsonl, see votes.mjs) and returns only the asking rater's
 // votes, so nobody sees another rater's choices.
+//
+// No vote is taken while a step changes the study's pairs (votes.mjs
+// VOTING_LOCK), nor after pairs.json changed under a running server: its page
+// would show the old order, and a vote could land before a new pair.
 
 export const DEFAULT_PORT = 4173;
 export const HOST = '127.0.0.1';
@@ -88,6 +92,8 @@ export async function startStudyServer({ studyDir, port = DEFAULT_PORT, now = ()
         if (origin && origin !== 'http://' + request.headers.host) return json(response, 403, { error: 'cross-origin writes are not allowed' });
         if (path !== '/vote') return json(response, 404, { error: 'not found' });
         const line = voteLine(await body(request), pairIds, now().toISOString());
+        if (await votingLock(studyDir)) return json(response, 409, { error: 'the study is being changed (' + VOTING_LOCK + '); wait until that step ends, restart serve and reload the page' });
+        if (!(await readFile(join(studyDir, 'pairs.json'))).equals(pairsBytes)) return json(response, 409, { error: 'pairs.json changed after serve started: stop serve, start it again and reload the page' });
         const write = appending.then(() => appendFile(votesFile, JSON.stringify(line) + '\n'));
         appending = write.catch(() => {});
         await write;
