@@ -677,5 +677,18 @@ test('add-catch puts an unfinished add-catch right, or leaves everything as it i
     const again = await addCatchPairs({ dataRoot, name: 'stuck', objects, seed: 's' });
     assert.deepEqual([again.recovered, again.added], ['restored', 6]);
     assert.deepEqual(Object.keys(await snapshot(stuck)), ['key.json', 'pairs.json']);
+    // Both in place but the backup cannot be removed: an error, not success; the study stays unread until the
+    // next add-catch removes the backup (key.json and pairs.json list the same pairs) before it refuses to add more.
+    await prepareStudy({ dataRoot, name: 'late', batches: ['demo-codex', 'demo-claude'], pairs: 8, seed: 'prep', size: { width: 48, height: 36 } });
+    const late = studyDir(dataRoot, 'late');
+    await assert.rejects(failing('rm', path => String(path).endsWith(KEY_BACKUP) ? Object.assign(new Error('operation not permitted'), { code: 'EPERM' }) : null,
+      () => addCatchPairs({ dataRoot, name: 'late', objects, seed: 's' })), /added the catch pairs but could not remove [^\n]*key\.json\.before-add-catch \(operation not permitted\)[^\n]*Run add-catch again/);
+    assert.deepEqual(Object.keys(await snapshot(late)), ['key.json', KEY_BACKUP, 'pairs.json']);
+    await assert.rejects(qualifyStudy(late), /an add-catch did not finish/);
+    const logged = [];
+    await assert.rejects(addCatchPairs({ dataRoot, name: 'late', objects, seed: 's', log: event => logged.push(event) }), /already has catch pairs/);
+    assert.deepEqual(logged.map(event => event.key), ['kept']);
+    assert.deepEqual(Object.keys(await snapshot(late)), ['key.json', 'pairs.json']);
+    assert.deepEqual([(await qualifyStudy(late)).catch_pairs, (await qualifyStudy(late)).pairs], [6, 15]);
   });
 });

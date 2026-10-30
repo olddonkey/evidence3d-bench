@@ -260,9 +260,10 @@ async function recover(dir) {
 // key.json and pairs.json change together or not at all. Both are written
 // beside them first and key.json as it was is kept aside (KEY_BACKUP); then
 // key.json and pairs.json are renamed into place. If pairs.json cannot be,
-// the old key.json goes back. The backup is removed once both are in place;
-// if even putting it back fails, it stays: until add-catch runs again and
-// puts the study right (recover), nothing reads the study (checkFinished).
+// the old key.json goes back. The backup is removed once both are in place
+// (an error if it cannot be); if even putting it back fails, it stays: until
+// add-catch runs again and puts the study right (recover), nothing reads the
+// study (checkFinished).
 async function publish(dir, keyText, key, pairs) {
   const keyFile = join(dir, 'key.json'), pairsFile = join(dir, 'pairs.json'), backup = join(dir, KEY_BACKUP);
   const nextKey = keyFile + '.add-catch.tmp', nextPairs = pairsFile + '.add-catch.tmp';
@@ -286,5 +287,9 @@ async function publish(dir, keyText, key, pairs) {
     }
     throw new Error('add-catch could not write pairs.json (' + error.message + '); key.json was put back, nothing changed', { cause: error });
   }
-  await tidy(backup);
+  // Both are in place; the backup still marks the study unfinished, so failing to remove it is an error too.
+  try { await rm(backup, { force: true }); } catch (error) {
+    throw new Error('add-catch added the catch pairs but could not remove ' + backup + ' (' + error.message + '), so the study is not served, exported, qualified or ' +
+      'analysed. Run add-catch again: it finds key.json and pairs.json listing the same pairs, removes it, and stops with "already has catch pairs"', { cause: error });
+  }
 }
