@@ -1,4 +1,6 @@
 import { readFile, readdir, open, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { join } from 'node:path';
 import { RATER_PATTERN, LEGACY_RATER, isRater } from './page/state.js';
 
@@ -11,9 +13,12 @@ import { RATER_PATTERN, LEGACY_RATER, isRater } from './page/state.js';
 
 export const CHOICES = ['a', 'b', 'tie'];
 export const VOTES_FILE = 'votes.jsonl';
-// While a step changes the study's pairs (add-catch), it holds this file with
-// its process id, and the server takes no vote.
+// The study's lock: held by a step that changes the study's pairs (add-catch)
+// for as long as it runs, and by the server for each vote while it checks the
+// study and saves the vote, so neither happens during the other.
 export const VOTING_LOCK = 'voting.lock';
+// How long taking the lock waits for a vote being saved.
+const LOCK_WAIT_MS = 2000;
 const RATER_FILE = /^votes-(.*)\.jsonl$/;
 // Anything that looks like a votes file but is not read is reported, never silently dropped.
 const VOTES_LIKE = /^votes.*\.jsonl$/;
@@ -169,27 +174,49 @@ export async function readVoteFiles(studyDir, { legacyRater = LEGACY_RATER } = {
   return { votes, malformed, duplicates: copies, files: summaries, ignored, legacy_rater: legacyRater };
 }
 
-// The process that holds the study's voting lock, or null. A lock whose process
-// is gone does not count; one that cannot be read (being written) does.
+// Who holds the study's lock, or null: { pid, kind, token, stale } (pid null
+// while the file is being written; stale when that process is gone).
 export async function votingLock(studyDir) {
   let text;
   try { text = await readFile(join(studyDir, VOTING_LOCK), 'utf8'); } catch (error) {
     if (error.code === 'ENOENT') return null;
     throw error;
   }
-  let pid;
-  try { pid = JSON.parse(text).pid; } catch { return { pid: null }; }
-  if (!Number.isInteger(pid) || pid <= 0) return { pid: null };
-  try { process.kill(pid, 0); } catch (error) { if (error.code === 'ESRCH') return null; }
-  return { pid };
+  let lock = {};
+  try { lock = JSON.parse(text) ?? {}; } catch {}
+  const pid = Number.isInteger(lock.pid) && lock.pid > 0 ? lock.pid : null;
+  let stale = false;
+  if (pid !== null) { try { process.kill(pid, 0); } catch (error) { stale = error.code === 'ESRCH'; } }
+  return { pid, kind: typeof lock.kind === 'string' ? lock.kind : null, token: typeof lock.token === 'string' ? lock.token : null, stale };
 }
 
-// Stops voting on the study until the returned function is called.
-export async function lockVoting(studyDir) {
-  const path = join(studyDir, VOTING_LOCK), held = await votingLock(studyDir);
-  if (held) throw new Error(path + ': another step is changing this study' + (held.pid ? ' (process ' + held.pid + ')' : '') + '; wait for it to end, or delete the file if it is not running');
-  await rm(path, { force: true });
-  const handle = await open(path, 'wx');
-  try { await handle.writeFile(JSON.stringify({ pid: process.pid, at: new Date().toISOString() }) + '\n'); } finally { await handle.close(); }
-  return () => rm(path, { force: true });
+// Takes the study's lock for `kind` ('add-catch', or 'vote' while a vote is
+// saved) and returns the function that gives it back. The file is created
+// only if it does not exist, so of two callers one gets it. It waits a moment
+// for a vote being saved (or a lock being written); any other holder is an
+// error with code ELOCKED. A lock is never taken from anyone, also not from a
+// process that is gone: that file is deleted by hand. Giving it back removes
+// the file only if it is still this caller's.
+export async function lockVoting(studyDir, { kind = 'add-catch', waitMs = LOCK_WAIT_MS } = {}) {
+  const path = join(studyDir, VOTING_LOCK), token = randomUUID(), started = Date.now();
+  for (;;) {
+    try {
+      const handle = await open(path, 'wx');
+      try { await handle.writeFile(JSON.stringify({ pid: process.pid, kind, token, at: new Date().toISOString() }) + '\n'); } finally { await handle.close(); }
+      break;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+    }
+    const held = await votingLock(studyDir);
+    if (!held) continue;
+    const brief = !held.stale && (held.pid === null || held.kind === 'vote');
+    if (brief && Date.now() - started < waitMs) { await delay(10); continue; }
+    throw Object.assign(new Error(held.stale
+      ? path + ' was left by process ' + held.pid + ', which has ended: delete the file if nothing is changing this study, then try again'
+      : path + ': ' + (held.kind === 'add-catch' ? 'add-catch is changing this study' : 'another step holds this study') + (held.pid ? ' (process ' + held.pid + ')' : '') +
+        '; wait for it to end' + (held.pid ? '' : ', or delete the file if nothing is running')), { code: 'ELOCKED', holder: held });
+  }
+  return async () => {
+    if ((await votingLock(studyDir))?.token === token) await rm(path, { force: true });
+  };
 }
