@@ -87,7 +87,6 @@ stays. In order:
    (the same `--legacy-rater`), at the weights G1 kept: the human curve that
    the results report reads (below).
 
-
 ### Catch pairs (`catch.mjs`)
 
 - A catch pair shows a development-set object (`v1/sets/dev.json`, generated
@@ -132,7 +131,9 @@ stays. In order:
   nor takes a vote and `export`, `qualify` and `analyze` refuse. Running
   `add-catch` again puts the study right first: the backup goes back to
   key.json when pairs.json is still the old one, and is dropped when key.json
-  and pairs.json already list the same pairs. New images are written first;
+  and pairs.json already list the same pairs (and then it stops with "already
+  has catch pairs"). If the backup cannot be removed after both are in place,
+  add-catch says so instead of reporting success. New images are written first;
   until pairs.json names them nothing shows them.
 - key.json marks each with `catch: { correct, object, set, archetype, seed,
   group, category, changed_share }` and gets a `catch_pairs` block (time,
@@ -452,5 +453,5 @@ curve on a hand-counted example (equal scores apart, shares and W, no interval
 at 0 or 1, seeded), rebinning at other weights, too few raters (also with
 pairs) or pairs, the redraw of a draw with an empty bin, and `curve` end to end
 on files (the named panel, each rater once, an unfinished add-catch and a held
-study lock refused);
-the report side of the curve is in v1/lib/report/README.md.
+study lock refused). The report side of the curve is in
+v1/lib/report/README.md.
