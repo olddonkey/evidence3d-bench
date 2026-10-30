@@ -326,6 +326,7 @@ export function g1Markdown(g1, lines) {
     (g1.not_qualified.length ? ' Not qualified, reported on their own: ' + g1.not_qualified.join(', ') + '.' : ''), '');
   if (!g1.run) {
     lines.push('**G1 not computed:** ' + g1.reason + '.' + (g1.decision ? ' Decision: scorer ' + g1.decision.scorer + ' (' + g1.decision.weights + ').' : ''), '');
+    if (g1.target) lines.push('**70 % target:** the agreement of 50/50, ' + bootText(g1.target.agreement) + ', ' + TARGET_TEXT[g1.target.verdict] + '.', '');
     return;
   }
   const set = g1.evaluation_set;

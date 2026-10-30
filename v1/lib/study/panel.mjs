@@ -172,6 +172,10 @@ export function panelOriginals(key, latestByRater, panel) {
 
 // ---------------------------------------------------------------- bootstrap
 
+// Resamples closer together than this give the same value: the spread is
+// rounding (a study's statistics move in steps of 1 / (2 * pairs) or more).
+export const SAME_VALUE = 1e-12;
+
 // Section 4: an interval from sorted resample values. Not available when a
 // proportion was observed at exactly 0 or 1, or when every resample gave the
 // same value: then only the estimate is reported, and an unavailable interval
@@ -180,7 +184,7 @@ export function percentileInterval(estimate, sorted, { level = 0.95, proportion 
   const tail = (1 - level) / 2, none = reason => ({ estimate, low: null, high: null, available: false, reason });
   if (!finite(estimate)) return none('no estimate');
   if (proportion && (estimate === 0 || estimate === 1)) return none('observed ' + estimate + ': a proportion at the boundary');
-  if (!sorted.length || !(sorted[0] < sorted[sorted.length - 1])) return none('every resample gives the same value');
+  if (!sorted.length || !(sorted[sorted.length - 1] - sorted[0] > SAME_VALUE)) return none('every resample gives the same value');
   return { estimate, low: quantile(sorted, tail), high: quantile(sorted, 1 - tail), available: true, reason: null };
 }
 

@@ -1,4 +1,4 @@
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile, readdir, open, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { RATER_PATTERN, LEGACY_RATER, isRater } from './page/state.js';
 
@@ -11,6 +11,9 @@ import { RATER_PATTERN, LEGACY_RATER, isRater } from './page/state.js';
 
 export const CHOICES = ['a', 'b', 'tie'];
 export const VOTES_FILE = 'votes.jsonl';
+// While a step changes the study's pairs (add-catch), it holds this file with
+// its process id, and the server takes no vote.
+export const VOTING_LOCK = 'voting.lock';
 const RATER_FILE = /^votes-(.*)\.jsonl$/;
 // Anything that looks like a votes file but is not read is reported, never silently dropped.
 const VOTES_LIKE = /^votes.*\.jsonl$/;
@@ -164,4 +167,29 @@ export async function readVoteFiles(studyDir, { legacyRater = LEGACY_RATER } = {
   }
   const { votes, copies } = mergeFiles(lists);
   return { votes, malformed, duplicates: copies, files: summaries, ignored, legacy_rater: legacyRater };
+}
+
+// The process that holds the study's voting lock, or null. A lock whose process
+// is gone does not count; one that cannot be read (being written) does.
+export async function votingLock(studyDir) {
+  let text;
+  try { text = await readFile(join(studyDir, VOTING_LOCK), 'utf8'); } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+  let pid;
+  try { pid = JSON.parse(text).pid; } catch { return { pid: null }; }
+  if (!Number.isInteger(pid) || pid <= 0) return { pid: null };
+  try { process.kill(pid, 0); } catch (error) { if (error.code === 'ESRCH') return null; }
+  return { pid };
+}
+
+// Stops voting on the study until the returned function is called.
+export async function lockVoting(studyDir) {
+  const path = join(studyDir, VOTING_LOCK), held = await votingLock(studyDir);
+  if (held) throw new Error(path + ': another step is changing this study' + (held.pid ? ' (process ' + held.pid + ')' : '') + '; wait for it to end, or delete the file if it is not running');
+  await rm(path, { force: true });
+  const handle = await open(path, 'wx');
+  try { await handle.writeFile(JSON.stringify({ pid: process.pid, at: new Date().toISOString() }) + '\n'); } finally { await handle.close(); }
+  return () => rm(path, { force: true });
 }

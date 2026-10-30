@@ -2,7 +2,7 @@
 // Evidence3D v1 human-agreement study (blind paired comparison).
 //   node v1/scripts/study.mjs prepare --name <name> --batches a,b,c --seed <seed> [--pairs 100] [--repeat-share 0.1] [--data <root>] [--force]
 //   node v1/scripts/study.mjs serve   --name <name> [--port 4173] [--data <root>] [--legacy-rater <id>]
-//   node v1/scripts/study.mjs add-catch --name <name> --objects a,b,c --seed <seed> [--count 6] [--data <root>]
+//   node v1/scripts/study.mjs add-catch --name <name> --objects a,b,c --seed <seed> [--count 6] [--data <root>] [--legacy-rater <id>]
 //   node v1/scripts/study.mjs qualify --name <name> [--data <root>] [--legacy-rater <id>] [--raters a,b,c]
 //   node v1/scripts/study.mjs analyze --name <name> [--data <root>] [--legacy-rater <id>] [--raters a,b,c] [--g1-seed <seed>]
 //   node v1/scripts/study.mjs export  --name <name> --out <new directory> [--data <root>]
@@ -24,7 +24,7 @@ import { isRater, LEGACY_RATER } from '../lib/study/page/state.js';
 const USAGE = `Usage:
   node v1/scripts/study.mjs prepare --name <name> --batches a,b,c --seed <seed> [--pairs ${DEFAULT_PAIRS}] [--repeat-share ${DEFAULT_REPEAT_SHARE}] [--data <root>] [--force]
   node v1/scripts/study.mjs serve   --name <name> [--port ${DEFAULT_PORT}] [--data <root>] [--legacy-rater <id>]
-  node v1/scripts/study.mjs add-catch --name <name> --objects a,b,c --seed <seed> [--count ${CATCH_PAIRS}] [--data <root>]
+  node v1/scripts/study.mjs add-catch --name <name> --objects a,b,c --seed <seed> [--count ${CATCH_PAIRS}] [--data <root>] [--legacy-rater <id>]
   node v1/scripts/study.mjs qualify --name <name> [--data <root>] [--legacy-rater <id>] [--raters a,b,c]
   node v1/scripts/study.mjs analyze --name <name> [--data <root>] [--legacy-rater <id>] [--raters a,b,c] [--g1-seed <seed>]
   node v1/scripts/study.mjs export  --name <name> --out <new directory> [--data <root>]
@@ -81,7 +81,7 @@ async function main(argv) {
   if (command === 'add-catch') {
     const count = Number(values.count ?? CATCH_PAIRS);
     if (!Number.isInteger(count) || count < 1) throw new Error('--count must be a positive integer');
-    const summary = await addCatchPairs({ dataRoot, name: need('name'), objects: listOf(need('objects')), seed: need('seed'), count });
+    const summary = await addCatchPairs({ dataRoot, name: need('name'), objects: listOf(need('objects')), seed: need('seed'), count, legacyRater });
     // The places of the catch pairs are in key.json only: printing them would tell a rater which pairs they are.
     print({ event: 'catch-pairs-added', ...summary,
       next: 'write the objects, groups and seed into the private record, restart serve if it runs, then export the study for the raters' });
@@ -110,8 +110,8 @@ async function main(argv) {
       },
       qualified: analysis.qualification.filter(item => item.qualified).map(item => item.rater),
       g1: analysis.g1.run ? { panel: analysis.g1.panel, decision: analysis.g1.decision, target: analysis.g1.target.verdict,
-        agreement: analysis.g1.candidates.map(item => ({ weights: item.weights, agreement: item.agreement.estimate, ci95: [item.agreement.low, item.agreement.high] })) }
-        : { not_computed: analysis.g1.reason, decision: analysis.g1.decision } });
+        agreement: analysis.g1.candidates.map(item => ({ weights: item.weights, agreement: item.agreement?.estimate ?? null, ci95: [item.agreement?.low ?? null, item.agreement?.high ?? null] })) }
+        : { not_computed: analysis.g1.reason, decision: analysis.g1.decision, ...(analysis.g1.target ? { target: analysis.g1.target.verdict } : {}) } });
     return 0;
   }
   if (command === 'export') {
