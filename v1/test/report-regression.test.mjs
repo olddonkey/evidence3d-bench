@@ -407,6 +407,39 @@ async function batch(root, id, { system, model, effort }, { attempts = 1, score,
 
 const execute = promisify(execFile);
 
+test('tasks no truth.json places stop the judgement: a whole object without truth does not drop out unseen', async () => {
+  const root = await dataRoot();
+  try {
+    const [astra, opus] = REGRESSION_SYSTEMS;
+    const r3 = (o, variant, a) => 60 + 5 * o + (variant === 't4' ? 8 : 0) + [0, -1, 1.5, -0.5][a] + (o % 2 ? 0.4 : -0.3);
+    const r4 = (o, variant) => 60 + 5 * o + (variant === 't4' ? 8 : 0) + [0.3, -0.4, 0.6, -0.1][o];
+    for (const [id, spec, attempts, score] of [['r3-astra', astra, 3, r3], ['r3-opus', opus, 3, r3], ['r4-astra', astra, 1, r4], ['r4-opus', opus, 1, r4]]) {
+      await batch(root, id, spec, { attempts, score });
+    }
+    const out = join(root, 'reports', 'regression');
+    const run = () => regressionReport({ dataRoot: root, baseline: ['r3-astra', 'r3-opus'], batches: ['r4-astra', 'r4-opus'], outDir: out, now: NOW });
+    assert.deepEqual((await run()).systems.map(item => item.verdict), ['equivalent', 'equivalent']);
+    // o3's truth files are gone: its attempts fall under the unknown set, and its tasks out of the owed inventory.
+    for (const variant of ['t1', ...MAIN_VARIANTS]) await rm(join(root, 'truth', 'o3-' + variant), { recursive: true });
+    const summary = await run();
+    assert.equal(summary.owed_tasks, 9);
+    assert.deepEqual(summary.systems.map(item => [item.verdict, item.reason, item.cross_round]), [['not_judged', 'unplaced_tasks', 'none'], ['not_judged', 'unplaced_tasks', 'none']]);
+    const json = JSON.parse(await readFile(join(out, 'regression.json'), 'utf8'));
+    assert.deepEqual(json.owed.unplaced, ['o3-c1', 'o3-t1', 'o3-t2', 'o3-t4']);
+    assert.deepEqual(rowOf(json, OPUS).unplaced, ['o3-c1', 'o3-t1', 'o3-t2', 'o3-t4']);
+    assert.match(rowOf(json, OPUS).statement, /the build record of test-2026-10 lists 4 tasks that no readable truth\.json places in it \(o3-c1, o3-t1, o3-t2, \.\.\.\); claude-code \/ claude-opus-5-5 \/ high ran or planned 3 tasks whose truth\.json is missing or unreadable/);
+    assert.ok(json.problems.some(problem => /build record of test-2026-10 lists 4 tasks/.test(problem)), json.problems.join('\n'));
+    // Without the build record the configuration's own attempts still show it.
+    await rm(join(root, 'sets', SET + '.built.json'));
+    const bare = await run();
+    assert.deepEqual(bare.systems.map(item => [item.verdict, item.reason]), [['not_judged', 'unplaced_tasks'], ['not_judged', 'unplaced_tasks']]);
+    const without = JSON.parse(await readFile(join(out, 'regression.json'), 'utf8'));
+    assert.deepEqual([without.owed.unplaced, rowOf(without, ASTRA).unplaced], [[], ['o3-c1', 'o3-t2', 'o3-t4']]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('regressionReport and `cli regression` read both rounds from disk and write regression.json and regression.md', async () => {
   const root = await dataRoot();
   try {

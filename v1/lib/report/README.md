@@ -292,7 +292,12 @@ this round's; a batch in both is refused.
   null): the plan's 区间不可用, which meets no threshold.
 - **Verdict** (`row.verdict`), first that applies:
   1. `not_judged`, a data problem the report will not judge past
-     (`row.blockers`, `row.reason`): `no_baseline` (no counted earlier
+     (`row.blockers`, `row.reason`): `unplaced_tasks` (tasks the set may owe
+     that no truth.json places: the build record's tasks not placed in the
+     set, `owed.unplaced`, and tasks the configuration ran or planned whose
+     truth.json is missing or unreadable; `row.unplaced` lists both. Without
+     it an object whose truth files are all gone would drop out of both
+     rounds and a smaller set be judged complete), `no_baseline` (no counted earlier
      attempt), `baseline_incomplete` (an owed task without a counted earlier
      sample: usually the wrong batches), `scorer_mismatch` (the reports of the
      two rounds name more than one scorer version, an unstamped report

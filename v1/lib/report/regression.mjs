@@ -2,7 +2,7 @@ import { join, resolve } from 'node:path';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { writeJSON } from '../../../lib/io.mjs';
 import { layout } from '../contract.mjs';
-import { collectRuns, DEFAULT_EXCLUDED_STATUSES, scorerIdentity, scorerVersion } from './collect.mjs';
+import { collectRuns, DEFAULT_EXCLUDED_STATUSES, UNKNOWN_SET, scorerIdentity, scorerVersion } from './collect.mjs';
 import { taskMeans, cellKey, signedText, intervalText } from './aggregate.mjs';
 import { finite, mean, sampleSD, bootstrapMean, pairedBootstrap, tInterval, tTestP, studentCDF, PAIRWISE_SAMPLES, TIE_TOLERANCE } from './stats.mjs';
 
@@ -30,9 +30,10 @@ import { finite, mean, sampleSD, bootstrapMean, pairedBootstrap, tInterval, tTes
 // Only an equivalent system is compared across rounds, and only on its main
 // score: equivalence was tested on the mean of the three variants, which a
 // rise on one variant and a fall on another can leave unmoved. A comparison
-// the report cannot make at all (no earlier row, an earlier row with gaps,
-// two scoring definitions, this round's batches on different stacks) is
-// `not_judged`: a data problem to fix, not one of the plan's verdicts.
+// the report cannot make at all (tasks no truth.json places, no earlier row,
+// an earlier row with gaps, two scoring definitions, this round's batches on
+// different stacks) is `not_judged`: a data problem to fix, not one of the
+// plan's verdicts.
 
 export const REGRESSION_SCHEMA = 'e3d-regression-v1';
 // Round 3's test set; from Round 4 on, the regression set (plan section 10).
@@ -59,6 +60,7 @@ export const REGRESSION_REASONS = {
   no_variation: 'the per-object differences do not vary, so no interval is available',
   inconclusive: 'neither inside the margin nor clear of zero',
   // not judged
+  unplaced_tasks: 'tasks the set may owe that no truth.json places in it, so its main tasks are not known',
   no_baseline: 'no counted attempt in the earlier round\'s batches',
   baseline_incomplete: 'a main task without a counted sample in the earlier round (were the right batches given?)',
   scorer_mismatch: 'the two rounds were not scored under one scorer version (rescore one side)',
@@ -135,6 +137,34 @@ function owedTasks(sources, set, variants) {
     }
   }
   return { tasks, objects, placeholders };
+}
+
+// Where each task's truth.json places it: task id -> set, a readable
+// placement over UNKNOWN_SET (no truth.json, or one that cannot be read).
+function placements(sources) {
+  const where = new Map();
+  const place = (task, set) => { if (!where.has(task) || where.get(task) === UNKNOWN_SET) where.set(task, set); };
+  for (const source of sources) {
+    for (const attempt of source.attempts) place(attempt.task_id, attempt.set);
+    for (const [task, info] of source.taskInfo ?? []) place(task, info.set);
+  }
+  return where;
+}
+
+// Tasks the set may owe that no truth.json places, which owedTasks cannot
+// see: an object whose truth files are all gone would drop out of both rounds
+// and leave a smaller set judged complete. `built`: the build record's tasks
+// not placed in the set; `run(spec)`: tasks one configuration ran or planned
+// whose truth.json is missing or unreadable (they may be the set's).
+function unplacedTasks(sources, set, buildRecord) {
+  const where = placements(sources), unknown = task => (where.get(task) ?? UNKNOWN_SET) === UNKNOWN_SET;
+  return {
+    built: distinct((buildRecord?.built_tasks ?? []).filter(task => where.get(task) !== set)),
+    run: spec => distinct(sources.flatMap(source => [
+      ...source.attempts.filter(sameConfiguration(spec)).map(attempt => attempt.task_id),
+      ...(source.plans ?? []).filter(sameConfiguration(spec)).flatMap(plan => plan.tasks ?? []),
+    ]).filter(unknown)),
+  };
 }
 
 // Most attempts of one configuration running at once, from their start and
@@ -260,8 +290,14 @@ const sideOf = ci => !ci ? 0 : ci[0] > 0 ? 1 : ci[1] < 0 ? -1 : 0;
 const clearOfZero = (a, b) => sideOf(a) !== 0 && sideOf(a) === sideOf(b) ? sideOf(a) : 0;
 
 // The data problems that stop a judgement, each { reason, text }.
-function blockers(key, before, after, labels) {
+function blockers(key, before, after, labels, { set, built = [], run = [] } = {}) {
   const found = [];
+  if (built.length || run.length) {
+    found.push({ reason: 'unplaced_tasks', text: [
+      ...(built.length ? ['the build record of ' + set + ' lists ' + plural(built.length, 'task') + ' that no readable truth.json places in it (' + firstFew(built) + ')'] : []),
+      ...(run.length ? [key + ' ran or planned ' + plural(run.length, 'task') + ' whose truth.json is missing or unreadable (' + firstFew(run) + ')'] : []),
+    ].join('; ') + ': the set\'s main tasks are not known (restore the truth files)' });
+  }
   if (!before.attempts) found.push({ reason: 'no_baseline', text: labels.baseline + ' has no counted attempt of ' + key + ' on the set\'s main tasks' });
   else if (before.missing.length) {
     found.push({ reason: 'baseline_incomplete', text: labels.baseline + ' has no counted sample of ' + key + ' on ' + plural(before.missing.length, 'main task') +
@@ -340,7 +376,8 @@ export function compareRounds({ baseline, current, set = REGRESSION_SET, variant
   if (shared.length) throw new Error('batch ' + shared.join(', ') + ' is in both rounds; a regression compares two sets of batches');
   if (!(margin > 0)) throw new Error('the equivalence margin must be a positive number of points');
   const problems = [...new Set([...(baseline.problems ?? []).map(text => labels.baseline + ': ' + text), ...(current.problems ?? []).map(text => labels.current + ': ' + text)])];
-  const owed = owedTasks([baseline, current], set, variants);
+  const owed = owedTasks([baseline, current], set, variants), unplaced = unplacedTasks([baseline, current], set, buildRecord);
+  if (unplaced.built.length) problems.push('the build record of ' + set + ' lists ' + plural(unplaced.built.length, 'task') + ' that no readable truth.json places in it: ' + firstFew(unplaced.built));
   if (!owed.tasks.size) problems.push('no task of set ' + set + ' in variants ' + variants.join(', ') + ' in either round\'s batches');
   if (owed.placeholders.length) problems.push(plural(owed.placeholders.length, 'object variant') + ' of set ' + set + ' have no task in these batches: ' + firstFew(owed.placeholders));
   // A submission byte for byte the same in both rounds is a copied attempt, not a re-run.
@@ -356,7 +393,9 @@ export function compareRounds({ baseline, current, set = REGRESSION_SET, variant
     const later = roundSide(current, spec, owed, { seed: sideSeed + '/current', samples });
     const row = { key, system: spec.system, model: spec.model, effort: spec.effort ?? null, owed_tasks: owed.tasks.size,
       baseline: earlier, current: later, difference: roundDifference(earlier.task_means, later.task_means, { seed: sideSeed + '/difference', samples, margin }) };
-    row.blockers = blockers(key, earlier, later, labels);
+    const run = unplaced.run(spec);
+    row.unplaced = distinct([...unplaced.built, ...run]);
+    row.blockers = blockers(key, earlier, later, labels, { set, built: unplaced.built, run });
     Object.assign(row, regressionVerdict({ difference: row.difference, blockers: row.blockers, missing: later.missing, margin }));
     row.cross_round = row.verdict === 'equivalent' ? 'main score only' : 'none';
     row.statement = regressionStatement(row, { margin, labels });
@@ -395,7 +434,7 @@ export function compareRounds({ baseline, current, set = REGRESSION_SET, variant
     margin, level: EQUIVALENCE_LEVEL, samples, seed,
     plan_systems: systems.length === REGRESSION_SYSTEMS.length && REGRESSION_SYSTEMS.every(spec => systems.some(item => cellKey(item) === cellKey(spec))),
     baseline_batches: [...idsOf(baseline)].sort(), current_batches: [...idsOf(current)].sort(),
-    owed: { tasks: owed.tasks.size, objects: owed.objects.length, placeholders: owed.placeholders,
+    owed: { tasks: owed.tasks.size, objects: owed.objects.length, placeholders: owed.placeholders, unplaced: unplaced.built,
       build_record: buildRecord && (buildRecord.built_at || buildRecord.built_tasks?.length) ? 'sets/' + set + '.built.json' : null },
     systems: rows,
     notes,
