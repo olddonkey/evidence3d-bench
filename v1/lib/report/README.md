@@ -292,20 +292,26 @@ this round's; a batch in both is refused.
   null): the plan's 区间不可用, which meets no threshold.
 - **Verdict** (`row.verdict`), first that applies:
   1. `not_judged`, a data problem the report will not judge past
-     (`row.blockers`, `row.reason`): `unplaced_tasks` (tasks the set may owe
-     that no truth.json places: the build record's tasks not placed in the
-     set, `owed.unplaced`, and tasks the configuration ran or planned whose
-     truth.json is missing or unreadable; `row.unplaced` lists both. Without
-     it an object whose truth files are all gone would drop out of both
-     rounds and a smaller set be judged complete), `no_baseline` (no counted earlier
+     (`row.blockers`, `row.reason`): `unplaced_tasks` (tasks no truth.json
+     places that may belong to an object the set does not show: the build
+     record's tasks not placed in the set whose recorded object is not one
+     of the set's, `owed.unplaced`, and tasks the configuration ran or
+     planned whose truth.json is missing or unreadable, of a main variant, in
+     this set or an unknown one, on an object not one of the set's, by what
+     the batch's manifest froze for the task, else the score report;
+     `row.unplaced` lists both. Without it an object whose truth files are
+     all gone would drop out of both rounds and a smaller set be judged
+     complete. A lost truth.json on an object the set does show needs no
+     such check: the object owes every main variant, so the task is a gap),
+     `no_baseline` (no counted earlier
      attempt), `baseline_incomplete` (an owed task without a counted earlier
      sample: usually the wrong batches), `scorer_mismatch` (the reports of the
      two rounds name more than one scorer version, an unstamped report
      counting as its own; the runner's refusal report, written before any
      scoring, names none and does not count; a different scorer hash under
      one version is a note, not a mismatch; plan: if G1 moves the scorer to
-     1.2.0, both rounds are rescored), `mixed_stack` (this round's batches of
-     the system differ in Node version or binary hash, CLI version or binary,
+     1.2.0, both rounds are rescored), `mixed_stack` (this round's batches
+     with a counted sample of the system on a main task differ in Node version or binary hash, CLI version or binary,
      runner source, prompt version, tool kit,
      three.js runtime or protocol; a field recorded for some batches and not
      others counts. The earlier round's stack is shown, never refused: Round 3
@@ -326,7 +332,9 @@ this round's; a batch in both is refused.
   system, else `none`. The page names no per-variant difference: the test
   covered the mean of the three variants only, so per-variant scores and
   evidence deltas stay in each round's own report.
-- Shown per round: batches, counted attempts, tasks sampled, attempts per
+- Shown per round: the batches with a counted sample on a main task
+  (`batches`; the configuration's others, `other_batches`, are listed apart
+  and their stack is not compared), counted attempts, tasks sampled, attempts per
   task, excluded statuses, scorer versions and hashes, refusal reports, the
   stack values, the main score with a 95 % bootstrap interval (none when the
   per-object means do not vary), and the most attempts of the

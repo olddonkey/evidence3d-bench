@@ -152,18 +152,35 @@ function placements(sources) {
 }
 
 // Tasks the set may owe that no truth.json places, which owedTasks cannot
-// see: an object whose truth files are all gone would drop out of both rounds
-// and leave a smaller set judged complete. `built`: the build record's tasks
-// not placed in the set; `run(spec)`: tasks one configuration ran or planned
-// whose truth.json is missing or unreadable (they may be the set's).
-function unplacedTasks(sources, set, buildRecord) {
-  const where = placements(sources), unknown = task => (where.get(task) ?? UNKNOWN_SET) === UNKNOWN_SET;
+// see. An object of the set already seen owes each main variant (under a
+// placeholder if need be), so a lost truth.json there leaves a gap the
+// completeness rules catch; what can vanish unseen is an object whose truth
+// files are all gone. So a task counts when its object is not one of the
+// set's (or is not known):
+// - `built`: the build record's tasks not placed in the set, by the object
+//   the record built them for;
+// - `run(spec)`: tasks one configuration ran or planned whose truth.json is
+//   missing or unreadable, by what the batch's manifest froze for them (set,
+//   object, variant), else the score report's object and variant: those of a
+//   main variant in this set, or in a set not known.
+function unplacedTasks(sources, set, buildRecord, owed, variants) {
+  const where = placements(sources), objects = new Set(owed.objects);
+  const unknown = task => (where.get(task) ?? UNKNOWN_SET) === UNKNOWN_SET;
+  const outside = object => !object || !objects.has(object);
+  const frozen = new Map(), reported = new Map();
+  for (const source of sources) {
+    for (const plan of source.plans ?? []) frozen.set(plan.batch, plan.identities ?? {});
+    for (const attempt of source.attempts) reported.set(attempt.task_id, { object: attempt.object, variant: attempt.variant });
+  }
+  const identityOf = (batch, task) => frozen.get(batch)?.[task] ?? reported.get(task) ?? {};
+  const counts = ({ set: named, object, variant }) => (!variant || variants.includes(variant)) && (!named || named === set) && outside(object);
   return {
-    built: distinct((buildRecord?.built_tasks ?? []).filter(task => where.get(task) !== set)),
+    built: distinct((buildRecord?.built_tasks ?? []).filter(task => where.get(task) !== set && outside(buildRecord.built_objects?.[task]))),
     run: spec => distinct(sources.flatMap(source => [
-      ...source.attempts.filter(sameConfiguration(spec)).map(attempt => attempt.task_id),
-      ...(source.plans ?? []).filter(sameConfiguration(spec)).flatMap(plan => plan.tasks ?? []),
-    ]).filter(unknown)),
+      ...source.attempts.filter(attempt => sameConfiguration(spec)(attempt) && unknown(attempt.task_id) && counts(identityOf(attempt.batch, attempt.task_id)))
+        .map(attempt => attempt.task_id),
+      ...(source.plans ?? []).filter(sameConfiguration(spec)).flatMap(plan => plan.tasks.filter(task => unknown(task) && counts(identityOf(plan.batch, task)))),
+    ])),
   };
 }
 
@@ -197,7 +214,12 @@ function roundSide(source, spec, owed, { seed, samples }) {
     objects.get(object).push(value);
   }
   const objectMeans = [...objects.values()].map(mean);
-  const batchIds = distinct([...mine.map(attempt => attempt.batch), ...(source.plans ?? []).filter(sameConfiguration(spec)).map(plan => plan.batch)]);
+  // The batches whose counted samples make up the row: theirs is the stack
+  // compared. This configuration's other batches (other sets or variants,
+  // only excluded attempts, nothing run yet) add nothing to it, and are listed apart.
+  const batchIds = distinct(counted.map(attempt => attempt.batch));
+  const others = distinct([...mine.map(attempt => attempt.batch), ...(source.plans ?? []).filter(sameConfiguration(spec)).map(plan => plan.batch)])
+    .filter(id => !batchIds.includes(id));
   const batches = (source.batches ?? []).filter(batch => batchIds.includes(batch.id));
   const stack = Object.fromEntries(STACK_FIELDS.map(([field]) => [field, distinct(batches.map(batch => stackValue(batch, field)).filter(value => value !== null))]));
   // The scoring definition is the scorer's version; its hash pins the code,
@@ -208,6 +230,7 @@ function roundSide(source, spec, owed, { seed, samples }) {
   for (const attempt of owedAttempts.filter(attempt => attempt.excluded)) excluded[attempt.status] = (excluded[attempt.status] ?? 0) + 1;
   return {
     batches: batchIds,
+    other_batches: others,
     attempts: counted.length,
     excluded,
     // Attempts of this configuration on tasks that are not main tasks of the set (other variants, other sets).
@@ -376,7 +399,7 @@ export function compareRounds({ baseline, current, set = REGRESSION_SET, variant
   if (shared.length) throw new Error('batch ' + shared.join(', ') + ' is in both rounds; a regression compares two sets of batches');
   if (!(margin > 0)) throw new Error('the equivalence margin must be a positive number of points');
   const problems = [...new Set([...(baseline.problems ?? []).map(text => labels.baseline + ': ' + text), ...(current.problems ?? []).map(text => labels.current + ': ' + text)])];
-  const owed = owedTasks([baseline, current], set, variants), unplaced = unplacedTasks([baseline, current], set, buildRecord);
+  const owed = owedTasks([baseline, current], set, variants), unplaced = unplacedTasks([baseline, current], set, buildRecord, owed, variants);
   if (unplaced.built.length) problems.push('the build record of ' + set + ' lists ' + plural(unplaced.built.length, 'task') + ' that no readable truth.json places in it: ' + firstFew(unplaced.built));
   if (!owed.tasks.size) problems.push('no task of set ' + set + ' in variants ' + variants.join(', ') + ' in either round\'s batches');
   if (owed.placeholders.length) problems.push(plural(owed.placeholders.length, 'object variant') + ' of set ' + set + ' have no task in these batches: ' + firstFew(owed.placeholders));
@@ -484,6 +507,9 @@ export function regressionMarkdown(result) {
       [[labels.baseline, ...side(row.baseline)], [labels.current, ...side(row.current)]], 2), '');
     if (row.current.missing.length) lines.push(labels.current + ' has no counted sample on: ' + row.current.missing.join(', ') + '.', '');
     if (row.baseline.missing.length && row.baseline.attempts) lines.push(labels.baseline + ' has no counted sample on: ' + row.baseline.missing.join(', ') + '.', '');
+    for (const [item, label] of [[row.baseline, labels.baseline], [row.current, labels.current]]) {
+      if (item.other_batches.length) lines.push(label + ' batches of this configuration with no counted sample on a main task of the set, not part of the comparison (nor of its stack): ' + item.other_batches.join(', ') + '.', '');
+    }
     for (const item of row.current.stack_disagreements) {
       lines.push(labels.current + ' batches differ in ' + item.label + ': ' + Object.entries(item.values).map(([batch, value]) => batch + ' ' + value).join(', ') + '.', '');
     }

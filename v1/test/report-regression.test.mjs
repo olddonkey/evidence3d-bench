@@ -369,16 +369,14 @@ const write = async (path, value) => { await mkdir(dirname(path), { recursive: t
 // A data root with four objects of the set: truth and the build record.
 async function dataRoot({ objects = 4 } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'e3d-regression-'));
-  const tasks = [];
+  const built = [];
   for (let o = 0; o < objects; o++) {
     await write(join(root, 'objects', 'o' + o, 'model.json'), { archetype: 'house' });
-    for (const variant of ['t1', ...MAIN_VARIANTS]) {
-      const task = 'o' + o + '-' + variant;
-      tasks.push(task);
-      await write(join(root, 'truth', task, 'truth.json'), { object: 'o' + o, variant, set: SET });
-    }
+    const tasks = ['t1', ...MAIN_VARIANTS].map(variant => 'o' + o + '-' + variant);
+    for (const task of tasks) await write(join(root, 'truth', task, 'truth.json'), { object: 'o' + o, variant: task.split('-')[1], set: SET });
+    built.push({ object: 'o' + o, tasks });
   }
-  await write(join(root, 'sets', SET + '.built.json'), { name: SET, built_at: '2026-10-02T00:00:00Z', built: [{ object: 'o0', tasks }] });
+  await write(join(root, 'sets', SET + '.built.json'), { name: SET, built_at: '2026-10-02T00:00:00Z', built });
   return root;
 }
 
@@ -440,6 +438,64 @@ test('tasks no truth.json places stop the judgement: a whole object without trut
   }
 });
 
+// A batch of one configuration outside the comparison: `results` [task, object, variant, status] (one attempt each,
+// the score report naming object and variant), `planned` the manifest's task records ({ id, set, object, variant }).
+async function sideBatch(root, id, { system, model, effort }, { manifest = STACK, results = [], planned = [] }) {
+  const dir = join(root, 'runs', id);
+  await write(join(dir, 'manifest.json'), { schema: 'e3d-run-batch-v1', id, system, model, effort, attempts: 1, harness: { version: manifest.cli_version, binary_sha256: manifest.cli_sha256 },
+    node: { version: manifest.node_version, sha256: manifest.node_sha256 }, runner_source: { sha256: manifest.runner_sha256 }, prompt_version: manifest.prompt_version, tools: { sha256: manifest.tools_sha256 },
+    runtime: { three_version: '0.180.0', sha256: manifest.runtime_sha256 }, protocol: manifest.protocol, tasks: planned });
+  for (const [task, object, variant, status] of results) {
+    await write(join(dir, task, 'a1', 'result.json'), { task_id: task, attempt: 1, status, system, model, effort, score: 40, integrity_problems: [],
+      report: { schema: 'e3d-report-v1', task_id: task, object, variant, valid: true, score: 40, scorer: SCORER } });
+  }
+}
+
+test('tasks and batches outside the comparison neither stop it nor change its stack', async () => {
+  const root = await dataRoot();
+  try {
+    const [astra, opus] = REGRESSION_SYSTEMS;
+    const r3 = (o, variant, a) => 60 + 5 * o + (variant === 't4' ? 8 : 0) + [0, -1, 1.5, -0.5][a] + (o % 2 ? 0.4 : -0.3);
+    const r4 = (o, variant) => 60 + 5 * o + (variant === 't4' ? 8 : 0) + [0.3, -0.4, 0.6, -0.1][o];
+    for (const [id, spec, attempts, score] of [['r3-astra', astra, 3, r3], ['r3-opus', opus, 3, r3], ['r4-astra', astra, 1, r4], ['r4-opus', opus, 1, r4]]) {
+      await batch(root, id, spec, { attempts, score });
+    }
+    // o3 lost only its t1 truth: o3 still owes its main tasks, and every one has its samples.
+    await rm(join(root, 'truth', 'o3-t1'), { recursive: true });
+    // Opus ran a memory task (readable truth) on another CLI; another Opus batch on another Node is prepared for a memory
+    // task whose truth is gone and for a main task, and has run neither; Astra has an excluded t1 attempt of an object without truth.
+    await write(join(root, 'truth', 'lm0-m2', 'truth.json'), { object: 'lm0', variant: 'm2', set: 'memory-2026-10' });
+    await write(join(root, 'objects', 'lm0', 'model.json'), { archetype: 'house' });
+    await sideBatch(root, 'r4-opus-memory', opus, { manifest: { ...STACK, cli_version: '2.0.0' }, results: [['lm0-m2', 'lm0', 'm2', 'completed']] });
+    await sideBatch(root, 'r4-opus-pending', opus, { manifest: { ...STACK, node_sha256: '7'.repeat(64) },
+      planned: [{ id: 'lm1-m2', set: 'memory-2026-10', object: 'lm1', variant: 'm2' }, { id: 'o0-t2', set: SET, object: 'o0', variant: 't2' }] });
+    await sideBatch(root, 'r4-astra-extra', astra, { results: [['x9-t1', 'x9', 't1', 'infra_error']] });
+    const out = join(root, 'reports', 'regression');
+    const summary = await regressionReport({ dataRoot: root, baseline: ['r3-astra', 'r3-opus'], batches: ['r4-astra', 'r4-astra-extra', 'r4-opus', 'r4-opus-memory', 'r4-opus-pending'], outDir: out, now: NOW });
+    assert.deepEqual(summary.systems.map(item => [item.verdict, item.reason]), [['equivalent', null], ['equivalent', null]]);
+    assert.equal(summary.owed_tasks, 12);
+    const json = JSON.parse(await readFile(join(out, 'regression.json'), 'utf8'));
+    assert.deepEqual([json.owed.unplaced, rowOf(json, ASTRA).unplaced, rowOf(json, OPUS).unplaced], [[], [], []]);
+    const opusRow = rowOf(json, OPUS);
+    assert.deepEqual([opusRow.current.batches, opusRow.current.other_batches], [['r4-opus'], ['r4-opus-memory', 'r4-opus-pending']]);
+    assert.deepEqual([opusRow.current.stack.cli_version, opusRow.current.stack_disagreements], [[STACK.cli_version], []]);
+    assert.deepEqual(rowOf(json, ASTRA).current.other_batches, ['r4-astra-extra']);
+    assert.match(await readFile(join(out, 'regression.md'), 'utf8'), /Round 4 batches of this configuration with no counted sample on a main task of the set, not part of the comparison \(nor of its stack\): r4-opus-memory, r4-opus-pending\./);
+    // A main task's truth gone on an object the set still has: owed under a placeholder that nothing fills, a gap.
+    await rm(join(root, 'truth', 'o0-t2'), { recursive: true });
+    const lost = await regressionReport({ dataRoot: root, baseline: ['r3-astra', 'r3-opus'], batches: ['r4-astra', 'r4-opus'], outDir: out, now: NOW });
+    assert.deepEqual(lost.systems.map(item => [item.verdict, item.reason]), [['not_judged', 'baseline_incomplete'], ['not_judged', 'baseline_incomplete']]);
+    // A batch prepared for a main task of the set on an object no other task shows, whose truth is gone: the manifest's record says where it belongs.
+    await write(join(root, 'truth', 'o0-t2', 'truth.json'), { object: 'o0', variant: 't2', set: SET });
+    await sideBatch(root, 'r4-opus-o9', opus, { planned: [{ id: 'o9-t2', set: SET, object: 'o9', variant: 't2' }] });
+    const hidden = await regressionReport({ dataRoot: root, baseline: ['r3-astra', 'r3-opus'], batches: ['r4-astra', 'r4-opus', 'r4-opus-o9'], outDir: out, now: NOW });
+    assert.deepEqual(hidden.systems.map(item => [item.verdict, item.reason]), [['equivalent', null], ['not_judged', 'unplaced_tasks']]);
+    assert.deepEqual(rowOf(JSON.parse(await readFile(join(out, 'regression.json'), 'utf8')), OPUS).unplaced, ['o9-t2']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('regressionReport and `cli regression` read both rounds from disk and write regression.json and regression.md', async () => {
   const root = await dataRoot();
   try {
@@ -480,7 +536,7 @@ test('regressionReport and `cli regression` read both rounds from disk and write
     await assert.rejects(execute(process.execPath, [cli, 'regression', '--data', root, '--baseline', 'r3-astra', '--batches', 'r3-astra']), /is in both rounds/);
     // A task only the build record knows (no batch ran or planned it) is owed by both rounds; its object's other variants under placeholders.
     await write(join(root, 'truth', 'o4-t2', 'truth.json'), { object: 'o4', variant: 't2', set: SET });
-    await write(join(root, 'sets', SET + '.built.json'), { name: SET, built_at: '2026-10-02T00:00:00Z', built: [{ object: 'o0', tasks: ['o4-t2'] }] });
+    await write(join(root, 'sets', SET + '.built.json'), { name: SET, built_at: '2026-10-02T00:00:00Z', built: [{ object: 'o4', tasks: ['o4-t2'] }] });
     const later = await regressionReport({ dataRoot: root, baseline: ['r3-astra', 'r3-opus'], batches: ['r4-astra-b', 'r4-opus'], outDir: out, now: NOW });
     assert.equal(later.owed_tasks, 15);
     assert.deepEqual(later.systems.map(item => item.verdict), ['not_judged', 'not_judged']);

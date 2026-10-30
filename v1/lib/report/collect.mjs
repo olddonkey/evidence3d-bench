@@ -118,11 +118,14 @@ async function readSetFiles(root, problems) {
     if (!data || typeof data !== 'object') continue;
     const built = name.endsWith('.built.json');
     const id = text(data.name) ?? name.replace(/(\.built)?\.json$/, '');
-    if (!sets.has(id)) sets.set(id, { id, file: null, private: null, created_at: null, note: null, objects: null, built_at: null, built_tasks: [] });
+    if (!sets.has(id)) sets.set(id, { id, file: null, private: null, created_at: null, note: null, objects: null, built_at: null, built_tasks: [], built_objects: {} });
     const entry = sets.get(id);
     if (built) {
       entry.built_at = text(data.built_at);
       entry.built_tasks = (Array.isArray(data.built) ? data.built : []).flatMap(item => Array.isArray(item?.tasks) ? item.tasks.filter(task => typeof task === 'string') : []);
+      // Task id -> the object it was built for, as the record groups them.
+      entry.built_objects = Object.fromEntries((Array.isArray(data.built) ? data.built : []).filter(item => text(item?.object) && Array.isArray(item.tasks))
+        .flatMap(item => item.tasks.filter(task => typeof task === 'string').map(task => [task, item.object])));
     } else {
       entry.file = 'sets/' + name;
       entry.private = typeof data.private === 'boolean' ? data.private : null;
@@ -259,7 +262,8 @@ function setOf(truth, taskId, problems) {
 // setFiles, taskInfo: Map(task id -> { set, object, variant }), plans } where
 // taskInfo covers every task an attempt ran, every task a batch's manifest
 // planned (run or not), and `alsoTasks`; plans: [{ batch, system, model,
-// effort, tasks }], the configuration each manifest froze and its task ids.
+// effort, tasks, identities }], the configuration each manifest froze, its
+// task ids and, by task id, the { set, object, variant } it froze for each.
 export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT_EXCLUDED_STATUSES, alsoTasks = [] } = {}) {
   if (typeof dataRoot !== 'string' || !dataRoot) throw new Error('collectRuns needs dataRoot');
   const paths = layout(resolve(dataRoot)), problems = [], attempts = [], batchInfo = [];
@@ -296,7 +300,14 @@ export async function collectRuns({ dataRoot, batches, excludeStatuses = DEFAULT
     for (const id of plannedIds) if (!planned.has(id)) planned.set(id, batch);
     // Which configuration was prepared for which tasks: a formal one takes
     // part in their sets before (or without) any result.json.
-    if (manifest && typeof manifest === 'object' && plannedIds.length) plans.push({ batch, ...configurationOf(manifest), tasks: plannedIds });
+    // `identities`: the set, object and variant prepare froze for each task
+    // from its truth.json then (a task without them predates that record):
+    // where the task belongs even after its truth.json is gone.
+    if (manifest && typeof manifest === 'object' && plannedIds.length) {
+      const identities = Object.fromEntries(manifest.tasks.filter(task => typeof task?.id === 'string' && text(task.object) && text(task.variant))
+        .map(task => [task.id, { set: text(task.set) ?? UNNAMED_SET, object: task.object, variant: task.variant }]));
+      plans.push({ batch, ...configurationOf(manifest), tasks: plannedIds, identities });
+    }
     const mine = [];
     let unfinished = 0, archivedTries = 0;
     for (const taskDirName of await directories(batchDir)) {
