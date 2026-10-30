@@ -6,7 +6,7 @@ import { scorerVersion } from './collect.mjs';
 import { rosterPath } from './roster.mjs';
 import { TIE_GAP, scoreGap } from '../study/panel.mjs';
 import { STRATA } from '../study/select.mjs';
-import { CURVE_SCHEMA, CURVE_REASONS, INTERVAL_REASONS, OUTCOMES, SHARES, binOf, binShares, curveClusters, curveSampler, curveScorer, halfWinAt, shareInterval } from '../study/curve.mjs';
+import { CURVE_SCHEMA, CURVE_REASONS, INTERVAL_REASONS, MIN_PANEL, OUTCOMES, SHARES, binOf, binShares, curveClusters, curveSampler, curveScorer, halfWinAt, shareInterval } from '../study/curve.mjs';
 
 // The human curve in the results report (docs/V1-ROUND4-PLAN.md section 6).
 // The curve itself is the study's (study/curve.mjs, `study.mjs curve`); the
@@ -37,6 +37,7 @@ export const HUMAN_SAMPLES = 10000;
 export const HUMAN_LEVEL = 0.95;
 
 const count = value => Number.isInteger(value) && value >= 0;
+const known = (reasons, reason) => typeof reason === 'string' && Object.hasOwn(reasons, reason);
 const isProportion = value => finite(value) && value >= 0 && value <= 1;
 
 // Refuses a curve file that does not hold together, so that the page, the
@@ -58,14 +59,18 @@ export function parseHumanCurve(data, { file = null, sha256 = null } = {}) {
   if (!Array.isArray(data.skipped_variants) || !data.skipped_variants.every(variant => typeof variant === 'string')) fail('no skipped_variants');
   const panel = data.panel;
   if (!panel || !Array.isArray(panel.raters) || !panel.raters.every(rater => typeof rater === 'string') || panel.size !== panel.raters.length ||
-    new Set(panel.raters).size !== panel.raters.length || !Array.isArray(panel.considered)) fail('the panel must list its raters, each once');
+    new Set(panel.raters).size !== panel.raters.length || !Array.isArray(panel.considered) ||
+    !panel.considered.every(item => item && typeof item.rater === 'string' && typeof item.qualified === 'boolean' && Array.isArray(item.reasons) &&
+      item.reasons.every(reason => typeof reason === 'string'))) fail('the panel must list its raters, each once, and every rater considered');
   if (data.equal !== undefined && !(data.equal && count(data.equal.pairs) && ['a', 'tie', 'b'].every(choice => count(data.equal.panel?.[choice])) &&
     data.equal.panel.a + data.equal.panel.tie + data.equal.panel.b === data.equal.pairs)) fail('its equal-score tally does not add up');
   if (!Array.isArray(data.notes) || !data.notes.every(note => typeof note === 'string')) fail('no notes');
   if (!data.available) {
-    if (!(data.reason in CURVE_REASONS)) fail('unavailable without a known reason');
+    if (!known(CURVE_REASONS, data.reason)) fail('unavailable without a known reason');
     return { ...data, file, sha256, clusters: null, half_win: null };
   }
+  if (panel.size < MIN_PANEL) fail('a curve needs a panel of ' + MIN_PANEL + ' qualified raters or more (section 5.1)');
+  if (!data.equal) fail('no equal-score tally');
   const bins = data.bins, last = STRATA[STRATA.length - 1].max;
   if (!Array.isArray(bins) || bins.length < 2) fail('needs two bins or more');
   bins.forEach((bin, k) => {
@@ -91,7 +96,7 @@ export function parseHumanCurve(data, { file = null, sha256 = null } = {}) {
     for (const share of SHARES) {
       const stated = bin.shares?.[share];
       if (!stated || !finite(stated.value) || !(Math.abs(shares[share] - stated.value) <= 1e-12)) fail('bin ' + k + ' ' + share + ' does not match its pairs');
-      const interval = stated.ci95 === null ? stated.interval in INTERVAL_REASONS
+      const interval = stated.ci95 === null ? known(INTERVAL_REASONS, stated.interval)
         : Array.isArray(stated.ci95) && stated.ci95.length === 2 && stated.ci95.every(isProportion) && stated.ci95[0] <= stated.ci95[1] && stated.interval === null;
       if (!interval) fail('bin ' + k + ' ' + share + ' needs an interval within [0, 1] or a reason for none');
     }

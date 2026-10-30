@@ -431,7 +431,9 @@ section, `human_curve: null`, and every other number is the same either way.
   pairs, objects, mean gap, counts and shares (to 1e-12); a finite value for
   every share, with an interval within [0, 1] or a known reason for none. A
   file that does not hold together is refused; an unavailable curve (too few
-  raters or pairs) is shown with its reason and its equal-score tally.
+  raters or pairs) is shown with its reason and its equal-score tally. A
+  curve from fewer than 2 qualified raters is unavailable whatever pairs it
+  has.
 - `set.human`: `{ available, reason, versions }`. The curve applies to a set
   only when every eligible attempt's report was scored by the curve's scorer
   version (an unstamped report is `unstamped`, which is no version); otherwise
@@ -439,7 +441,10 @@ section, `human_curve: null`, and every other number is the same either way.
 - `pair.human` (`panelWinRate`): on the tasks both configurations ran where
   both have an eligible attempt (counted, `valid`, a finite score, a model
   file, a variant the study rated, so not t1; an attempt with integrity
-  problems is already invalid), the gap g of every pair of A's and B's
+  problems is already invalid: the conditions under which the study selected
+  its pairs, `select.mjs`; the model file is not opened or hashed here, as
+  the score counts the attempt either way and the scorer read the file to
+  score it), the gap g of every pair of A's and B's
   attempts is looked up in the bin of |g|: W when A scored higher, 1 − W when
   B did, 0.5 when |g| < the curve's tie gap. Averaged within the task, over
   tasks within an object, then over objects. `win_rate_a`, `ci95`,

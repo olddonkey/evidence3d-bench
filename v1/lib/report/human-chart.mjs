@@ -100,9 +100,15 @@ export function humanLegend(set) {
 
 // --------------------------------------------------------------- markdown
 
-export const humanMarkdownCell = pair => !pair.human || !isNumber(pair.human.win_rate_a) ? 'n/a'
-  : pct(pair.human.win_rate_a, 1) + (pair.human.ci95 ? ' [' + pct(pair.human.ci95[0], 1) + ', ' + pct(pair.human.ci95[1], 1) + ']'
-    : ' (no interval: ' + (INTERVAL_REASONS[pair.human.interval] ?? pair.human.interval) + ')') + ' (' + pair.human.tasks + '/' + pair.human.tasks_paired + ' tasks)';
+// With no value (no task the curve applies to) the cell still gives the coverage.
+export function humanMarkdownCell(pair) {
+  const human = pair.human;
+  if (!human) return 'n/a';
+  const coverage = ' (' + human.tasks + '/' + human.tasks_paired + ' tasks)';
+  if (!isNumber(human.win_rate_a)) return 'n/a (no task where both delivered a model the curve applies to)' + coverage;
+  return pct(human.win_rate_a, 1) + (human.ci95 ? ' [' + pct(human.ci95[0], 1) + ', ' + pct(human.ci95[1], 1) + ']'
+    : ' (no interval: ' + (INTERVAL_REASONS[human.interval] ?? human.interval) + ')') + coverage;
+}
 
 export function humanMarkdown(board) {
   const curve = board.human_curve;

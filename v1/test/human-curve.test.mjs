@@ -121,6 +121,8 @@ test('the curve rebins at the scorer\'s weights, needs two raters, and says when
   // Fewer than two qualified raters: panelOriginals gives null and there is no curve.
   const none = humanCurve(null, { panel: ['ann'], seed: 'w' });
   assert.deepEqual([none.available, none.reason, none.panel.size], [false, 'panel', 1]);
+  // Nor from pairs that come with a panel of one, or none.
+  for (const panel of [['ann'], []]) assert.deepEqual(Object.values((({ available, reason }) => ({ available, reason }))(humanCurve(filler, { panel, seed: 'w' }))), [false, 'panel']);
   assert.match(curveMarkdown(none), /fewer than 2 qualified raters/);
   // Fewer than two bins of ten after merging: 人眼数据不够.
   const few = humanCurve([...band('s', 9, 1, ['higher']), original('e1', 'o1', 50, 50, 'tie'), original('e2', 'o2', 40.01, 40, 'a')], { panel: PANEL, seed: 'w' });
@@ -204,6 +206,7 @@ test('the panel half-score win rate of A by hand: W per task, 1 - W, 0.5, tasks 
   // covered task there is no value at all.
   const empty = panelWinRate([attempt('A', 'o3-t2', 'o3', 0, { valid: false })], [attempt('B', 'o3-t2', 'o3', 50)], curve);
   assert.deepEqual([empty.win_rate_a, empty.interval, empty.tasks, empty.tasks_paired], [null, 'no_value', 0, 1]);
+  assert.equal(humanMarkdownCell({ human: empty }), 'n/a (no task where both delivered a model the curve applies to) (0/1 tasks)');
 });
 
 test('the two-level interval carries the curve\'s own uncertainty', () => {
@@ -252,6 +255,15 @@ test('a curve file is refused when its bins or shares do not match its pairs', (
   assert.throws(changed(curve => { curve.tie_gap = 0.5; }), /tie gap must be 0.05/);
   assert.throws(changed(curve => { curve.panel.raters = ['ann', 'ann', 'bob']; }), /each once/);
   assert.throws(changed(curve => { curve.equal.panel.a += 1; }), /does not add up/);
+  // A curve says what its equal-score pairs were and rests on two raters or more.
+  assert.throws(changed(curve => { delete curve.equal; }), /no equal-score tally/);
+  assert.throws(changed(curve => { curve.panel.raters = ['ann']; curve.panel.size = 1; }), /panel of 2 qualified raters or more/);
+  assert.throws(changed(curve => { curve.panel.considered = [{ rater: 'ann' }]; }), /every rater considered/);
+  // Reasons are the listed ones, not whatever an object inherits.
+  assert.throws(changed(curve => { curve.bins[0].shares.higher.ci95 = null; curve.bins[0].shares.higher.interval = 'toString'; }), /a reason for none/);
+  const inherited = JSON.parse(JSON.stringify(unavailable));
+  inherited.reason = 'constructor';
+  assert.throws(() => parseHumanCurve(inherited), /without a known reason/);
 });
 
 test('the column at 0 and 1 and with every resample the same, also with several attempts per task', () => {
@@ -271,6 +283,14 @@ test('the column at 0 and 1 and with every resample the same, also with several 
   assert.equal(humanMarkdownCell({ human: even }), '50.0% (no interval: every resample gave the same value) (3/3 tasks)');
   assert.match(summaryMarkdown(buildLeaderboard(design(FOUR, { objects: 1 }), { now: NOW, roster: ROSTER, humanCurve: parseHumanCurve(reportCurve()) })),
     /\(no interval: fewer than 2 objects\) \(3\/3 tasks\)/);
+  // A configuration that delivered nothing valid: the pairs with it keep their coverage, 0 of 30 tasks.
+  const failing = design(FOUR);
+  for (const item of failing.attempts) if (item.system === 'codex' && item.effort === 'high') Object.assign(item, { valid: false, failure: 'invalid', score: 0 });
+  const failingBoard = buildLeaderboard(failing, { now: NOW, roster: ROSTER, humanCurve: parseHumanCurve(reportCurve()) });
+  const withFailing = failingBoard.sets[0].pairwise.pairs.filter(pair => [pair.a, pair.b].includes(keyOf('codex', 'astra', 'high')));
+  assert.ok(withFailing.length && withFailing.every(pair => pair.human.win_rate_a === null && pair.human.tasks === 0 && pair.human.tasks_paired === 30));
+  assert.match(summaryMarkdown(failingBoard), /n\/a \(no task where both delivered a model the curve applies to\) \(0\/30 tasks\)/);
+  assert.match(indexPage(failingBoard), /0 \/ 30 tasks/);
 });
 
 // Hand-made attempts, one per task, t2 / t4 / c1 on `objects` objects: [system, model, effort, mean].

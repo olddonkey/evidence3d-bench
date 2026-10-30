@@ -33,6 +33,7 @@ import { LEGACY_RATER } from './page/state.js';
 export const CURVE_SCHEMA = 'e3d-human-curve-v1';
 export const CURVE_FILE = 'human-curve.json';
 export const MIN_BIN_PAIRS = 10;
+export const MIN_PANEL = 2;
 export const CURVE_SAMPLES = 10000;
 export const CURVE_LEVEL = 0.95;
 // What the panel concluded about a binned pair, relative to the scores.
@@ -157,7 +158,8 @@ export function humanCurve(originals, { weights = null, panel = [], considered =
     skipped_variants: [...SKIPPED_VARIANTS], seed: String(seed), samples, level,
     panel: { raters: [...panel], size: panel.length, considered: considered.map(({ rater, qualified, reasons }) => ({ rater, qualified, reasons: reasons ?? [] })) },
   };
-  if (!originals) return { ...base, available: false, reason: 'panel', notes: notesOf(base, false) };
+  // Section 5.1: no curve from fewer than two qualified raters, whatever pairs come with them.
+  if (!originals || panel.length < MIN_PANEL) return { ...base, available: false, reason: 'panel', notes: notesOf(base, false) };
 
   const pairs = [], equal = [];
   for (const pair of originals) {
