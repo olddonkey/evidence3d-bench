@@ -1,6 +1,9 @@
-import test from 'node:test';
+import test, { mock } from 'node:test';
+import fsp from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
+import { spawnSync } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -14,7 +17,7 @@ import { STRATA, stratumOf, higherSide, selectPairs, collectSubmissions, publicP
 import { STUDY_VIEWS, studyCameras, renderViews } from '../lib/study/render.mjs';
 import { prepareStudy, exportStudy, studyDir } from '../lib/study/index.mjs';
 import { startStudyServer } from '../lib/study/server.mjs';
-import { parseVotes, readVoteFiles } from '../lib/study/votes.mjs';
+import { parseVotes, readVoteFiles, lockVoting, votingLock, VOTING_LOCK } from '../lib/study/votes.mjs';
 import { analyzeStudy, analysisMarkdown, wilson, cohenKappa, fleissKappa, writeAnalysis } from '../lib/study/analyze.mjs';
 import { KEY_CHOICES, LEGACY_RATER, latestChoices, votedTrail, nextUnrated, afterCurrent, progress, elapsed, raterId, isRater, pauseClock } from '../lib/study/page/state.js';
 
@@ -489,6 +492,90 @@ test('server: 127.0.0.1 only, serves the page, pairs and named images, never key
   });
 });
 
+test('the study lock: one of many callers gets it, it waits only for a vote being saved, and is never taken from anyone', async () => {
+  await withTemp(async dir => {
+    // Overlapping callers: exactly one gets it.
+    const tries = await Promise.allSettled(Array.from({ length: 8 }, () => lockVoting(dir)));
+    const got = tries.filter(item => item.status === 'fulfilled');
+    assert.equal(got.length, 1);
+    for (const item of tries.filter(item => item.status === 'rejected')) {
+      assert.equal(item.reason.code, 'ELOCKED');
+      assert.match(item.reason.message, /add-catch is changing this study \(process \d+\)/);
+    }
+    const held = await votingLock(dir);
+    assert.deepEqual([held.pid, held.kind, held.stale], [process.pid, 'add-catch', false]);
+    // Given back only while it is still the caller's.
+    const lockFile = join(dir, VOTING_LOCK), other = JSON.stringify({ pid: process.pid, kind: 'add-catch', token: 'someone-else' });
+    await writeFile(lockFile, other);
+    await got[0].value();
+    assert.equal(await readFile(lockFile, 'utf8'), other);
+    await rm(lockFile);
+    // A vote being saved is waited for; a lock left by a process that has ended, or one never written, is not taken over.
+    const vote = await lockVoting(dir, { kind: 'vote' });
+    setTimeout(() => { vote(); }, 50);
+    const after = await lockVoting(dir);
+    assert.equal((await votingLock(dir)).kind, 'add-catch');
+    await after();
+    assert.equal(await votingLock(dir), null);
+    const gone = JSON.stringify({ pid: spawnSync(process.execPath, ['-e', '']).pid, kind: 'add-catch', token: 't' });
+    await writeFile(lockFile, gone);
+    assert.equal((await votingLock(dir)).stale, true);
+    await assert.rejects(lockVoting(dir), /was left by process \d+, which has ended: delete the file/);
+    assert.equal(await readFile(lockFile, 'utf8'), gone);
+    await writeFile(lockFile, '');
+    await assert.rejects(lockVoting(dir, { waitMs: 30 }), /another step holds this study; wait for it to end, or delete the file if nothing is running/);
+    await rm(lockFile);
+    // A lock created but not written (the disk is full) goes again, or it would block the study.
+    const open = fsp.open;
+    const full = mock.method(fsp, 'open', async (path, ...rest) => {
+      const handle = await open(path, ...rest);
+      return String(path).endsWith(VOTING_LOCK) ? { writeFile: () => Promise.reject(Object.assign(new Error('no space left on device'), { code: 'ENOSPC' })), close: () => handle.close() } : handle;
+    });
+    syncBuiltinESMExports();
+    try {
+      await assert.rejects(lockVoting(dir), { code: 'ENOSPC' });
+    } finally { full.mock.restore(); syncBuiltinESMExports(); }
+    assert.equal(await votingLock(dir), null);
+    await (await lockVoting(dir))();
+  });
+});
+
+test('server: each vote is saved under the study lock, none while add-catch holds it, none once pairs.json changed under it', async () => {
+  await withTemp(async dir => {
+    const { ids } = await handMadeStudy(dir);
+    const served = await startStudyServer({ studyDir: dir, port: 0 });
+    const vote = (pair, choice) => call(served.url + 'vote', { method: 'POST', body: JSON.stringify({ rater: 'lls', pair, choice, ms: 3 }), headers: { 'Content-Type': 'application/json' } });
+    const saved = async () => (await readFile(join(dir, 'votes.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line)).map(line => [line.pair, line.choice]);
+    try {
+      assert.equal((await vote(ids[0], 'a')).status, 200);
+      assert.equal(await votingLock(dir), null, 'given back after the vote');
+      // While add-catch holds the lock: refused, and nothing is saved, also not later.
+      const unlock = await lockVoting(dir);
+      const locked = await vote(ids[1], 'a');
+      assert.equal(locked.status, 409);
+      assert.match(JSON.parse(locked.body).error, /voting\.lock: add-catch is changing this study \(process \d+\); wait for it to end; then restart serve and reload the page/);
+      await unlock();
+      assert.deepEqual(await saved(), [[ids[0], 'a']]);
+      // Another vote being saved: this one waits for it, then is saved.
+      const other = await lockVoting(dir, { kind: 'vote' });
+      const waiting = vote(ids[1], 'b');
+      await new Promise(resolve => setTimeout(resolve, 50));
+      assert.deepEqual(await saved(), [[ids[0], 'a']], 'not saved while another holds the lock');
+      await other();
+      assert.equal((await waiting).status, 200);
+      assert.deepEqual(await saved(), [[ids[0], 'a'], [ids[1], 'b']]);
+      // pairs.json changed after the server started (add-catch): its page shows the old order, so no vote until it restarts.
+      const study = JSON.parse(await readFile(join(dir, 'pairs.json'), 'utf8'));
+      await writeFile(join(dir, 'pairs.json'), JSON.stringify({ ...study, pairs: study.pairs.slice().reverse() }));
+      const stale = await vote(ids[0], 'b');
+      assert.equal(stale.status, 409);
+      assert.match(JSON.parse(stale.body).error, /pairs\.json changed after serve started/);
+      assert.equal(await votingLock(dir), null);
+    } finally { await served.close(); }
+    assert.equal((await saved()).length, 2);
+  });
+});
+
 test('server: votes recorded before raters had names are r0, or the legacy rater named at start', async () => {
   await withTemp(async dir => {
     const { ids } = await handMadeStudy(dir);
@@ -672,10 +759,10 @@ test('analysis on a hand-computed example: last vote wins, agreement, Wilson, st
   ];
   const analysis = analyzeStudy({ key, votes, malformed: 1 });
   // Votes without a rater (recorded before raters had names) are r0's: one rater, analysed as before.
-  assert.equal(analysis.schema, 'e3d-study-analysis-v2');
+  assert.equal(analysis.schema, 'e3d-study-analysis-v3');
   assert.deepEqual(analysis.raters.map(item => item.rater), ['r0']);
   assert.deepEqual(analysis.votes, { files: null, ignored_files: [], legacy_rater: 'r0', lines: 11, valid_lines: 10, malformed_lines: 1, duplicate_lines: 0,
-    unknown_pair_lines: 1, raters: ['r0'], raters_only_unknown_pairs: [], raters_left_out: [], raters_not_found: [], left_out_lines: 0, pairs_total: 9, originals_total: 7 });
+    unknown_pair_lines: 1, raters: ['r0'], raters_only_unknown_pairs: [], raters_left_out: [], raters_not_found: [], left_out_lines: 0, pairs_total: 9, originals_total: 7, catch_total: 0 });
   const rater = analysis.raters[0];
   assert.deepEqual(rater.votes, { lines: 10, unknown_pair_lines: 1, revisions: 1, pairs_total: 9, pairs_rated: 8,
     pairs_unrated: 1, originals_total: 7, originals_rated: 6, ties: 1, median_ms: 4500, median_visible_ms: 4500 });

@@ -88,9 +88,10 @@
 | ✅ | T6 作答过程中每 5 分钟存一次模型，画分数-时间曲线 | [#6](https://github.com/olddonkey/evidence3d-bench/pull/6)；后续 [#9](https://github.com/olddonkey/evidence3d-bench/pull/9)：整点后 10 秒内读到的快照算在该整点上 |
 | ⏳ | T7 在装了 agy 的 Mac 上查 `agy models`，跑 Antigravity 第一次实机预检和 3–5 题试跑 | 适配器是照文档写的，还没在真机上跑过 |
 | ⏳ | T8 真实建筑候选：有平面和至少两个立面、街上拍得到、不是名建筑 | 现有 2 个，Round 4 目标 10–12 个 |
-| ⏳ | T9 负责人评完自己那份 110 对盲评，再找 2 位评审者 | 已评 14 / 110 |
+| ⏳ | T9 负责人评完自己那份 110 对盲评，再找 2 位评审者 | 已评 14 / 110；发包前先用 `study.mjs add-catch` 加 6 对检查对（共 116 对），合格检查和 G1 分析见 [v1/lib/study/README.md](v1/lib/study/README.md#round-4-catch-pairs-qualification-and-gate-g1) |
 | ✅ | T10 Round 4 计划与事先决定 | [#2](https://github.com/olddonkey/evidence3d-bench/pull/2)：2026-10-29 签署，见 [docs/V1-ROUND4-PLAN.md](docs/V1-ROUND4-PLAN.md) |
 | ✅ | 计划第 11 节：评分器出错不算无效交付。评分器自报 `scorer_failed`，最终文件重评 2 次仍出错记 `score_error`（不是样本，不记 0）；评分器仍为 1.1.0 | [#13](https://github.com/olddonkey/evidence3d-bench/pull/13) |
+| ✅ | 计划第 11 节：G1 分析与检查对。`study.mjs add-catch` 在负责人已评的对之后插入 6 对检查对（不动已有投票），`qualify` 只看完成度、重复对和检查对判合格，`analyze --raters … --g1-seed …` 按第 5.2 节决定评分器保留 1.1.0 还是改为 1.2.0 | [#12](https://github.com/olddonkey/evidence3d-bench/pull/12) |
 
 之后：阶段 2 用 3 位评审者的盲评决定评分器权重是否要改（G1），跑同一模型换客户端的对照（G2），定名单；阶段 3 加新题型（`t5`、照片退化）和生成器 1.2，生成新题集并打 tag `v1.3`；阶段 4 正式跑 Round 4，发布 `docs/V1-ROUND4.md`。
 

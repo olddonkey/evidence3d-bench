@@ -1,4 +1,6 @@
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile, readdir, open, rm, stat } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { join } from 'node:path';
 import { RATER_PATTERN, LEGACY_RATER, isRater } from './page/state.js';
 
@@ -11,6 +13,19 @@ import { RATER_PATTERN, LEGACY_RATER, isRater } from './page/state.js';
 
 export const CHOICES = ['a', 'b', 'tie'];
 export const VOTES_FILE = 'votes.jsonl';
+// The study's lock: held by a step that changes the study (prepare,
+// add-catch) for as long as it runs; by the server for each vote while it
+// checks the study and saves the vote; and by every reader (serve at start,
+// export, qualify, analyze) while it checks the study and reads it. So no two
+// of them overlap, and nobody reads a study half changed.
+export const VOTING_LOCK = 'voting.lock';
+// Holders that are done in a moment, and how long taking the lock waits for one.
+const BRIEF = ['vote', 'read'];
+const LOCK_WAIT_MS = 10000;
+const HOLDING = { 'add-catch': 'add-catch is changing this study', prepare: 'prepare is changing this study', vote: 'a vote is being saved', read: 'the study is being read' };
+// key.json as it was, kept while add-catch replaces key.json and pairs.json
+// (catch.mjs). Still there afterwards, that replacement did not finish.
+export const KEY_BACKUP = 'key.json.before-add-catch';
 const RATER_FILE = /^votes-(.*)\.jsonl$/;
 // Anything that looks like a votes file but is not read is reported, never silently dropped.
 const VOTES_LIKE = /^votes.*\.jsonl$/;
@@ -164,4 +179,86 @@ export async function readVoteFiles(studyDir, { legacyRater = LEGACY_RATER } = {
   }
   const { votes, copies } = mergeFiles(lists);
   return { votes, malformed, duplicates: copies, files: summaries, ignored, legacy_rater: legacyRater };
+}
+
+// Who holds the study's lock, or null: { pid, kind, token, stale } (pid null
+// while the file is being written; stale when that process is gone).
+export async function votingLock(studyDir) {
+  let text;
+  try { text = await readFile(join(studyDir, VOTING_LOCK), 'utf8'); } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+  let lock = {};
+  try { lock = JSON.parse(text) ?? {}; } catch {}
+  const pid = Number.isInteger(lock.pid) && lock.pid > 0 ? lock.pid : null;
+  let stale = false;
+  if (pid !== null) { try { process.kill(pid, 0); } catch (error) { stale = error.code === 'ESRCH'; } }
+  return { pid, kind: typeof lock.kind === 'string' ? lock.kind : null, token: typeof lock.token === 'string' ? lock.token : null, stale };
+}
+
+// Takes the study's lock for `kind` ('prepare', 'add-catch', 'vote' or
+// 'read') and returns the function that gives it back. The file is created
+// only if it does not exist, so of two callers one gets it. It waits a while
+// for a vote being saved or a read (or a lock being written); any other
+// holder is an error with code ELOCKED. A lock is never taken from anyone, also not from a
+// process that is gone: that file is deleted by hand. Giving it back removes
+// the file only if it is still this caller's.
+export async function lockVoting(studyDir, { kind = 'add-catch', waitMs = LOCK_WAIT_MS } = {}) {
+  const path = join(studyDir, VOTING_LOCK), token = randomUUID(), started = Date.now();
+  for (;;) {
+    let handle = null;
+    try { handle = await open(path, 'wx'); } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+    }
+    if (handle) {
+      // Created here: if it cannot be written, it goes again, or it would block the study.
+      try {
+        await handle.writeFile(JSON.stringify({ pid: process.pid, kind, token, at: new Date().toISOString() }) + '\n');
+        await handle.close();
+      } catch (error) {
+        await handle.close().catch(() => {});
+        await rm(path, { force: true });
+        throw error;
+      }
+      break;
+    }
+    const held = await votingLock(studyDir);
+    if (!held) continue;
+    const brief = !held.stale && (held.pid === null || BRIEF.includes(held.kind));
+    if (brief && Date.now() - started < waitMs) { await delay(10); continue; }
+    throw Object.assign(new Error(held.stale
+      ? path + ' was left by process ' + held.pid + ', which has ended: delete the file if nothing is changing this study, then try again'
+      : path + ': ' + (HOLDING[held.kind] ?? 'another step holds this study') + (held.pid ? ' (process ' + held.pid + ')' : '') +
+        '; wait for it to end' + (held.pid ? '' : ', or delete the file if nothing is running')), { code: 'ELOCKED', holder: held });
+  }
+  return async () => {
+    if ((await votingLock(studyDir))?.token === token) await rm(path, { force: true });
+  };
+}
+
+// Runs `run` holding the study's lock for `kind`, and gives it back after.
+export async function withStudyLock(studyDir, kind, run) {
+  const unlock = await lockVoting(studyDir, { kind });
+  try { return await run(); } finally { await unlock(); }
+}
+
+// A reader's view of the study: under the lock, refused while an add-catch
+// has not finished (checkFinished), then `read`.
+export function readFinished(studyDir, read) {
+  return withStudyLock(studyDir, 'read', async () => { await checkFinished(studyDir); return read(); });
+}
+
+// Throws (code EUNFINISHED) while an add-catch has not finished (KEY_BACKUP is
+// there): key.json and pairs.json may not belong together, so nobody rates,
+// exports, qualifies or analyses the study until add-catch is run again, which
+// puts it right first.
+export async function checkFinished(studyDir) {
+  const backup = join(studyDir, KEY_BACKUP);
+  try { await stat(backup); } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+  throw Object.assign(new Error(backup + ' is there: an add-catch did not finish, so key.json and pairs.json may not belong together. ' +
+    'Run add-catch again (it puts the study right first) before anyone rates, or the study is exported, qualified or analysed'), { code: 'EUNFINISHED' });
 }
