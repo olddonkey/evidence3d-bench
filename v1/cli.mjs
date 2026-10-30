@@ -126,9 +126,10 @@ try {
     }
     print(rows);
   } else if (command === 'report') {
-    const { writeReport, readRoster } = await import('./lib/report/index.mjs');
+    const { writeReport, readRoster, readHumanCurve } = await import('./lib/report/index.mjs');
     const roster = options.roster ? await readRoster(resolve(options.roster)) : null;
-    print(await writeReport({ dataRoot, batches: list(need('batches')), outDir: resolve(options.out || join(dataRoot, 'reports', 'latest')), roster }));
+    const humanCurve = options['human-curve'] ? await readHumanCurve(resolve(options['human-curve'])) : null;
+    print(await writeReport({ dataRoot, batches: list(need('batches')), outDir: resolve(options.out || join(dataRoot, 'reports', 'latest')), roster, humanCurve }));
   } else if (command === 'regression') {
     // Round 4 plan section 3: the regression systems' rows in two rounds, paired by object.
     const { regressionReport, parseSystems } = await import('./lib/report/index.mjs');
@@ -145,7 +146,8 @@ try {
       '  node v1/cli.mjs score        --task ID --glb FILE|truth [--out DIR] [--full true]',
       '  node v1/cli.mjs calibrate    --task ID [--out FILE]',
       '  node v1/cli.mjs rescore      --batches A,B      (recompute reports from stored submissions)',
-      '  node v1/cli.mjs report       --batches A,B [--out DIR] [--roster FILE]   (FILE: formal configurations and ladders, e.g. v1/rounds/round3.roster.json)',
+      '  node v1/cli.mjs report       --batches A,B [--out DIR] [--roster FILE] [--human-curve FILE]   (roster: formal configurations and ladders, e.g. v1/rounds/round3.roster.json;',
+      '                               human curve: <data>/study/<name>/human-curve.json from study.mjs curve)',
       '  node v1/cli.mjs regression   --baseline A,B --batches C,D [--out DIR] [--set test-2026-10] [--systems codex/gpt-6-astra/high,...]',
       '                               (Round 4 plan section 3: the same systems in two rounds, paired by object; equivalent, drift or undecided)',
       '  node v1/scripts/run.mjs prepare|preflight|run …      (generation runner)',

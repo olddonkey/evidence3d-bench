@@ -2,6 +2,8 @@ import { VARIANTS } from '../contract.mjs';
 import { intervalText, signedText, attemptShareText, pText, allPairsNote, INCOMPLETE_REASONS, REAL_TIER_MIN_OBJECTS, VARIANT_ORDER, CONFLICT_KINDS } from './aggregate.mjs';
 import { fractionLabel } from './html.mjs';
 import { timeMarkdown } from './time-chart.mjs';
+import { humanMarkdown, humanMarkdownCell, hasHuman } from './human-chart.mjs';
+import { HUMAN_REASONS } from './human.mjs';
 
 // summary.md: the same numbers as index.html in plain Markdown, to paste into
 // a document. Tables use GitHub pipe syntax; nothing links back to the site.
@@ -36,6 +38,10 @@ const correctionLine = correction => correction.comparisons
   ? correction.separated + ' of ' + plural(correction.comparisons, 'pair') + ' separated after Holm (' + correction.separated_uncorrected + ' uncorrected' +
     (correction.incomplete ? '; ' + correction.incomplete + ' incomplete, in m with p = 1' : '') + ')' : 'no pair';
 const effortText = effort => effort ?? 'no flag';
+const HUMAN_HEAD = 'Panel half-score win rate of A [95%]';
+const HUMAN_NOTE = 'Panel half-score win rate of A: from the human curve, on the tasks where both delivered a valid model (tasks covered / tasks both ran in brackets): per task the curve\'s W at the ' +
+  'task\'s score gap (1 − W when B scored higher, 0.5 at equal scores), averaged like the score. "Cannot tell" counts half, so it is not the probability that the panel prefers A; ' +
+  '50% is no visible difference. Interval: two-level bootstrap over the study\'s objects and this set\'s.';
 
 // The two ladders: ranks, scores, each ladder's pairs with Holm over them, and
 // the effort pairs (top minus default, same client and model).
@@ -52,17 +58,19 @@ function laddersMarkdown(board, set) {
     } else lines.push('No configuration of this set is on this ladder.', '');
     if (ladder.missing.length) lines.push('In the roster for this ladder, no counted attempt in this set: ' + ladder.missing.join(', ') + '.', '');
     if (ladder.pairwise.pairs.length) {
-      lines.push(table(['A', 'B', 'Objects', 'A − B', '95% bootstrap', '95% Student-t', 'Verdict (uncorrected)', 'Holm (m = ' + ladder.pairwise.correction.comparisons + ')'],
+      lines.push(table(['A', 'B', 'Objects', 'A − B', '95% bootstrap', '95% Student-t', 'Verdict (uncorrected)', 'Holm (m = ' + ladder.pairwise.correction.comparisons + ')',
+        ...(hasHuman(set) ? [HUMAN_HEAD] : [])],
         ladder.pairwise.pairs.map(pair => [pair.a, pair.b, pair.objects, fixed(pair.mean_difference, 1, true), pair.ci95 ? intervalText(pair.ci95) : 'n/a',
-          pair.t_ci95 ? intervalText(pair.t_ci95) : 'n/a', verdictOf(pair), holm(pair, note(pair))]), 2), '', correctionLine(ladder.pairwise.correction) + '.', '');
+          pair.t_ci95 ? intervalText(pair.t_ci95) : 'n/a', verdictOf(pair), holm(pair, note(pair)), ...(hasHuman(set) ? [humanMarkdownCell(pair)] : [])]), 2), '',
+        correctionLine(ladder.pairwise.correction) + '.', '');
     }
   }
   if (set.effort.pairs.length) {
     lines.push('#### Effort: top − default, same client and model', '', table(['System', 'Model', 'Default', 'Top', 'Objects', 'Top − default', '95% bootstrap', '95% Student-t',
-      'Won / tied / lost', 'Verdict (uncorrected)', 'Holm (m = ' + set.effort.correction.comparisons + ')'],
+      'Won / tied / lost', 'Verdict (uncorrected)', 'Holm (m = ' + set.effort.correction.comparisons + ')', ...(hasHuman(set) ? [HUMAN_HEAD.replace('of A', 'of top')] : [])],
     set.effort.pairs.map(pair => [pair.system, pair.model, effortText(pair.default_effort), effortText(pair.top_effort), pair.objects, fixed(pair.mean_difference, 1, true),
       pair.ci95 ? intervalText(pair.ci95) : 'n/a', pair.t_ci95 ? intervalText(pair.t_ci95) : 'n/a', pair.won + ' / ' + pair.tied + ' / ' + pair.lost,
-      verdictOf(pair), holm(pair, note(pair))]), 4), '', correctionLine(set.effort.correction) + '.', '');
+      verdictOf(pair), holm(pair, note(pair)), ...(hasHuman(set) ? [humanMarkdownCell(pair)] : [])]), 4), '', correctionLine(set.effort.correction) + '.', '');
   }
   for (const note of set.ladder_notes ?? []) lines.push('- ' + note);
   if (set.ladder_notes?.length) lines.push('');
@@ -115,10 +123,14 @@ function setMarkdown(board, set) {
   lines.push('### Pairwise comparison', '');
   if (pairs.length) {
     lines.push(correctionLine(set.pairwise.correction) + '.', '');
-    lines.push(table(['A', 'B', 'Objects', 'A − B', '95% bootstrap', '95% Student-t', 'A ahead', 'Won / tied / lost', 'Verdict (uncorrected)', 'Holm (m = ' + set.pairwise.correction.comparisons + ')'],
+    lines.push(table(['A', 'B', 'Objects', 'A − B', '95% bootstrap', '95% Student-t', 'A ahead', 'Won / tied / lost', 'Verdict (uncorrected)', 'Holm (m = ' + set.pairwise.correction.comparisons + ')',
+      ...(hasHuman(set) ? [HUMAN_HEAD] : [])],
       pairs.map(pair => [pair.a, pair.b, pair.objects, fixed(pair.mean_difference, 1, true), pair.ci95 ? intervalText(pair.ci95) : 'n/a', pair.t_ci95 ? intervalText(pair.t_ci95) : 'n/a',
         isNumber(pair.share_a_higher) ? (100 * pair.share_a_higher).toFixed(pair.share_a_higher > 0.99 && pair.share_a_higher < 1 ? 2 : 0) + '%' : 'n/a',
-        pair.won + ' / ' + pair.tied + ' / ' + pair.lost, verdictOf(pair), holm(pair)]), 2), '');
+        pair.won + ' / ' + pair.tied + ' / ' + pair.lost, verdictOf(pair), holm(pair), ...(hasHuman(set) ? [humanMarkdownCell(pair)] : [])]), 2), '');
+    if (hasHuman(set)) lines.push(HUMAN_NOTE, '');
+    else if (set.human) lines.push('No panel half-score win rate in this set: ' + (HUMAN_REASONS[set.human.reason] ?? set.human.reason) +
+      (set.human.versions?.length ? ' (' + set.human.versions.join(', ') + ')' : '') + '.', '');
     for (const pair of pairs) lines.push('- ' + pair.statement);
     lines.push('');
     if (set.pairwise.multiple_comparisons) lines.push(set.pairwise.multiple_comparisons, '');
@@ -223,6 +235,7 @@ export function summaryMarkdown(board) {
     'Protocol ' + board.protocol + ', generated ' + board.generated_at + '. ' + plural(board.sets.length, 'task set') + ', ' + plural(board.tasks.length, 'task') + '. Variants: ' +
       VARIANT_ORDER.filter(variant => board.tasks.some(task => task.variant === variant)).map(variant => variant + ' (' + VARIANTS[variant].title.toLowerCase() + ')').join('; ') + '.', '',
     ...board.sets.map(set => setMarkdown(board, set)),
+    ...humanMarkdown(board),
     ...batches,
     '## Caveats', '', ...caveats.map(line => '- ' + line), ''].join('\n');
 }

@@ -141,7 +141,7 @@ const inside = (box, frame) => {
 // ------------------------------------------------------------------ writer
 
 export async function writeReport({ dataRoot, batches, outDir, views = REPORT_VIEWS, size = 360, seed, now, excludeStatuses = DEFAULT_EXCLUDED_STATUSES, plannedObjects,
-  roster } = {}) {
+  roster, humanCurve } = {}) {
   if (typeof dataRoot !== 'string' || !dataRoot) throw new Error('writeReport needs dataRoot');
   const clock = performance.now(), timing = { collect_s: 0, aggregate_s: 0, parse_s: 0, render_s: 0, pages_s: 0, total_s: 0 };
   const lap = (key, since) => { timing[key] += (performance.now() - since) / 1000; };
@@ -152,7 +152,7 @@ export async function writeReport({ dataRoot, batches, outDir, views = REPORT_VI
   const collected = await collectRuns({ dataRoot: root, batches, excludeStatuses, alsoTasks: rosterTasks(roster) });
   lap('collect_s', since);
   since = performance.now();
-  const board = buildLeaderboard(collected, { seed, now, excludeStatuses, plannedObjects, roster });
+  const board = buildLeaderboard(collected, { seed, now, excludeStatuses, plannedObjects, roster, humanCurve });
   lap('aggregate_s', since);
   // Renders and pages of an earlier report in the same directory would be
   // stale and unlinked. They are removed only when the directory holds a
@@ -336,7 +336,8 @@ export async function writeReport({ dataRoot, batches, outDir, views = REPORT_VI
         separated: ladder.pairwise.correction.separated + ' of ' + ladder.pairwise.correction.comparisons + ' pairs after Holm' +
           (ladder.pairwise.correction.incomplete ? ' (' + ladder.pairwise.correction.incomplete + ' incomplete)' : '') })),
       pairs: set.pairwise.pairs.map(pair => ({ a: pair.a, b: pair.b, difference: round(pair.mean_difference), ci95: pair.ci95?.map(round) ?? null,
-        t_ci95: pair.t_ci95?.map(round) ?? null, verdict: pair.verdict, ...(pair.incomplete ? { incomplete: pair.incomplete } : {}), holm: pair.holm?.verdict ?? null })),
+        t_ci95: pair.t_ci95?.map(round) ?? null, verdict: pair.verdict, ...(pair.incomplete ? { incomplete: pair.incomplete } : {}), holm: pair.holm?.verdict ?? null,
+        ...(pair.human ? { panel_half_win_a: round(pair.human.win_rate_a), panel_ci95: pair.human.ci95?.map(round) ?? null } : {}) })),
     })),
     timing,
   };
