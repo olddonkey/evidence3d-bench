@@ -23,9 +23,10 @@ import { studyDir, DEFAULT_DATA_ROOT } from './index.mjs';
 // same clay shading), the truth on side A in half of them. They are added to a
 // prepared study, also one that the owner has started rating, but before any
 // other rater has voted: no pair is changed or moved before the last pair the
-// owner has rated, and no vote is touched. Voting stops while they are added
-// (votes.mjs VOTING_LOCK; a server started before refuses votes until it is
-// restarted). key.json marks them (`catch`), pairs.json does not, and they
+// owner has rated, and no vote is touched. Voting stops while they are added:
+// add-catch holds the study's lock (votes.mjs VOTING_LOCK) from reading the
+// study to writing it, the server saves each vote under the same lock, and a
+// server started before refuses votes until it is restarted. key.json marks them (`catch`), pairs.json does not, and they
 // count in no agreement, only in the qualification.
 
 export const CATCH_PAIRS = 6;
@@ -82,15 +83,10 @@ export async function addCatchPairs({ dataRoot = DEFAULT_DATA_ROOT, name, object
   if (seed === undefined || seed === null || seed === '') throw new Error('add-catch needs a seed');
   if (!Number.isInteger(count) || count < 1) throw new Error('the number of catch pairs must be a positive integer');
   const dir = studyDir(dataRoot, name);
-  const key = JSON.parse(await readFile(join(dir, 'key.json'), 'utf8'));
-  const study = JSON.parse(await readFile(join(dir, 'pairs.json'), 'utf8'));
-  if (study.pairs.length !== key.pairs.length || study.pairs.some((pair, index) => pair.id !== key.pairs[index].id)) {
-    throw new Error('pairs.json and key.json do not list the same pairs in the same order');
-  }
-  if (key.pairs.some(isCatch)) throw new Error(dir + ' already has catch pairs');
-  const unlock = await lockVoting(dir);
+  // Everything from reading the study to writing it happens under its lock.
+  const unlock = await lockVoting(dir, { kind: 'add-catch' });
   try {
-    return await addLocked({ dir, key, study, objects, seed, count, minChangedShare, legacyRater, devSet, now, log });
+    return await addLocked({ dir, objects, seed, count, minChangedShare, legacyRater, devSet, now, log });
   } finally {
     await unlock();
   }
@@ -112,7 +108,13 @@ async function ownerVotes(dir, legacyRater) {
   return JSON.stringify(read.votes);
 }
 
-async function addLocked({ dir, key, study, objects, seed, count, minChangedShare, legacyRater, devSet, now, log }) {
+async function addLocked({ dir, objects, seed, count, minChangedShare, legacyRater, devSet, now, log }) {
+  const key = JSON.parse(await readFile(join(dir, 'key.json'), 'utf8'));
+  const study = JSON.parse(await readFile(join(dir, 'pairs.json'), 'utf8'));
+  if (study.pairs.length !== key.pairs.length || study.pairs.some((pair, index) => pair.id !== key.pairs[index].id)) {
+    throw new Error('pairs.json and key.json do not list the same pairs in the same order');
+  }
+  if (key.pairs.some(isCatch)) throw new Error(dir + ' already has catch pairs');
   // Nothing is placed before the last pair the owner has rated.
   const order = new Map(study.pairs.map((pair, index) => [pair.id, index]));
   const voted = await ownerVotes(dir, legacyRater);
@@ -207,7 +209,7 @@ async function addLocked({ dir, key, study, objects, seed, count, minChangedShar
   insert(tail);
   keyPairs.forEach((pair, position) => { pair.position = position; });
 
-  // A vote saved as voting stopped (a server answering just then) would move the last rated pair.
+  // The server saves votes under the lock; a vote saved some other way while the pictures were drawn would move the last rated pair.
   if (await ownerVotes(dir, legacyRater) !== voted) throw new Error('votes changed while the catch pairs were drawn: stop serve, then run add-catch again');
 
   // Images first, then key.json, then pairs.json (what the page reads).

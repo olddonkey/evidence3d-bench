@@ -490,37 +490,74 @@ test('server: 127.0.0.1 only, serves the page, pairs and named images, never key
   });
 });
 
-test('server: no vote while a step changes the study (voting.lock), nor once pairs.json changed under it', async () => {
+test('the study lock: one of many callers gets it, it waits only for a vote being saved, and is never taken from anyone', async () => {
+  await withTemp(async dir => {
+    // Overlapping callers: exactly one gets it.
+    const tries = await Promise.allSettled(Array.from({ length: 8 }, () => lockVoting(dir)));
+    const got = tries.filter(item => item.status === 'fulfilled');
+    assert.equal(got.length, 1);
+    for (const item of tries.filter(item => item.status === 'rejected')) {
+      assert.equal(item.reason.code, 'ELOCKED');
+      assert.match(item.reason.message, /add-catch is changing this study \(process \d+\)/);
+    }
+    const held = await votingLock(dir);
+    assert.deepEqual([held.pid, held.kind, held.stale], [process.pid, 'add-catch', false]);
+    // Given back only while it is still the caller's.
+    const lockFile = join(dir, VOTING_LOCK), other = JSON.stringify({ pid: process.pid, kind: 'add-catch', token: 'someone-else' });
+    await writeFile(lockFile, other);
+    await got[0].value();
+    assert.equal(await readFile(lockFile, 'utf8'), other);
+    await rm(lockFile);
+    // A vote being saved is waited for; a lock left by a process that has ended, or one never written, is not taken over.
+    const vote = await lockVoting(dir, { kind: 'vote' });
+    setTimeout(() => { vote(); }, 50);
+    const after = await lockVoting(dir);
+    assert.equal((await votingLock(dir)).kind, 'add-catch');
+    await after();
+    assert.equal(await votingLock(dir), null);
+    const gone = JSON.stringify({ pid: spawnSync(process.execPath, ['-e', '']).pid, kind: 'add-catch', token: 't' });
+    await writeFile(lockFile, gone);
+    assert.equal((await votingLock(dir)).stale, true);
+    await assert.rejects(lockVoting(dir), /was left by process \d+, which has ended: delete the file/);
+    assert.equal(await readFile(lockFile, 'utf8'), gone);
+    await writeFile(lockFile, '');
+    await assert.rejects(lockVoting(dir, { waitMs: 30 }), /another step holds this study; wait for it to end, or delete the file if nothing is running/);
+  });
+});
+
+test('server: each vote is saved under the study lock, none while add-catch holds it, none once pairs.json changed under it', async () => {
   await withTemp(async dir => {
     const { ids } = await handMadeStudy(dir);
     const served = await startStudyServer({ studyDir: dir, port: 0 });
     const vote = (pair, choice) => call(served.url + 'vote', { method: 'POST', body: JSON.stringify({ rater: 'lls', pair, choice, ms: 3 }), headers: { 'Content-Type': 'application/json' } });
+    const saved = async () => (await readFile(join(dir, 'votes.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line)).map(line => [line.pair, line.choice]);
     try {
       assert.equal((await vote(ids[0], 'a')).status, 200);
+      assert.equal(await votingLock(dir), null, 'given back after the vote');
+      // While add-catch holds the lock: refused, and nothing is saved, also not later.
       const unlock = await lockVoting(dir);
-      assert.deepEqual(await votingLock(dir), { pid: process.pid });
-      await assert.rejects(lockVoting(dir), /another step is changing this study \(process \d+\)/);
       const locked = await vote(ids[1], 'a');
       assert.equal(locked.status, 409);
-      assert.match(JSON.parse(locked.body).error, /voting\.lock/);
+      assert.match(JSON.parse(locked.body).error, /voting\.lock: add-catch is changing this study \(process \d+\); wait for it to end; then restart serve and reload the page/);
       await unlock();
-      assert.equal(await votingLock(dir), null);
-      assert.equal((await vote(ids[1], 'b')).status, 200);
-      // A lock left by a process that is gone stops nothing; one being written (no pid yet) does.
-      await writeFile(join(dir, VOTING_LOCK), JSON.stringify({ pid: spawnSync(process.execPath, ['-e', '']).pid }) + '\n');
-      assert.equal((await vote(ids[1], 'tie')).status, 200);
-      await writeFile(join(dir, VOTING_LOCK), '');
-      assert.equal((await vote(ids[1], 'a')).status, 409);
-      await rm(join(dir, VOTING_LOCK));
+      assert.deepEqual(await saved(), [[ids[0], 'a']]);
+      // Another vote being saved: this one waits for it, then is saved.
+      const other = await lockVoting(dir, { kind: 'vote' });
+      const waiting = vote(ids[1], 'b');
+      await new Promise(resolve => setTimeout(resolve, 50));
+      assert.deepEqual(await saved(), [[ids[0], 'a']], 'not saved while another holds the lock');
+      await other();
+      assert.equal((await waiting).status, 200);
+      assert.deepEqual(await saved(), [[ids[0], 'a'], [ids[1], 'b']]);
       // pairs.json changed after the server started (add-catch): its page shows the old order, so no vote until it restarts.
       const study = JSON.parse(await readFile(join(dir, 'pairs.json'), 'utf8'));
       await writeFile(join(dir, 'pairs.json'), JSON.stringify({ ...study, pairs: study.pairs.slice().reverse() }));
       const stale = await vote(ids[0], 'b');
       assert.equal(stale.status, 409);
       assert.match(JSON.parse(stale.body).error, /pairs\.json changed after serve started/);
+      assert.equal(await votingLock(dir), null);
     } finally { await served.close(); }
-    const lines = (await readFile(join(dir, 'votes.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-    assert.deepEqual(lines.map(line => [line.pair, line.choice]), [[ids[0], 'a'], [ids[1], 'b'], [ids[1], 'tie']]);
+    assert.equal((await saved()).length, 2);
   });
 });
 

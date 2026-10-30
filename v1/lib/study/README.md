@@ -107,12 +107,17 @@ stays. In order:
   owner rated and their order stay as they were); the remaining gaps are split
   into six runs with one catch pair at a random gap of each. Votes files are
   not touched. Every pair's `position` in key.json follows the new order.
-- Voting stops while it runs: it holds `voting.lock` in the study directory
-  (with its process id), and `serve` refuses votes while that file names a
-  running process. A `serve` started before `add-catch` refuses every vote
+- Voting stops while it runs: from reading the study to writing it,
+  `add-catch` holds the study's lock, `voting.lock` in the study directory
+  (created only if absent, with its process id). `serve` saves each vote under
+  the same lock, so a vote is refused while `add-catch` holds it and none is
+  half-saved when `add-catch` reads the votes (it waits up to 2 s for a vote
+  being saved). Two `add-catch` runs cannot overlap. A lock left by a process
+  that ended is never taken over: the command says so, and the file is
+  deleted by hand. A `serve` started before `add-catch` refuses every vote
   afterwards (pairs.json changed), so it has to be restarted and the page
-  reloaded. If a vote still came in while the pictures were drawn, `add-catch`
-  stops without writing anything.
+  reloaded. If a vote still came in while the pictures were drawn (written by
+  something other than `serve`), `add-catch` stops without writing anything.
 - key.json marks each with `catch: { correct, object, set, archetype, seed,
   group, category, changed_share }` and gets a `catch_pairs` block (time,
   seed, objects, generator version, threshold, `after_position`); pairs.json
@@ -400,7 +405,8 @@ the command line, no seed, panel not named, one qualified rater, unqualified
 raters left out, legacy votes with `--legacy-rater`), and add-catch on a
 prepared study (places after the last rated pair, votes untouched, renders,
 nothing in pairs.json, refusals for other raters' votes in either file, the
-voting lock, a vote that arrives while it draws, seeded).
+voting lock, a vote being saved as it starts, a vote that arrives while it
+draws, two runs at once, seeded).
 
 `node --test v1/test/study.test.mjs`: stratification, the per-task cap, t1
 skipped, cross-configuration preference, shortfall reporting, repeats
@@ -410,8 +416,10 @@ batches, models and private files, renders non-blank with one camera set per
 object (a part-model draws only on the reference's silhouette), the server
 (127.0.0.1, routes, key.json unreachable, votes appended with their rater and
 resumed per rater, legacy votes, bad votes and raters, cross-origin and
-foreign Host refused, no vote under the voting lock or once pairs.json
-changed under it), the page logic and rater ids, merging the votes files,
+foreign Host refused, each vote saved under the study lock, none while
+add-catch holds it or once pairs.json changed under it), the study lock (one
+of many callers gets it, waits only for a vote being saved, never taken from
+anyone, given back only by its holder), the page logic and rater ids, merging the votes files,
 the export, and the analysis on hand-computed examples (Wilson intervals, last
 vote wins, strata, ties, self-consistency, disagreements; Cohen's and Fleiss'
 κ on textbook values; three raters: κ per two raters, Fleiss' κ, majority vote).
