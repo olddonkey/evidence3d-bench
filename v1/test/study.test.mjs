@@ -672,10 +672,10 @@ test('analysis on a hand-computed example: last vote wins, agreement, Wilson, st
   ];
   const analysis = analyzeStudy({ key, votes, malformed: 1 });
   // Votes without a rater (recorded before raters had names) are r0's: one rater, analysed as before.
-  assert.equal(analysis.schema, 'e3d-study-analysis-v2');
+  assert.equal(analysis.schema, 'e3d-study-analysis-v3');
   assert.deepEqual(analysis.raters.map(item => item.rater), ['r0']);
   assert.deepEqual(analysis.votes, { files: null, ignored_files: [], legacy_rater: 'r0', lines: 11, valid_lines: 10, malformed_lines: 1, duplicate_lines: 0,
-    unknown_pair_lines: 1, raters: ['r0'], raters_only_unknown_pairs: [], raters_left_out: [], raters_not_found: [], left_out_lines: 0, pairs_total: 9, originals_total: 7 });
+    unknown_pair_lines: 1, raters: ['r0'], raters_only_unknown_pairs: [], raters_left_out: [], raters_not_found: [], left_out_lines: 0, pairs_total: 9, originals_total: 7, catch_total: 0 });
   const rater = analysis.raters[0];
   assert.deepEqual(rater.votes, { lines: 10, unknown_pair_lines: 1, revisions: 1, pairs_total: 9, pairs_rated: 8,
     pairs_unrated: 1, originals_total: 7, originals_rated: 6, ties: 1, median_ms: 4500, median_visible_ms: 4500 });
