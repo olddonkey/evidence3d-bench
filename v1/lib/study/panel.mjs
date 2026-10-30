@@ -4,7 +4,7 @@ import { rng } from '../rng.mjs';
 import { quantile } from '../report/stats.mjs';
 import { STRATA, stratumOf } from './select.mjs';
 import { CATEGORIES } from './kappa.mjs';
-import { readVoteFiles, checkFinished } from './votes.mjs';
+import { readVoteFiles, readFinished } from './votes.mjs';
 import { LEGACY_RATER } from './page/state.js';
 
 // The rating panel of the Round 4 plan (docs/V1-ROUND4-PLAN.md) and what gate
@@ -135,9 +135,8 @@ export function qualifyRaters(key, raters, latestByRater) {
 // the votes files and key.json's repeats and catch pairs, never a score, and
 // prints counts, never which pairs are catch pairs). `raters`: only these.
 export async function qualifyStudy(studyDir, { legacyRater = LEGACY_RATER, raters = null } = {}) {
-  await checkFinished(studyDir);
-  const key = JSON.parse(await readFile(join(studyDir, 'key.json'), 'utf8'));
-  const read = await readVoteFiles(studyDir, { legacyRater });
+  const { key, read } = await readFinished(studyDir, async () => ({
+    key: JSON.parse(await readFile(join(studyDir, 'key.json'), 'utf8')), read: await readVoteFiles(studyDir, { legacyRater }) }));
   const latest = latestVotes(key, read.votes);
   const voters = [...latest.keys()].sort(), chosen = raters ? voters.filter(id => raters.includes(id)) : voters;
   const results = qualifyRaters(key, chosen, latest);
