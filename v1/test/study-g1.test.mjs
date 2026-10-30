@@ -1,4 +1,6 @@
-import test from 'node:test';
+import test, { mock } from 'node:test';
+import fsp from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { appendFileSync } from 'node:fs';
@@ -10,7 +12,7 @@ import { writeSampleRuns } from '../lib/report/sample-runs.mjs';
 import { STRATA, higherSide } from '../lib/study/select.mjs';
 import { prepareStudy, exportStudy, studyDir } from '../lib/study/index.mjs';
 import { analyzeStudy, analysisMarkdown, writeAnalysis } from '../lib/study/analyze.mjs';
-import { addCatchPairs, devModels } from '../lib/study/catch.mjs';
+import { addCatchPairs, devModels, KEY_BACKUP } from '../lib/study/catch.mjs';
 import { g1Analysis, g1Decision, targetVerdict } from '../lib/study/g1.mjs';
 import {
   TIE_GAP, CANDIDATE_WEIGHTS, scoreGap, weightedScore, weightedGap, rescorePair, isOriginal, isCatch, isRepeat, latestVotes,
@@ -524,5 +526,46 @@ test('add-catch refuses once another rater has voted, stops voting while it runs
     // With no votes the catch pairs may go anywhere, and the same seed puts them in the same places.
     assert.equal(await pairsOf('two'), (await pairsOf('three')).replace('"three"', '"two"'));
     assert.equal(JSON.parse(await readFile(join(studyDir(dataRoot, 'two'), 'key.json'), 'utf8')).catch_pairs.after_position, -1);
+  });
+});
+
+// Runs `run` with fs/promises' `name` failing whenever `fails(...arguments)` returns an error.
+async function failing(name, fails, run) {
+  const original = fsp[name];
+  const stub = mock.method(fsp, name, (...args) => { const error = fails(...args); return error ? Promise.reject(error) : original(...args); });
+  syncBuiltinESMExports();
+  try { return await run(); } finally { stub.mock.restore(); syncBuiltinESMExports(); }
+}
+
+test('add-catch changes key.json and pairs.json together or not at all', async () => {
+  await withTemp(async root => {
+    const dataRoot = join(root, 'data');
+    await writeSampleRuns(dataRoot, { attempts: RUN_SPECS, withInputs: false });
+    await prepareStudy({ dataRoot, name: 'unit', batches: ['demo-codex', 'demo-claude'], pairs: 8, seed: 'prep', size: { width: 48, height: 36 } });
+    const dir = studyDir(dataRoot, 'unit'), objects = ['house-0011', 'hall-0014', 'structure-0015', 'retail-0012'];
+    const texts = async () => [await readFile(join(dir, 'key.json'), 'utf8'), await readFile(join(dir, 'pairs.json'), 'utf8')];
+    const before = await texts();
+    const leftovers = async () => (await readdir(dir)).filter(name => /tmp|before|lock/.test(name));
+    const ioError = () => Object.assign(new Error('input/output error'), { code: 'EIO' });
+    // pairs.json cannot be put in place: key.json goes back.
+    await assert.rejects(failing('rename', (from, to) => String(to).endsWith('pairs.json') ? ioError() : null,
+      () => addCatchPairs({ dataRoot, name: 'unit', objects, seed: 's' })), /could not write pairs\.json \(input\/output error\); key\.json was put back, nothing changed/);
+    assert.deepEqual(await texts(), before);
+    assert.deepEqual(await leftovers(), []);
+    // Nor can key.json go back: the old one stays aside, and add-catch says how to recover.
+    await assert.rejects(failing('rename', (from, to) => String(to).endsWith('pairs.json') || String(from).endsWith(KEY_BACKUP) ? ioError() : null,
+      () => addCatchPairs({ dataRoot, name: 'unit', objects, seed: 's' })), /could not put the old key\.json back[^\n]*key\.json\.before-add-catch to [^\n]*key\.json before anyone votes/);
+    assert.equal((await texts())[1], before[1]);
+    assert.equal(await readFile(join(dir, KEY_BACKUP), 'utf8'), before[0]);
+    await assert.rejects(addCatchPairs({ dataRoot, name: 'unit', objects, seed: 's' }), /an add-catch did not finish; [^\n]*key\.json\.before-add-catch is key\.json from before it/);
+    await fsp.rename(join(dir, KEY_BACKUP), join(dir, 'key.json'));
+    assert.deepEqual(await texts(), before);
+    // The new files cannot be written: nothing changed.
+    await assert.rejects(failing('writeFile', path => String(path).endsWith('.add-catch.tmp') ? ioError() : null,
+      () => addCatchPairs({ dataRoot, name: 'unit', objects, seed: 's' })), /could not write the study \(input\/output error\); nothing changed/);
+    assert.deepEqual(await texts(), before);
+    assert.deepEqual(await leftovers(), []);
+    assert.equal((await addCatchPairs({ dataRoot, name: 'unit', objects, seed: 's' })).added, 6);
+    assert.deepEqual(await leftovers(), []);
   });
 });
