@@ -55,7 +55,8 @@ URL from `E3D_ANTHROPIC_BASE_URL` / `E3D_OPENAI_BASE_URL` at `prepare` (default
    safety cap; SIGTERM to the whole process tree, SIGKILL 5 s
    later), events and stderr logged byte for byte, then integrity checks, then
    the host-sleep rule and the infrastructure-error check (below), then scoring in a separate process
-   (module D's `scoreSubmission`) after the contestant's process tree is gone. While
+   (module D's `scoreSubmission`) after the contestant's process tree is gone, scored
+   again from the stored file when the scorer fails on it (see *Statuses*). While
    the CLI runs, the runner copies `output/model.glb` every 5 minutes, and scores the
    copies after the final file (see *Score-over-time snapshots*).
    A sample is run once and never overwritten. An attempt that ended in an
@@ -94,6 +95,21 @@ The scorer's own identity stamp (`SCORER.sha256` in `v1/lib/score/version.mjs`, 
 every report) is computed differently (only `.mjs` files, no package versions), so the two
 hashes are not equal; each pins the code by its own definition.
 
+**Batches prepared before a change to the scorer or the runner** (every Round 3 batch;
+the runner changed after Round 3 already, and the scorer changed when it began to mark
+its own failure, `scorer_failed`, Round 4 plan section 11): `run` and `preflight` refuse
+them (`scorer source changed`, `runner source changed`), so an attempt still pending
+or owed an infrastructure re-run there can only be finished from a checkout of the
+commit in its manifest (`repository.commit`, with `dirty` saying whether the working tree
+matched it). Their results stay as they are; nothing
+rewrites them. `v1/cli.mjs rescore` is not refused: it scores the stored files with the
+current scorer and its rules (below), and the new reports carry the new stamp. The
+scorer's `version` stayed 1.1.0 across the `scorer_failed` change, because no number in
+any report changed; so a report written before it (stamp `f36c91ed…` from bc8490d, the
+scorer of Round 3) and one written after compare as the scorer README says (same
+version), while the report lists their different stamps as a provenance difference
+wherever it merges or compares such batches.
+
 ```
 <data>/runs/<batch>/
   manifest.json  preflight.json  summary.json
@@ -125,8 +141,8 @@ up into the unreadable repository looking for a package scope and fails to impor
 usage: { input_tokens, cached_input_tokens, output_tokens } | null, cost_usd | null,
 turns, commands, score, report }` plus diagnostics (`exit_code`, `signal`, `timed_out`, `log_error`,
 `model_reported`, `model_turns`, `usage_detail`, `tools`, `errors`, `integrity_problems`,
-`artifact`, `score_error`, `notes_present`, `infra`, `infra_ignored`, `watchdog`,
-`service_retry_seconds`), the try history (`try`: 1 for the first try, k+1 after k
+`artifact`, `report_valid`, `score_error`, `score_tries`, `generation_status` (see *Statuses*),
+`notes_present`, `infra`, `infra_ignored`, `watchdog`, `service_retry_seconds`), the try history (`try`: 1 for the first try, k+1 after k
 archived ones; `tries[]`: one record per earlier try with its directory, status, reason,
 retry_after, times and message) and timing:
 `attempt_started_at` (the runner took the attempt), `started_at` / `finished_at` (the
@@ -199,10 +215,11 @@ After the final file is scored, the attempt's snapshots are scored in one worker
 drawn), one per distinct content; a snapshot with the final file's content takes its
 score, unless that report is the scorer's failure. A snapshot the scorer fails on (it
 throws, the worker crashes or times out before reaching it, or the report says
-`scorer_failed: true` or, as `v1/lib/score` reports an internal error it caught,
-`valid: false` with an error starting `Scorer error: `; `valid: false` otherwise
-is an invalid model, scored 0) is scored again from the same stored file, up to 2 times
-(`SNAPSHOT_SCORE_RETRIES`; nothing is generated again), each retry in a worker of its
+`scorer_failed: true`, as `v1/lib/score` marks an internal error it caught, or, from a
+scorer older than that flag, `valid: false` with an error starting `Scorer error: `;
+`valid: false` otherwise is an invalid model, scored 0) is scored again from the same
+stored file, up to 2 times (`SCORE_RETRIES`, as for the final file; nothing is
+generated again), each retry in a worker of its
 own, so a file that crashes the scorer every time cannot hold up the others; the failed
 tries' reports are kept as `t0300.try-1.json`, … . **The attempt's score is still the final file's alone.** With concurrency 1 this
 happens before the next attempt launches, so it never overlaps a contestant; it costs
@@ -241,18 +258,48 @@ valid `output/model.glb` exists, so a timed-out run can carry a score.
 | Status | When | Score | A sample? |
 | --- | --- | --- | --- |
 | `infra_error` | the harness could not run the model (next section); never given when the workspace boundary was broken | `null`, not scored | no: left out of every mean; archived and re-run automatically until a sample exists or the re-run cap is reached |
+| `score_error` | the scorer failed on a valid-looking artifact, also on its 2 retries (below), whatever the generation did (a timeout too); never given when the workspace boundary was broken | `null` | no: owed a re-score (`cli.mjs rescore`), left out of the means |
 | `timeout` | the wall clock expired; the tree was killed | from the artifact left behind | yes |
 | `budget_exhausted` | (API systems) the session used up its token or tool-call budget and was ended by the loop | from the artifact left behind | yes |
 | `generation_failed` | launch error, non-zero exit, no completed turn, an error result after model turns that is not an infrastructure error, or broken workspace integrity | from the artifact; 0 on an integrity problem | yes |
 | `missing_artifact` | the session finished, no `output/model.glb` | 0 | yes |
 | `invalid_artifact` | symlink, hard link, over the byte budget, or the scorer says invalid | 0 | yes |
-| `score_error` | the scorer failed on a valid-looking artifact | 0 in `result.json` | no: owed a re-score (`cli.mjs rescore`), left out of the means |
 | `completed` | finished normally and scored | the score | yes |
 
 An integrity problem (input, tools or runtime changed, a forbidden tool used) forces
 the score to 0 and is never excused as an infrastructure error: the finding is kept
-in `infra_ignored` for diagnosis. The report module leaves out `infra_error` (and, in
-its current working copy, `score_error`) attempts; `summary` does the same for its means.
+in `infra_ignored` for diagnosis. The report module leaves out `infra_error` and
+`score_error` attempts; `summary` does the same for its means.
+
+**The scorer's failure is not an invalid model** (Round 4 plan, sections 4, 7 and 11).
+The order is: a broken boundary first (0, whatever the scorer says; the file is scored
+once, for diagnosis, and not again), then whether the scorer failed, and only then the
+generation (`timeout`, `budget_exhausted`, `generation_failed`). The scorer has failed
+on the final file when its worker crashes or times out, writes no report, or writes one
+that is the scorer's own failure (`scorer_failed: true`, which `v1/lib/score` sets on an
+internal error it caught, or `valid: false` with an error starting `Scorer error: `
+from a scorer older than that flag; `scorerFailed` in `status.mjs`). The file is then
+scored again from `score/submission.glb`, up to 2 times (`SCORE_RETRIES`; nothing is
+generated again; the failed tries are kept as `score/report.try-<k>.json` and
+`worker.retry-<k>.*.log`, and logged as `scoring_again`). If the scorer still fails,
+the attempt is a `score_error`: `score` is null, `score_error` says why, `score_tries` is
+3, `report` names the last failed report if the scorer wrote one, and
+`generation_status` keeps what the generation alone said (`timeout`,
+`budget_exhausted`, `generation_failed`, or null for a session that finished
+normally). A file the scorer judged on a retry is scored as usual, with `score_tries`
+2 or 3. The snapshots follow the same rules (see *Score-over-time snapshots*).
+
+`v1/cli.mjs rescore` (`rescore.mjs`) applies them to recorded attempts: it scores
+`score/submission.glb` again with the current scorer, retrying a failure twice
+(`report.try-<k>.json`); still failing, the attempt becomes a `score_error` with no score
+(`generation_status` from its old status); otherwise its status is its generation's
+(`generation_status`, or `timeout` and the like as recorded), or `completed` /
+`invalid_artifact` by the new report for a session that finished normally. A broken
+boundary keeps its status and its 0, scored once. The old report and result are kept
+(`report.previous.json`, `result.previous.json`). A task whose data cannot be loaded
+stops the command instead of turning its attempts into score errors. An older runner
+recorded a scorer failure on a timed-out or failed session as that status with 0, and a
+report with `Scorer error: ` as `invalid_artifact` with 0; `rescore` sorts those out.
 
 ## Infrastructure errors
 
