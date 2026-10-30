@@ -1,4 +1,6 @@
-import test from 'node:test';
+import test, { mock } from 'node:test';
+import fsp from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
 import { spawnSync } from 'node:child_process';
@@ -522,6 +524,19 @@ test('the study lock: one of many callers gets it, it waits only for a vote bein
     assert.equal(await readFile(lockFile, 'utf8'), gone);
     await writeFile(lockFile, '');
     await assert.rejects(lockVoting(dir, { waitMs: 30 }), /another step holds this study; wait for it to end, or delete the file if nothing is running/);
+    await rm(lockFile);
+    // A lock created but not written (the disk is full) goes again, or it would block the study.
+    const open = fsp.open;
+    const full = mock.method(fsp, 'open', async (path, ...rest) => {
+      const handle = await open(path, ...rest);
+      return String(path).endsWith(VOTING_LOCK) ? { writeFile: () => Promise.reject(Object.assign(new Error('no space left on device'), { code: 'ENOSPC' })), close: () => handle.close() } : handle;
+    });
+    syncBuiltinESMExports();
+    try {
+      await assert.rejects(lockVoting(dir), { code: 'ENOSPC' });
+    } finally { full.mock.restore(); syncBuiltinESMExports(); }
+    assert.equal(await votingLock(dir), null);
+    await (await lockVoting(dir))();
   });
 });
 

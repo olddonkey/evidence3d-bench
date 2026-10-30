@@ -113,6 +113,14 @@ stays. In order:
   afterwards (pairs.json changed), so it has to be restarted and the page
   reloaded. If a vote still came in while the pictures were drawn (written by
   something other than `serve`), `add-catch` stops without writing anything.
+  A lock file that could not be written is removed again.
+- key.json and pairs.json change together or not at all: both are written
+  beside them first, key.json as it was is kept as
+  `key.json.before-add-catch`, and if pairs.json cannot be put in place the
+  old key.json goes back. Should even that fail, the backup stays, the error
+  says to move it back to key.json, and a later `add-catch` refuses with the
+  same advice. New images are written first; until pairs.json names them
+  nothing shows them.
 - key.json marks each with `catch: { correct, object, set, archetype, seed,
   group, category, changed_share }` and gets a `catch_pairs` block (time,
   seed, objects, generator version, threshold, `after_position`); pairs.json
@@ -361,7 +369,7 @@ raters left out, legacy votes with `--legacy-rater`), and add-catch on a
 prepared study (places after the last rated pair, votes untouched, renders,
 nothing in pairs.json, refusals for other raters' votes in either file, the
 voting lock, a vote being saved as it starts, a vote that arrives while it
-draws, two runs at once, seeded).
+draws, two runs at once, a failed write of either document, seeded).
 
 `node --test v1/test/study.test.mjs`: stratification, the per-task cap, t1
 skipped, cross-configuration preference, shortfall reporting, repeats
@@ -374,7 +382,8 @@ resumed per rater, legacy votes, bad votes and raters, cross-origin and
 foreign Host refused, each vote saved under the study lock, none while
 add-catch holds it or once pairs.json changed under it), the study lock (one
 of many callers gets it, waits only for a vote being saved, never taken from
-anyone, given back only by its holder), the page logic and rater ids, merging the votes files,
+anyone, given back only by its holder, removed when it cannot be written),
+the page logic and rater ids, merging the votes files,
 the export, and the analysis on hand-computed examples (Wilson intervals, last
 vote wins, strata, ties, self-consistency, disagreements; Cohen's and Fleiss'
 κ on textbook values; three raters: κ per two raters, Fleiss' κ, majority vote).

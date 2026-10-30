@@ -200,12 +200,21 @@ export async function votingLock(studyDir) {
 export async function lockVoting(studyDir, { kind = 'add-catch', waitMs = LOCK_WAIT_MS } = {}) {
   const path = join(studyDir, VOTING_LOCK), token = randomUUID(), started = Date.now();
   for (;;) {
-    try {
-      const handle = await open(path, 'wx');
-      try { await handle.writeFile(JSON.stringify({ pid: process.pid, kind, token, at: new Date().toISOString() }) + '\n'); } finally { await handle.close(); }
-      break;
-    } catch (error) {
+    let handle = null;
+    try { handle = await open(path, 'wx'); } catch (error) {
       if (error.code !== 'EEXIST') throw error;
+    }
+    if (handle) {
+      // Created here: if it cannot be written, it goes again, or it would block the study.
+      try {
+        await handle.writeFile(JSON.stringify({ pid: process.pid, kind, token, at: new Date().toISOString() }) + '\n');
+        await handle.close();
+      } catch (error) {
+        await handle.close().catch(() => {});
+        await rm(path, { force: true });
+        throw error;
+      }
+      break;
     }
     const held = await votingLock(studyDir);
     if (!held) continue;
