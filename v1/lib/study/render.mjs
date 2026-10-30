@@ -39,7 +39,8 @@ export const FRAME_FILL = 0.9;
 // Clay: one colour for everything (colour is not what the study is about).
 export const STUDY_SHADING = Object.freeze({ clay: true, edges: true, supersample: 2 });
 
-const BACKGROUND = parseColor(DEFAULT_SHADING.background).map(value => Math.round(linearToSrgb(value) * 255));
+// The sRGB bytes of the empty background.
+export const BACKGROUND = parseColor(DEFAULT_SHADING.background).map(value => Math.round(linearToSrgb(value) * 255));
 const corners = bounds => Array.from({ length: 8 }, (_, corner) => [0, 1, 2].map(i => corner >> i & 1 ? bounds.max[i] : bounds.min[i]));
 const diagonal = bounds => Math.hypot(...bounds.max.map((value, i) => value - bounds.min[i]));
 

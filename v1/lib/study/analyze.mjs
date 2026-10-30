@@ -3,6 +3,9 @@ import { join } from 'node:path';
 import { writeJSON } from '../../../lib/io.mjs';
 import { readVoteFiles } from './votes.mjs';
 import { LEGACY_RATER } from './page/state.js';
+import { CATEGORIES, cohenKappa, fleissKappa } from './kappa.mjs';
+import { isOriginal, isCatch, qualifyRaters, BOOTSTRAP_RESAMPLES, QUALIFICATION, CURRENT_SCORER, NEXT_SCORER } from './panel.mjs';
+import { g1Analysis } from './g1.mjs';
 
 // Joins the votes of every rater with key.json. Per rater: how often the rater
 // picks the submission the score ranks higher, overall and per gap stratum,
@@ -19,10 +22,9 @@ import { LEGACY_RATER } from './page/state.js';
 // counts twice. Votes without a rater are the legacy rater's (r0 by default;
 // see votes.mjs).
 
-export const ANALYSIS_SCHEMA = 'e3d-study-analysis-v2';
+export const ANALYSIS_SCHEMA = 'e3d-study-analysis-v3';
 export const Z95 = 1.959963984540054;
-// The choices as every rater saw them (the sides are the same for everyone).
-export const CATEGORIES = ['a', 'tie', 'b'];
+export { CATEGORIES, cohenKappa, fleissKappa };
 const MEASURES = [
   { id: 'score', field: 'higher', title: 'headline score' },
   { id: 'shape_score', field: 'higher_shape', title: 'shape_score alone' },
@@ -52,47 +54,6 @@ function agreement(rated, field) {
   return { ...wilson(k, comparable.length), no_higher_side: decided.length - comparable.length };
 }
 
-// Cohen's kappa for two raters over the same items, from [first, second]
-// choice pairs: (observed - chance) / (1 - chance), chance from each rater's
-// own shares of the categories. null when chance is 1 (both raters used one
-// and the same category throughout) or there are no items.
-export function cohenKappa(choicePairs, categories = CATEGORIES) {
-  const n = choicePairs.length;
-  if (!n) return { n: 0, same: 0, observed: null, chance: null, kappa: null };
-  const first = new Map(categories.map(category => [category, 0])), second = new Map(first);
-  let same = 0;
-  for (const [p, q] of choicePairs) {
-    if (!first.has(p) || !second.has(q)) throw new Error('unknown category ' + JSON.stringify(first.has(p) ? q : p));
-    first.set(p, first.get(p) + 1);
-    second.set(q, second.get(q) + 1);
-    if (p === q) same++;
-  }
-  const observed = same / n;
-  const chance = categories.reduce((sum, category) => sum + (first.get(category) / n) * (second.get(category) / n), 0);
-  return { n, same, observed, chance, kappa: chance < 1 ? (observed - chance) / (1 - chance) : null };
-}
-
-// Fleiss' kappa: `counts` has one row per item with the number of raters who
-// chose each category; every row sums to the same number of raters (two or
-// more). Observed agreement is the mean share of agreeing rater pairs per item,
-// chance the sum of the squared overall category shares.
-export function fleissKappa(counts) {
-  const items = counts.length;
-  if (!items) return { items: 0, raters_per_item: null, observed: null, chance: null, shares: null, kappa: null };
-  const sum = row => row.reduce((total, value) => total + value, 0);
-  const m = sum(counts[0]), width = counts[0].length;
-  if (!(m >= 2) || counts.some(row => row.length !== width || sum(row) !== m)) throw new Error('Fleiss kappa needs the same number of ratings, two or more, for every item');
-  const totals = new Array(width).fill(0);
-  let agreeing = 0;
-  for (const row of counts) {
-    row.forEach((count, j) => { totals[j] += count; });
-    agreeing += (row.reduce((total, count) => total + count * count, 0) - m) / (m * (m - 1));
-  }
-  const observed = agreeing / items, shares = totals.map(total => total / (items * m));
-  const chance = shares.reduce((total, share) => total + share * share, 0);
-  return { items, raters_per_item: m, observed, chance, shares, kappa: chance < 1 ? (observed - chance) / (1 - chance) : null };
-}
-
 // One rater's analysis from their votes (in the order cast). Returns the
 // analysis and the rater's last vote per pair.
 function raterAnalysis(key, byId, strata, rater, votes) {
@@ -100,12 +61,12 @@ function raterAnalysis(key, byId, strata, rater, votes) {
   const latest = new Map();
   for (const vote of known) latest.set(vote.pair, vote);
   const rated = [...latest.values()].map(vote => ({ pair: byId.get(vote.pair), choice: vote.choice, ms: vote.ms, hidden_ms: vote.hidden_ms ?? null }));
-  const originals = rated.filter(item => !item.pair.repeat_of);
+  const originals = rated.filter(item => isOriginal(item.pair));
 
   const votesSummary = {
     lines: votes.length, unknown_pair_lines: votes.length - known.length,
     revisions: known.length - latest.size, pairs_total: key.pairs.length, pairs_rated: latest.size, pairs_unrated: key.pairs.length - latest.size,
-    originals_total: key.pairs.filter(pair => !pair.repeat_of).length, originals_rated: originals.length,
+    originals_total: key.pairs.filter(isOriginal).length, originals_rated: originals.length,
     ties: originals.filter(item => item.choice === 'tie').length,
     median_ms: median(rated.map(item => item.ms).filter(Number.isFinite)),
     median_visible_ms: median(rated.filter(item => Number.isFinite(item.ms)).map(item => item.ms - (Number.isFinite(item.hidden_ms) ? item.hidden_ms : 0))),
@@ -124,7 +85,7 @@ function raterAnalysis(key, byId, strata, rater, votes) {
     const ties = inStratum.filter(item => item.choice === 'tie').length;
     return {
       stratum: id, min: definition?.min ?? null, max: definition?.max ?? null,
-      pairs: key.pairs.filter(pair => pair.stratum === id && !pair.repeat_of).length, rated: inStratum.length,
+      pairs: key.pairs.filter(pair => pair.stratum === id && isOriginal(pair)).length, rated: inStratum.length,
       mean_gap: inStratum.length ? inStratum.reduce((sum, item) => sum + item.pair.gap, 0) / inStratum.length : null,
       ties, tie_rate: wilson(ties, inStratum.length),
       agreement: agreement(inStratum, 'higher'),
@@ -177,7 +138,7 @@ function raterAnalysis(key, byId, strata, rater, votes) {
 // among pairs both decided), Fleiss' kappa over all raters on the pairs every
 // one of them rated (three raters or more), and the majority vote.
 function betweenRaters(key, strata, raters, latestByRater) {
-  const originals = key.pairs.filter(pair => !pair.repeat_of);
+  const originals = key.pairs.filter(isOriginal);
   const choiceOf = (rater, pair) => latestByRater.get(rater).get(pair.id)?.choice;
 
   const pairwise = [];
@@ -226,12 +187,16 @@ function betweenRaters(key, strata, raters, latestByRater) {
 
 //   votes: every vote, in the order cast (readVoteFiles); a vote without a
 //     rater is the legacy rater's.
-//   raters: only these raters (default: everyone who voted).
+//   raters: only these raters (default: everyone who voted); for G1, the panel
+//     is the qualified ones among them.
+//   g1Seed: the bootstrap seed of gate G1 from the private record; without it
+//     G1 is not computed. g1Samples: resamples (10 000; fewer only in tests).
 //   malformed, duplicates, files, ignored: what readVoteFiles reports, for the summary.
-export function analyzeStudy({ key, votes, malformed = 0, duplicates = 0, files = null, ignored = [], legacyRater = LEGACY_RATER, raters = null }) {
+export function analyzeStudy({ key, votes, malformed = 0, duplicates = 0, files = null, ignored = [], legacyRater = LEGACY_RATER, raters = null,
+  g1Seed = null, g1Samples = BOOTSTRAP_RESAMPLES }) {
   const byId = new Map(key.pairs.map(pair => [pair.id, pair]));
   const strata = (key.strata ?? []).map(item => item.id);
-  for (const pair of key.pairs) if (!strata.includes(pair.stratum)) strata.push(pair.stratum);
+  for (const pair of key.pairs) if (!isCatch(pair) && !strata.includes(pair.stratum)) strata.push(pair.stratum);
   const named = votes.map(vote => ({ ...vote, rater: vote.rater ?? legacyRater }));
   const voters = [...new Set(named.map(vote => vote.rater))].sort();
   const listed = raters ? voters.filter(id => raters.includes(id)) : voters;
@@ -255,19 +220,23 @@ export function analyzeStudy({ key, votes, malformed = 0, duplicates = 0, files 
     raters: chosen, raters_only_unknown_pairs: listed.filter(id => !chosen.includes(id)),
     raters_left_out: voters.filter(id => !listed.includes(id)), raters_not_found: (raters ?? []).filter(id => !voters.includes(id)),
     left_out_lines: named.length - kept.length,
-    pairs_total: key.pairs.length, originals_total: key.pairs.filter(pair => !pair.repeat_of).length,
+    pairs_total: key.pairs.length, originals_total: key.pairs.filter(isOriginal).length, catch_total: key.pairs.filter(isCatch).length,
   };
 
+  const qualification = qualifyRaters(key, chosen, latestByRater);
+  const g1 = g1Analysis({ key, latestByRater, qualification, seed: g1Seed, samples: g1Samples });
   return {
     schema: ANALYSIS_SCHEMA, study: key.name, prepared_at: key.created_at ?? null,
     votes: votesSummary, raters: perRater, between_raters: betweenRaters(key, strata, chosen, latestByRater),
+    qualification, g1,
     notes: [
       'Each rater counts with their last vote per pair; earlier votes on the same pair are revisions.',
-      'Agreement is counted on original pairs only; repeated pairs (sides swapped) are used for self-consistency only.',
+      'Agreement is counted on original pairs only; repeated pairs (sides swapped) are used for self-consistency only, catch pairs for rater qualification only.',
       'A "cannot tell" vote is a tie and is left out of agreement; pairs whose two values are equal have no higher side and are left out of that measure.',
       'Between raters, choices are compared as shown (A closer / cannot tell / B closer); every rater sees the same sides of a pair.',
       'Votes in votes.jsonl recorded before raters had names count as rater ' + legacyRater + (legacyRater === LEGACY_RATER ? ' (analyze with --legacy-rater <id> if they are one named rater\'s)' : '') + '.',
-      'Intervals are Wilson 95 % score intervals on counts of pairs; pairs share tasks and submissions, so they are not fully independent. Kappas are point estimates.',
+      'Outside the G1 section, intervals are Wilson 95 % score intervals on counts of pairs; pairs share tasks and submissions, so they are not fully independent. Kappas are point estimates.',
+      'In the G1 section every interval is a percentile bootstrap over objects (the pairs of an object share its task and submissions), as the Round 4 plan prescribes; the panel is the qualified raters.',
     ],
   };
 }
@@ -324,6 +293,65 @@ function raterMarkdown(item, lines) {
     }
     lines.push('');
   }
+}
+
+// Section 5.1 of the Round 4 plan: who qualifies for the panel.
+export function qualificationMarkdown(qualification, lines) {
+  lines.push('## Rater qualification', '');
+  lines.push('Round 4 plan section 5.1, from the votes, the repeats and the catch pairs only (no score is read). A rater qualifies with every pair rated, ' +
+    'the same choice on at least ' + QUALIFICATION.repeats[0] + ' of ' + QUALIFICATION.repeats[1] + ' repeats ("cannot tell" both times counts) and at least ' +
+    QUALIFICATION.catch[0] + ' of ' + QUALIFICATION.catch[1] + ' catch pairs right ("cannot tell" is wrong); other numbers of repeats or catch pairs need the same shares.', '');
+  if (!qualification.length) { lines.push('No rater.', ''); return; }
+  lines.push('| rater | pairs rated / total | repeats: same / total (needs) | catch pairs: right / total (needs) | catch: "cannot tell" | qualified |', '|---|---|---|---|---|---|');
+  for (const item of qualification) {
+    lines.push('| ' + item.rater + ' | ' + item.pairs_rated + ' / ' + item.pairs_total + ' | ' + item.repeats.consistent + ' / ' + item.repeats.total + ' (' + item.repeats.required + ') | ' +
+      item.catch.correct + ' / ' + item.catch.total + ' (' + item.catch.required + ') | ' + item.catch.ties + ' | ' + (item.qualified ? 'yes' : 'no: ' + item.reasons.join('; ')) + ' |');
+  }
+  lines.push('');
+}
+
+const signedPoints = value => typeof value === 'number' && Number.isFinite(value) ? (value >= 0 ? '+' : '−') + (100 * Math.abs(value)).toFixed(1) + ' pts' : 'n/a';
+const bootText = (stat, format = pct) => !stat ? 'n/a' : format(stat.estimate) + (stat.available ? ' [' + format(stat.low) + ', ' + format(stat.high) + ']' : ' (interval not available: ' + stat.reason + ')');
+const TARGET_TEXT = { reached: 'reaches the 70 % target (lower bound ≥ 70 %)', below: 'is below the 70 % target (upper bound < 70 %)',
+  not_confirmed: 'is not confirmed to reach the 70 % target' };
+
+// Section 5.2 of the Round 4 plan: gate G1.
+export function g1Markdown(g1, lines) {
+  lines.push('## Gate G1: scorer ' + CURRENT_SCORER + ' or ' + NEXT_SCORER, '');
+  lines.push('Round 4 plan section 5.2. Panel: ' + (g1.panel.length ? g1.panel.join(', ') : 'nobody') + ' (qualified raters' +
+    (g1.not_qualified.length ? '; not qualified, reported on their own: ' + g1.not_qualified.join(', ') : '') + ').', '');
+  if (!g1.run) {
+    lines.push('**G1 not computed:** ' + g1.reason + '.' + (g1.decision ? ' Decision: scorer ' + g1.decision.scorer + ' (' + g1.decision.weights + ').' : ''), '');
+    return;
+  }
+  const set = g1.evaluation_set;
+  lines.push('Evaluation set: the ' + set.panel_a_or_b + ' original pairs (of ' + set.originals + ') on which the panel\'s majority chose A or B, from ' + set.objects +
+    ' objects; the majority was "cannot tell" on ' + set.panel_cannot_tell + '. Under weights w a pair scores 1 when the majority chose the side w ranks higher, ' +
+    '0 when it chose the other, ½ when w puts the two within ' + g1.tie_gap + ' points. Intervals: percentile bootstrap over objects, ' + g1.samples +
+    ' resamples, seed "' + g1.seed + '".', '');
+  lines.push('| weights (shape / detail) | agreement A(w) [95 %] | pairs level under w | A(w) − A(50/50) [95 %] | objects with d_o ≠ 0 | beats 50/50 |', '|---|---|---|---|---|---|');
+  for (const candidate of g1.candidates) {
+    const d = candidate.difference;
+    lines.push('| ' + candidate.weights + (candidate.weights === '50/50' ? ' (scorer ' + CURRENT_SCORER + ')' : '') + ' | ' + bootText(candidate.agreement) + ' | ' + candidate.level_pairs + ' | ' +
+      (d ? bootText(d, signedPoints) + ' | ' + d.objects_changed + ' | ' + (d.better ? 'yes' : 'no: ' + d.reasons.join('; ')) : '– | – | –') + ' |');
+  }
+  lines.push('');
+  lines.push('**Decision: scorer ' + g1.decision.scorer + ' (' + g1.decision.weights + ').** ' + g1.decision.reason + '.', '');
+  lines.push('**70 % target:** the agreement of 50/50, ' + bootText(g1.target.agreement) + ', ' + TARGET_TEXT[g1.target.verdict] + '.', '');
+  if (g1.rescored) {
+    const count = g1.rescored.pairs.reduce((tally, pair) => { tally[pair.stratum] = (tally[pair.stratum] ?? 0) + 1; return tally; }, {});
+    lines.push('The agreement of ' + g1.decision.weights + ' was chosen after seeing these data and is optimistic. Under ' + g1.decision.weights + ' (scorer ' + g1.rescored.scorer +
+      ') the original pairs fall into the strata ' + Object.entries(count).map(([stratum, n]) => stratum + ': ' + n).join(', ') + '; analysis.json `g1.rescored` gives every pair\'s scores, gap, higher side and stratum.', '');
+  }
+  lines.push('### The panel', '');
+  lines.push('Each panel rater on the original pairs they decided, scored as above under 50/50 (descriptive):', '');
+  lines.push('| rater | decided originals | objects | agreement with scorer ' + CURRENT_SCORER + ' [95 %] |', '|---|---|---|---|');
+  for (const item of g1.raters) lines.push('| ' + item.rater + ' | ' + item.pairs + ' | ' + item.objects + ' | ' + bootText(item.agreement) + ' |');
+  lines.push('');
+  lines.push('| raters | original pairs | same choice [95 %] | Cohen\'s κ |', '|---|---|---|---|');
+  for (const row of g1.pairwise) lines.push('| ' + row.raters.join(' – ') + ' | ' + row.pairs + ' | ' + bootText(row.same_choice) + ' | ' + kappa(row.cohen_kappa) + ' |');
+  lines.push('');
+  if (g1.fleiss) lines.push('Fleiss\' κ over the panel on the ' + g1.fleiss.pairs + ' original pairs: ' + kappa(g1.fleiss.kappa) + '.', '');
 }
 
 export function analysisMarkdown(analysis) {
@@ -405,16 +433,19 @@ export function analysisMarkdown(analysis) {
     lines.push('');
   }
 
+  qualificationMarkdown(analysis.qualification, lines);
+  g1Markdown(analysis.g1, lines);
   for (const item of analysis.raters) raterMarkdown(item, lines);
   lines.push('## Notes', '', ...analysis.notes.map(note => '- ' + note), '');
   return lines.join('\n');
 }
 
 //   legacyRater, raters: see readVoteFiles and analyzeStudy.
-export async function writeAnalysis(studyDir, { legacyRater = LEGACY_RATER, raters = null } = {}) {
+//   g1Seed: see analyzeStudy.
+export async function writeAnalysis(studyDir, { legacyRater = LEGACY_RATER, raters = null, g1Seed = null } = {}) {
   const key = JSON.parse(await readFile(join(studyDir, 'key.json'), 'utf8'));
   const read = await readVoteFiles(studyDir, { legacyRater });
-  const analysis = analyzeStudy({ key, votes: read.votes, malformed: read.malformed, duplicates: read.duplicates, files: read.files, ignored: read.ignored, legacyRater, raters });
+  const analysis = analyzeStudy({ key, votes: read.votes, malformed: read.malformed, duplicates: read.duplicates, files: read.files, ignored: read.ignored, legacyRater, raters, g1Seed });
   await writeJSON(join(studyDir, 'analysis.json'), analysis);
   await writeFile(join(studyDir, 'analysis.md'), analysisMarkdown(analysis));
   return { analysis, files: [join(studyDir, 'analysis.md'), join(studyDir, 'analysis.json')] };
