@@ -9,7 +9,9 @@ import { fileURLToPath } from 'node:url';
 // a number in the report can change), `sha256` pins the exact code.
 // 1.0.0 (2cef4f9, reports without this stamp): shape 1 / 2 / 5 % of the
 // diagonal, point to point. 1.1.0: shape 0.25 / 0.5 / 1 %, point to visible
-// surface, fine pose stage (README "Choosing the tolerances").
+// surface, fine pose stage (README "Choosing the tolerances"). Still 1.1.0
+// once the scorer marked its own failure `scorer_failed: true` (Round 4 plan,
+// section 11): no number in any report changed, only the sha256.
 export const SCORER_VERSION = '1.1.0';
 
 const here = dirname(fileURLToPath(import.meta.url)), root = resolve(here, '../../..');

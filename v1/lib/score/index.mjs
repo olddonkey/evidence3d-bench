@@ -29,8 +29,8 @@ function technical(candidate, bytes) {
     bounds: finite ? { min: candidate.bounds.min.map(v => round(v)), max: candidate.bounds.max.map(v => round(v)) } : { min: [], max: [] } };
 }
 
-function invalidReport(context, error, { candidate = null, bytes = null, started }) {
-  return { ...baseReport(context), valid: false, error, score: 0, technical: technical(candidate, bytes), artifacts: [],
+function invalidReport(context, error, { candidate = null, bytes = null, started, scorerFailed = false }) {
+  return { ...baseReport(context), valid: false, ...(scorerFailed ? { scorer_failed: true } : {}), error, score: 0, technical: technical(candidate, bytes), artifacts: [],
     timing_ms: Math.round(performance.now() - started), warnings: context?.warnings ?? [] };
 }
 
@@ -154,13 +154,17 @@ function closerTo(primary, alternate, measured) {
 }
 
 // Scores a candidate soup against a context. Never throws for a bad candidate:
-// a scorer failure is reported as such.
+// a scorer failure is reported as such, and marked `scorer_failed: true`
+// (besides valid: false, score 0 and an error starting "Scorer error: ", as
+// before), so that it is never taken for an invalid model: the runner scores
+// the same file again, and records no score for it if the scorer keeps
+// failing (runner README, Statuses).
 export function scoreSoup({ candidate, context, outDir, bytes = null }) {
   const started = performance.now();
   try {
     return scoreCandidate({ candidate, context, outDir, bytes, started });
   } catch (error) {
-    return invalidReport(context, 'Scorer error: ' + (error?.message ?? String(error)), { candidate, bytes, started });
+    return invalidReport(context, 'Scorer error: ' + (error?.message ?? String(error)), { candidate, bytes, started, scorerFailed: true });
   }
 }
 

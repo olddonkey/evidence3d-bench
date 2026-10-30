@@ -100,64 +100,27 @@ try {
   } else if (command === 'rescore') {
     // After the scoring definition changes, recompute reports from the frozen
     // submissions. Generation is never repeated; the previous report is kept.
+    // A file the scorer fails on is scored again, then left a score_error
+    // (v1/lib/runner/rescore.mjs, by the runner's rules).
     const { scoreSubmission, loadContext } = await import('./lib/score/index.mjs');
-    const { rescoreSnapshots } = await import('./lib/runner/snapshots.mjs');
+    const { rescoreAttempt } = await import('./lib/runner/rescore.mjs');
     const paths = layout(dataRoot), contexts = new Map(), rows = [];
     for (const batch of list(need('batches'))) {
       const batchDir = join(paths.runs, batch);
       for (const task of (await readdir(batchDir, { withFileTypes: true })).filter(entry => entry.isDirectory()).map(entry => entry.name).sort()) {
         let attempts = [];
         try { attempts = (await readdir(join(batchDir, task))).filter(name => /^a\d+$/.test(name)).sort(); } catch { continue; }
+        const context = async () => {
+          if (!contexts.has(task)) contexts.set(task, await loadContext({ taskDir: paths.task(task), truthDir: paths.truth(task), dataRoot }));
+          return contexts.get(task);
+        };
+        const score = async (glb, { outDir } = {}) => scoreSubmission({ glb, taskDir: paths.task(task), truthDir: paths.truth(task), dataRoot, outDir, context: await context() });
         for (const attempt of attempts) {
-          const scoreDir = join(batchDir, task, attempt, 'score'), resultPath = join(batchDir, task, attempt, 'result.json');
-          const context = async () => {
-            if (!contexts.has(task)) contexts.set(task, await loadContext({ taskDir: paths.task(task), truthDir: paths.truth(task), dataRoot }));
-            return contexts.get(task);
-          };
-          // The score-over-time snapshots are scored again by the same scorer.
-          const snapshotsOf = async (result, report) => rescoreSnapshots({ attemptDir: join(batchDir, task, attempt), batchDir, result, finalReport: report,
-            score: async bytes => scoreSubmission({ glb: bytes, taskDir: paths.task(task), truthDir: paths.truth(task), dataRoot, context: await context() }) });
-          let glb;
-          try { glb = await readFile(join(scoreDir, 'submission.glb')); }
-          catch {
-            // No stored submission (none was written, or it was refused): only
-            // the snapshots, if there are any, have something to rescore.
-            const result = await readJSON(resultPath).catch(() => null);
-            const snapshots = result ? await snapshotsOf(result, null) : null;
-            if (!snapshots) continue;
-            if (JSON.stringify(snapshots) !== JSON.stringify(result.snapshots)) {
-              await writeJSON(join(batchDir, task, attempt, 'result.previous.json'), result);
-              await writeJSON(resultPath, { ...result, snapshots, snapshots_rescored: { at: new Date().toISOString() } });
-            }
-            rows.push({ batch, task, attempt, snapshots_only: true, snapshots: snapshots.map(item => item.score) });
-            console.error('· ' + batch + '/' + task + '/' + attempt + ': snapshots only');
-            continue;
-          }
-          await context();
-          let previous = null;
-          try { previous = await readJSON(join(scoreDir, 'report.json')); await writeJSON(join(scoreDir, 'report.previous.json'), previous); } catch { /* first report */ }
-          const report = await scoreSubmission({ glb, taskDir: paths.task(task), truthDir: paths.truth(task), dataRoot, outDir: scoreDir, context: contexts.get(task) });
-          await writeJSON(join(scoreDir, 'report.json'), report);
-          // Keep result.json in step: its score, and its status when the only
-          // thing wrong with the attempt was that the scorer had failed on it.
-          // Statuses that describe the generation (timeout, infra_error, ...) stay.
-          try {
-            const result = await readJSON(resultPath);
-            if (result.status !== 'infra_error') {
-              const status = result.status === 'score_error' ? (report.valid ? 'completed' : 'invalid_artifact') : result.status;
-              // A broken boundary keeps the attempt at 0, as the runner recorded it.
-              const score = result.integrity_problems?.length ? 0 : report.score;
-              const snapshots = await snapshotsOf(result, report);
-              const snapshotsChanged = snapshots && JSON.stringify(snapshots) !== JSON.stringify(result.snapshots);
-              if (status !== result.status || result.score !== score || snapshotsChanged) {
-                await writeJSON(join(batchDir, task, attempt, 'result.previous.json'), result);
-                await writeJSON(resultPath, { ...result, status, score, report_valid: report.valid, ...(snapshots ? { snapshots } : {}),
-                  rescored: { at: new Date().toISOString(), scorer: report.scorer ?? null, from_status: result.status, from_score: result.score } });
-              }
-            }
-          } catch (error) { if (error.code !== 'ENOENT') throw error; }
-          rows.push({ batch, task, attempt, before: previous?.score ?? null, score: report.score, shape: report.shape_score, detail: report.detail?.score ?? null });
-          console.error('· ' + batch + '/' + task + '/' + attempt + ': ' + (previous?.score ?? '-') + ' -> ' + report.score);
+          const row = await rescoreAttempt({ batchDir, attemptDir: join(batchDir, task, attempt), score, ready: context });
+          if (!row) continue;
+          rows.push({ batch, task, attempt, ...row });
+          console.error('· ' + batch + '/' + task + '/' + attempt + ': ' + (row.snapshots_only ? 'snapshots only'
+            : (row.before ?? '-') + ' -> ' + (row.score_error ? 'score_error (' + row.score_error + ')' : row.score)));
         }
       }
     }
