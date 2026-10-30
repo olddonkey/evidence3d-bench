@@ -473,7 +473,7 @@ test('add-catch refuses once another rater has voted, stops voting while it runs
   await withTemp(async root => {
     const dataRoot = join(root, 'data');
     await writeSampleRuns(dataRoot, { attempts: RUN_SPECS, withInputs: false });
-    for (const name of ['one', 'two', 'three', 'four', 'five']) await prepareStudy({ dataRoot, name, batches: ['demo-codex', 'demo-claude'], pairs: 8, seed: 'prep', size: { width: 48, height: 36 } });
+    for (const name of ['one', 'two', 'three', 'four', 'five', 'six', 'seven']) await prepareStudy({ dataRoot, name, batches: ['demo-codex', 'demo-claude'], pairs: 8, seed: 'prep', size: { width: 48, height: 36 } });
     const objects = ['house-0011', 'hall-0014', 'structure-0015', 'retail-0012'];
     const pairsOf = name => readFile(join(studyDir(dataRoot, name), 'pairs.json'), 'utf8');
     const keyOf = name => readFile(join(studyDir(dataRoot, name), 'key.json'), 'utf8');
@@ -494,7 +494,7 @@ test('add-catch refuses once another rater has voted, stops voting while it runs
     const five = await pairsOf('five'), fiveDir = studyDir(dataRoot, 'five'), fiveKey = await keyOf('five');
     await writeFile(join(fiveDir, 'votes.jsonl'), vote(idAt(five, 0)));
     const unlock = await lockVoting(fiveDir);
-    await assert.rejects(addCatchPairs({ dataRoot, name: 'five', objects, seed: 's' }), /another step is changing this study/);
+    await assert.rejects(addCatchPairs({ dataRoot, name: 'five', objects, seed: 's' }), /add-catch is changing this study/);
     await unlock();
     let late = false;
     const log = () => { if (!late) { late = true; appendFileSync(join(fiveDir, 'votes.jsonl'), vote(idAt(five, 5))); } };
@@ -503,6 +503,21 @@ test('add-catch refuses once another rater has voted, stops voting while it runs
     assert.ok(!(await readdir(fiveDir)).includes(VOTING_LOCK), 'the lock is released');
     assert.equal((await readdir(join(fiveDir, 'images'))).length, 9 * 3 * 4);
     assert.equal((await addCatchPairs({ dataRoot, name: 'five', objects, seed: 's' })).after_position, 5);
+    // A vote being saved as add-catch starts is waited for, and counts.
+    const six = await pairsOf('six'), sixDir = studyDir(dataRoot, 'six');
+    const saving = await lockVoting(sixDir, { kind: 'vote' });
+    const adding = addCatchPairs({ dataRoot, name: 'six', objects, seed: 's' });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    appendFileSync(join(sixDir, 'votes.jsonl'), vote(idAt(six, 4)));
+    await saving();
+    assert.equal((await adding).after_position, 4);
+    // Two runs at once: one adds its catch pairs, the other changes nothing (the study is read under the lock).
+    const runs = await Promise.allSettled(['first', 'second'].map(seed => addCatchPairs({ dataRoot, name: 'seven', objects, seed })));
+    assert.equal(runs.filter(run => run.status === 'fulfilled').length, 1);
+    assert.match(runs.find(run => run.status === 'rejected').reason.message, /add-catch is changing this study|already has catch pairs/);
+    const seven = JSON.parse(await keyOf('seven'));
+    assert.equal(seven.pairs.filter(isCatch).length, 6);
+    assert.equal(seven.catch_pairs.seed, runs[0].status === 'fulfilled' ? 'first' : 'second');
 
     await addCatchPairs({ dataRoot, name: 'two', objects, seed: 's', now: () => new Date(0) });
     await addCatchPairs({ dataRoot, name: 'three', objects, seed: 's', now: () => new Date(0) });
