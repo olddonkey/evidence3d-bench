@@ -275,9 +275,12 @@ this round's; a batch in both is refused.
 - **Owed tasks**: every task of the set in a main variant that either round
   ran or planned, or that the set's build record (`sets/<set>.built.json`)
   lists. The objects are those of every task of the set in any variant (an
-  object only `t1` reached still owes its main tasks); every object owes each
-  main variant, one no batch has under a placeholder id
-  (`<object> c1 (no task in these batches)`), which nothing can fill.
+  object only `t1` reached still owes its main tasks) and those the set file
+  (`sets/<set>.json`) declares by id (`owed.declared_objects`; the ids only,
+  never the seeds); every object owes each main variant, one no batch has
+  under a placeholder id (`<object> c1 (no task in these batches)`), which
+  nothing can fill. A sample counts only on a task of the set: an attempt on
+  a task id another set reuses does not.
 - **Difference**, per object: this round's mean over the object's main tasks
   minus the earlier round's over the same tasks (attempts averaged within a
   task, as everywhere), on the tasks both rounds sampled. Failures count as 0,
@@ -292,7 +295,10 @@ this round's; a batch in both is refused.
   null): the plan's 区间不可用, which meets no threshold.
 - **Verdict** (`row.verdict`), first that applies:
   1. `not_judged`, a data problem the report will not judge past
-     (`row.blockers`, `row.reason`): `unplaced_tasks` (tasks no truth.json
+     (`row.blockers`, `row.reason`): `unknown_inventory` (neither a build
+     record nor a set file listing the objects, or a set file that counts
+     more objects than any source shows: nothing establishes that the tasks
+     the batches have are the whole set), `unplaced_tasks` (tasks no truth.json
      places that may belong to an object the set does not show: the build
      record's tasks not placed in the set whose recorded object is not one
      of the set's, `owed.unplaced`, and tasks the configuration ran or

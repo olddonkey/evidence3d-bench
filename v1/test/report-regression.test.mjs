@@ -31,7 +31,10 @@ function round(label, { systems = REGRESSION_SYSTEMS.map((spec, i) => [spec.syst
   variants = MAIN_VARIANTS, set = SET, value = null, skip = [], excluded = {}, scorer = SCORER, stack = () => STACK, overlap = false, start = Date.UTC(2026, 9, 1) } = {}) {
   const random = rng('regression/' + label);
   const normal = () => Math.sqrt(-2 * Math.log(1 - random.next())) * Math.cos(2 * Math.PI * random.next());
-  const result = { attempts: [], batches: [], problems: [], taskInfo: new Map(), plans: [] };
+  // The data root's record of the set: its set file declares the objects by id.
+  const ids = Array.from({ length: objects }, (_, o) => 'o' + o);
+  const setFiles = new Map([[set, { id: set, file: 'sets/' + set + '.json', objects, object_ids: ids, built_at: null, built_tasks: [], built_objects: {} }]]);
+  const result = { attempts: [], batches: [], problems: [], taskInfo: new Map(), plans: [], setFiles };
   let clock = start;
   systems.forEach(([system, model, effort, base], s) => {
     const batch = label + '-' + system + '-' + model + '-' + (effort ?? 'none');
@@ -333,6 +336,33 @@ test('only the main tasks of the set count; an object variant no batch has is ow
   assert.deepEqual([owedRow.verdict, owedRow.current.missing], ['undecided', ['o9-t4']]);
 });
 
+test('the set\'s inventory: declared objects owe their main tasks, an unknown inventory stops the judgement, other sets\' tasks never count', () => {
+  // o23 is in neither round's batches; the set file declares it, so it owes its main tasks.
+  const before = round('r3', { attempts: 3 }), after = round('r4');
+  for (const source of [before, after]) source.attempts = source.attempts.filter(item => item.object !== 'o23');
+  const declared = compare(before, after);
+  assert.deepEqual([declared.owed.tasks, declared.owed.objects, declared.owed.declared_objects], [72, 24, 24]);
+  assert.deepEqual(declared.owed.placeholders, ['o23 t2 (no task in these batches)', 'o23 t4 (no task in these batches)', 'o23 c1 (no task in these batches)']);
+  assert.deepEqual([rowOf(declared, ASTRA).verdict, rowOf(declared, ASTRA).reason], ['not_judged', 'baseline_incomplete']);
+  assert.match(regressionMarkdown(declared), /72 tasks on 24 objects \(no build record: the tasks the batches ran or planned; sets\/test-2026-10\.json declares 24 objects\)/);
+  // Without the set file and the build record, nothing shows that the 69 tasks the batches have are the set.
+  const unknown = compare(before, after, { setRecord: null });
+  assert.equal(unknown.owed.tasks, 69);
+  for (const key of [ASTRA, OPUS]) assert.deepEqual([rowOf(unknown, key).verdict, rowOf(unknown, key).reason], ['not_judged', 'unknown_inventory']);
+  assert.ok(unknown.problems.some(problem => /neither a build record \(sets\/test-2026-10\.built\.json\) nor a set file listing its objects/.test(problem)), unknown.problems.join('\n'));
+  // A set file that counts its objects without ids: fewer seen than declared stops it, as many does not.
+  const counted = { id: SET, file: 'sets/' + SET + '.json', objects: 24, object_ids: [], built_tasks: [], built_objects: {} };
+  assert.match(rowOf(compare(before, after, { setRecord: counted }), ASTRA).statement, /sets\/test-2026-10\.json declares 24 objects without listing every id, and these batches show 23/);
+  assert.equal(rowOf(compare(round('r3', { attempts: 3 }), round('r4'), { setRecord: counted }), ASTRA).verdict, 'equivalent');
+  // Another data root reusing the task ids in another set: none of its attempts is a sample of this one, nor its batches part of the stack.
+  const elsewhere = round('r4', { set: 'test-2026-11', stack: () => ({ ...STACK, cli_version: '9.9.9' }) });
+  const crossed = compare(round('r3', { attempts: 3 }), elsewhere);
+  const row = rowOf(crossed, ASTRA);
+  assert.deepEqual([row.verdict, row.reason, row.current.tasks, row.current.missing.length], ['undecided', 'incomplete', 0, 72]);
+  assert.deepEqual([row.current.batches, row.current.stack_disagreements, row.current.other_batches], [[], [], ['r4-codex-gpt-6-astra-high']]);
+  assert.equal(row.current.outside, 72);
+});
+
 test('attempts that ran at once are noted, batches in both rounds refused, systems parsed', () => {
   const result = compare(round('r3', { attempts: 3, overlap: true }), round('r4'));
   assert.equal(rowOf(result, ASTRA).baseline.concurrency.max, 2);
@@ -427,12 +457,22 @@ test('tasks no truth.json places stop the judgement: a whole object without trut
     assert.deepEqual(rowOf(json, OPUS).unplaced, ['o3-c1', 'o3-t1', 'o3-t2', 'o3-t4']);
     assert.match(rowOf(json, OPUS).statement, /the build record of test-2026-10 lists 4 tasks that no readable truth\.json places in it \(o3-c1, o3-t1, o3-t2, \.\.\.\); claude-code \/ claude-opus-5-5 \/ high ran or planned 3 tasks whose truth\.json is missing or unreadable/);
     assert.ok(json.problems.some(problem => /build record of test-2026-10 lists 4 tasks/.test(problem)), json.problems.join('\n'));
-    // Without the build record the configuration's own attempts still show it.
+    // Without the build record (and no set file) the inventory is unknown; the configuration's own attempts still show the lost object.
     await rm(join(root, 'sets', SET + '.built.json'));
     const bare = await run();
-    assert.deepEqual(bare.systems.map(item => [item.verdict, item.reason]), [['not_judged', 'unplaced_tasks'], ['not_judged', 'unplaced_tasks']]);
+    assert.deepEqual(bare.systems.map(item => [item.verdict, item.reason]), [['not_judged', 'unknown_inventory'], ['not_judged', 'unknown_inventory']]);
     const without = JSON.parse(await readFile(join(out, 'regression.json'), 'utf8'));
     assert.deepEqual([without.owed.unplaced, rowOf(without, ASTRA).unplaced], [[], ['o3-c1', 'o3-t2', 'o3-t4']]);
+    assert.deepEqual(rowOf(without, ASTRA).blockers.map(item => item.reason), ['unknown_inventory', 'unplaced_tasks']);
+    // A set file declaring the four objects by id: o3 owes its main tasks under placeholders, and the lost truth is still named.
+    await write(join(root, 'sets', SET + '.json'), { name: SET, objects: [0, 1, 2, 3].map(o => ({ id: 'o' + o, archetype: 'house', seed: 100 + o })) });
+    const declared = await run();
+    assert.equal(declared.owed_tasks, 12);
+    const listed = JSON.parse(await readFile(join(out, 'regression.json'), 'utf8'));
+    assert.deepEqual([listed.owed.declared_objects, listed.owed.set_file, rowOf(listed, ASTRA).unplaced], [4, 'sets/' + SET + '.json', []]);
+    assert.deepEqual(rowOf(listed, ASTRA).blockers.map(item => item.reason), ['baseline_incomplete']);
+    assert.ok(listed.problems.some(problem => /no truth\.json for task o3-c1/.test(problem)), listed.problems.join('\n'));
+    assert.doesNotMatch(JSON.stringify(listed), /"seed":\s*10[0-3]/, 'the set file\'s seeds never reach the report');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

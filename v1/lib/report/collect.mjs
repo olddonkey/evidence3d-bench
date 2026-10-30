@@ -118,7 +118,7 @@ async function readSetFiles(root, problems) {
     if (!data || typeof data !== 'object') continue;
     const built = name.endsWith('.built.json');
     const id = text(data.name) ?? name.replace(/(\.built)?\.json$/, '');
-    if (!sets.has(id)) sets.set(id, { id, file: null, private: null, created_at: null, note: null, objects: null, built_at: null, built_tasks: [], built_objects: {} });
+    if (!sets.has(id)) sets.set(id, { id, file: null, private: null, created_at: null, note: null, objects: null, built_at: null, built_tasks: [], built_objects: {}, object_ids: [] });
     const entry = sets.get(id);
     if (built) {
       entry.built_at = text(data.built_at);
@@ -132,6 +132,8 @@ async function readSetFiles(root, problems) {
       entry.created_at = text(data.created_at);
       entry.note = text(data.note);
       entry.objects = Array.isArray(data.objects) ? data.objects.length : null;
+      // The ids only (a test set's seeds stay in the file): the objects the set declares.
+      entry.object_ids = Array.isArray(data.objects) ? data.objects.map(item => text(item?.id)).filter(Boolean) : [];
     }
   }
   return sets;
