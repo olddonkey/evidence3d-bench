@@ -105,10 +105,12 @@ matched it). Their results stay as they are; nothing
 rewrites them. `v1/cli.mjs rescore` is not refused: it scores the stored files with the
 current scorer and its rules (below), and the new reports carry the new stamp. The
 scorer's `version` stayed 1.1.0 across the `scorer_failed` change, because no number in
-any report changed; so a report written before it (stamp `f36c91ed…` from bc8490d, the
-scorer of Round 3) and one written after compare as the scorer README says (same
-version), while the report lists their different stamps as a provenance difference
-wherever it merges or compares such batches.
+any report changed; so a report written before it and one written after compare as the
+scorer README says (same version), while the report lists their different stamps as a
+provenance difference wherever it merges or compares such batches. Round 3 already has
+two stamps, both 1.1.0: `1e37d11c…` (the first `test1-*` / `test2-*` batches, frozen with
+an earlier scorer source, which `run` refused before this change too) and `f36c91ed…`
+(bc8490d, every later batch); reports written from this change on carry a third.
 
 ```
 <data>/runs/<batch>/
