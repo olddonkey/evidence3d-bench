@@ -92,6 +92,7 @@
 | ✅ | T10 Round 4 计划与事先决定 | [#2](https://github.com/olddonkey/evidence3d-bench/pull/2)：2026-10-29 签署，见 [docs/V1-ROUND4-PLAN.md](docs/V1-ROUND4-PLAN.md) |
 | ✅ | 计划第 11 节：评分器出错不算无效交付。评分器自报 `scorer_failed`，最终文件重评 2 次仍出错记 `score_error`（不是样本，不记 0）；评分器仍为 1.1.0 | [#13](https://github.com/olddonkey/evidence3d-bench/pull/13) |
 | ✅ | 计划第 11 节：G1 分析与检查对。`study.mjs add-catch` 在负责人已评的对之后插入 6 对检查对（不动已有投票），`qualify` 只看完成度、重复对和检查对判合格，`analyze --raters … --g1-seed …` 按第 5.2 节决定评分器保留 1.1.0 还是改为 1.2.0 | [#12](https://github.com/olddonkey/evidence3d-bench/pull/12) |
+| ✅ | 计划第 6 节：人眼曲线进榜。`study.mjs curve --raters … --seed …` 按合格评审团的多数结论和分差档画出三个比例与半分胜率 W（分数相同的对单列），`report --human-curve` 给每一对比较加"评审团对 A 的半分胜率"一栏，带两层自助法区间和覆盖题数 | [#14](https://github.com/olddonkey/evidence3d-bench/pull/14) |
 
 之后：阶段 2 用 3 位评审者的盲评决定评分器权重是否要改（G1），跑同一模型换客户端的对照（G2），定名单；阶段 3 加新题型（`t5`、照片退化）和生成器 1.2，生成新题集并打 tag `v1.3`；阶段 4 正式跑 Round 4，发布 `docs/V1-ROUND4.md`。
 
