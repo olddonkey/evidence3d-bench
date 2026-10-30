@@ -5,13 +5,13 @@ and writes a static site that opens from disk: `index.html` (per task set:
 what the set is, the two ladders, leaderboard, pairwise comparison, where the
 noise is, evidence deltas, archetypes, detail by category, named dimensions,
 frame and scale, evidence use and cost, score over time, task index; then
-provenance, excluded attempts, data problems), `summary.md` (the same numbers
+the human curve when one is given, provenance, excluded attempts, data problems), `summary.md` (the same numbers
 in Markdown, to paste into a document), one page per task under `tasks/`, renders and
 copied evidence under `assets/`, and the full leaderboard as
 `leaderboard.json`.
 
 ```sh
-node v1/cli.mjs report --batches A,B,C --out .local/v1/reports/NAME [--roster v1/rounds/round4.roster.json]
+node v1/cli.mjs report --batches A,B,C --out .local/v1/reports/NAME [--roster v1/rounds/round4.roster.json] [--human-curve .local/v1/study/NAME/human-curve.json]
 ```
 
 ```js
@@ -19,13 +19,14 @@ import { aggregate, writeReport, comparePair } from './index.mjs';
 await aggregate({ dataRoot, batches, outFile, roster });        // -> leaderboard object (JSON written unless outFile: null)
 await writeReport({ dataRoot, batches, outDir, roster });       // -> compact summary, see below
 const roster = await readRoster('v1/rounds/round3.roster.json'); // optional: formal configurations and ladders
+const humanCurve = await readHumanCurve(file);                   // optional: the study's human curve (humanCurve option of both)
 ```
 
 `writeReport` returns only what a terminal should show (the CLI prints it):
 `{ outDir, index, summary, leaderboard, tasks, attempts, attempts_drawn,
 images, problems, sets: [{ id, kind, objects, tasks, counted, ranking: [{ rank,
 key, score, ci95, reference?, demoted? }], ladders: [{ id, ranking: [{ rank, key }],
-separated }], pairs: [{ a, b, difference, ci95, t_ci95, verdict, incomplete?, holm }] }],
+separated }], pairs: [{ a, b, difference, ci95, t_ci95, verdict, incomplete?, holm, panel_half_win_a?, panel_ci95? }] }],
 timing: { collect_s, aggregate_s, parse_s, render_s, pages_s, total_s } }`.
 Everything else is in `leaderboard.json`.
 
@@ -412,6 +413,48 @@ since a curve over a subset would not end at its score. The page draws an
 inline SVG (one line per configuration, at most 8, coloured by name; hover
 text from SVG titles, no scripts) above a table with every point, its
 interval and the share finished; `summary.md` has the table.
+
+## Human curve (`--human-curve`)
+
+With `--human-curve FILE` (the study's `human-curve.json`, written by
+`study.mjs curve`; v1/lib/study/README.md, *The human curve*), the report
+prints the curve and adds to every pairwise comparison (all pairs, the
+ladders and the effort pairs) the column "panel half-score win rate of A"
+(docs/V1-ROUND4-PLAN.md section 6). Without it nothing changes: no column, no
+section, `human_curve: null`, and every other number is the same either way.
+
+- The file is checked: its schema, bins that tile the gap scale from 0, and
+  shares that its own pair rows reproduce (to 1e-12). A file that does not
+  hold together is refused; an unavailable curve (too few raters or pairs) is
+  shown with its reason.
+- `set.human`: `{ available, reason, versions }`. The curve applies to a set
+  only when every eligible attempt's report was scored by the curve's scorer
+  version (an unstamped report is `unstamped`, which is no version); otherwise
+  the set has no column and the mismatch is a data problem.
+- `pair.human` (`panelWinRate`): on the tasks both configurations ran where
+  both have an eligible attempt (counted, `valid`, a finite score, a model
+  file, a variant the study rated, so not t1; an attempt with integrity
+  problems is already invalid), the gap g of every pair of A's and B's
+  attempts is looked up in the bin of |g|: W when A scored higher, 1 − W when
+  B did, 0.5 when |g| < the curve's tie gap. Averaged within the task, over
+  tasks within an object, then over objects. `win_rate_a`, `ci95`,
+  `interval` (the reason when there is none), `tasks` of `tasks_paired` and
+  their `share`, `objects`, `attempt_pairs`, `equal_scores`.
+- It is the panel's half-score win rate ("cannot tell" counts half), not the
+  probability that the panel prefers A; the column says so.
+- Interval: a two-level bootstrap, 10 000 resamples, each drawing the study's
+  objects (W per bin recomputed from the drawn pairs, the bins and weights
+  unchanged) and the pair's objects independently; 2.5 and 97.5 percentiles.
+  None below 2 objects (8 in the real tier), at a value of 0 or 1, or when
+  every resample gives the same value. Seeded per pair.
+- A ladder or effort pair read the other way round carries 1 − the value and
+  the flipped interval.
+- `board.human_curve`: the curve's provenance (file, sha256, scorer, panel,
+  seed, bins with their shares, the equal-score tally), without its pair rows.
+  The leaderboard schema stays `e3d-leaderboard-v4`: the fields are additive.
+
+The page draws the curve (the three shares and W per bin, with whiskers) above
+a table of every bin; `summary.md` has the table and the column.
 
 ## Scale
 

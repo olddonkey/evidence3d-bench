@@ -163,9 +163,10 @@ try {
     }
     print(rows);
   } else if (command === 'report') {
-    const { writeReport, readRoster } = await import('./lib/report/index.mjs');
+    const { writeReport, readRoster, readHumanCurve } = await import('./lib/report/index.mjs');
     const roster = options.roster ? await readRoster(resolve(options.roster)) : null;
-    print(await writeReport({ dataRoot, batches: list(need('batches')), outDir: resolve(options.out || join(dataRoot, 'reports', 'latest')), roster }));
+    const humanCurve = options['human-curve'] ? await readHumanCurve(resolve(options['human-curve'])) : null;
+    print(await writeReport({ dataRoot, batches: list(need('batches')), outDir: resolve(options.out || join(dataRoot, 'reports', 'latest')), roster, humanCurve }));
   } else {
     console.log([
       'Evidence3D v1 — hidden-truth reconstruction benchmark', '',
@@ -177,7 +178,8 @@ try {
       '  node v1/cli.mjs score        --task ID --glb FILE|truth [--out DIR] [--full true]',
       '  node v1/cli.mjs calibrate    --task ID [--out FILE]',
       '  node v1/cli.mjs rescore      --batches A,B      (recompute reports from stored submissions)',
-      '  node v1/cli.mjs report       --batches A,B [--out DIR] [--roster FILE]   (FILE: formal configurations and ladders, e.g. v1/rounds/round3.roster.json)',
+      '  node v1/cli.mjs report       --batches A,B [--out DIR] [--roster FILE] [--human-curve FILE]   (roster: formal configurations and ladders, e.g. v1/rounds/round3.roster.json;',
+      '                               human curve: <data>/study/<name>/human-curve.json from study.mjs curve)',
       '  node v1/scripts/run.mjs prepare|preflight|run …      (generation runner)',
       '  node v1/scripts/landmarks.mjs new-set|build-set|check (memory tasks: named landmark twins, variants m2 m3)',
       '  node v1/scripts/real.mjs prepare|build|verify|coverage (real buildings, variants r2 r4)',

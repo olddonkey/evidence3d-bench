@@ -15,6 +15,7 @@ node v1/scripts/study.mjs add-catch --name NAME --objects ID,ID,... --seed SEED 
 node v1/scripts/study.mjs qualify --name NAME [--data .local/v1] [--legacy-rater ID] [--raters A,B,C]
 node v1/scripts/study.mjs analyze --name NAME [--data .local/v1] [--legacy-rater ID] [--raters A,B,C] [--g1-seed SEED]
 node v1/scripts/study.mjs export  --name NAME --out NEW_DIR [--data .local/v1]
+node v1/scripts/study.mjs curve   --name NAME --raters A,B,C --seed SEED [--weights 50/50|65/35|35/65] [--data .local/v1] [--legacy-rater ID]
 ```
 
 `serve` prints the URL (`http://127.0.0.1:4173/`); open it in a Chromium-based
@@ -33,6 +34,7 @@ data derived from the hidden truth):
 | `votes.jsonl` | the server appends, the analysis reads | one line per vote, naming its rater |
 | `votes-<rater>.jsonl` | the analysis (and the server, to resume) reads | the votes.jsonl a rater rated elsewhere and sent back |
 | `analysis.md`, `analysis.json` | people | the agreement analysis |
+| `human-curve.json`, `human-curve.md` | `report --human-curve`, people | the human curve (below) |
 
 `prepare` refuses to touch a study that has votes (in any of the votes files),
 and a prepared study without `--force`.
@@ -80,6 +82,9 @@ stays. In order:
    from the private record>`, once. The owner's votes recorded before raters
    had names need `--legacy-rater <the owner's id>`, or they count as `r0`,
    a separate rater who has not rated everything.
+5. `curve --raters <the same raters> --seed <seed from the private record>`
+   (the same `--legacy-rater`), at the weights G1 kept: the human curve that
+   the results report reads (below).
 
 ### Catch pairs (`catch.mjs`)
 
@@ -318,6 +323,45 @@ are not fully independent; these intervals do not account for that, and the
 kappas are point estimates. The G1 section's intervals do: they resample
 objects.
 
+## The human curve (`curve.mjs`)
+
+`curve` turns the panel's votes into the curve that the results report reads
+(docs/V1-ROUND4-PLAN.md section 6): how often the panel picks the
+higher-scored side, as a function of the headline gap.
+
+- The panel: the qualified raters (section 5.1, `panel.mjs`) among
+  `--raters`, which is required, as for G1: the panel the private record
+  lists, never whoever happens to have voted. Each original pair's conclusion
+  is the plurality of their last votes. With fewer than two qualified raters
+  there is no curve.
+- The gap: at the weights of the scorer the curve is for. 50/50 is scorer
+  1.1.0 and uses the stored headline score; 65/35 and 35/65 are 1.2.0 and
+  recompute both sides from `shape_score` and `detail_score`. The curve names
+  its scorer version, and the report uses it only on reports of that version.
+- Equal scores: a gap below 0.05 (G1's tie threshold, after rounding to 1e-6)
+  has no higher side. Such pairs are in no bin; the curve counts them and the
+  panel's conclusions on them.
+- Bins: the study's four strata of the gap, [0, 3), [3, 8), [8, 15) and
+  [15, 100]. From the smallest up, a stratum with fewer than 10 pairs merges
+  into the next one up and is counted again; if the largest is then short it
+  merges into the one below. Fewer than two bins: no curve (人眼数据不够).
+- Per bin: the shares of "picked the higher-scored", "cannot tell" and "picked
+  the lower-scored", and the half-score win rate W = higher + ½ cannot tell.
+  Intervals: an object cluster bootstrap, 10 000 resamples, one draw of the
+  objects for all bins together; a draw that leaves a bin with no pair is
+  drawn again and counted (`bootstrap.redrawn`). No interval for a share of 0
+  or 1, or when every resample gives the same share.
+- Seeded: `--seed` comes from the private decision record, like G1's.
+
+`human-curve.json` (schema `e3d-human-curve-v1`) holds the bins, the equal
+pairs' tally, the panel and the raters left out with their reasons, the
+seed, and one row per binned pair (opaque id, object, gap, stratum, the
+panel's outcome relative to the higher side, bin). The report recomputes the
+shares from those rows and refuses a file whose numbers do not match them.
+The curve is from Round 3's submissions and is reused for Round 4 on the
+assumption that the gap a human can see does not depend on the task set; both
+files say so.
+
 ## What could bias a rater
 
 - The renders are the scorer's view of a submission: rotated, shifted and (on
@@ -354,3 +398,8 @@ foreign Host refused), the page logic and rater ids, merging the votes files,
 the export, and the analysis on hand-computed examples (Wilson intervals, last
 vote wins, strata, ties, self-consistency, disagreements; Cohen's and Fleiss'
 κ on textbook values; three raters: κ per two raters, Fleiss' κ, majority vote).
+
+`node --test v1/test/human-curve.test.mjs`: the bins and their merging, the
+curve on a hand-counted example (equal scores apart, shares and W, no interval
+at 0 or 1, seeded), rebinning at other weights, too few raters or pairs, the
+redraw of a draw with an empty bin, and `curve` end to end on files.

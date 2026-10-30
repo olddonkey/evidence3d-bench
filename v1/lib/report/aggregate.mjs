@@ -6,6 +6,7 @@ import { finite, mean, median, spread, sampleSD, summarise, pairedBootstrap, tIn
   BOOTSTRAP_SAMPLES, PAIRWISE_SAMPLES, LOW_EVIDENCE_OBJECTS, SMALL_SAMPLE_OBJECTS, TIE_TOLERANCE, FAMILY_ALPHA } from './stats.mjs';
 import { LADDERS, LADDER_RULE, MISSING_SHARE_LIMIT, inferLadders, parseRoster, rosterProvenance } from './roster.mjs';
 import { timeCurve, T95_SHARE, T95_MIN_FINAL, ON_TIME_SECONDS } from './curves.mjs';
+import { humanApplies, panelWinRate, flipHuman, humanCurveProvenance, HUMAN_REASONS, HUMAN_SAMPLES } from './human.mjs';
 
 // v3: ladders, Holm-corrected verdicts, reference rows (rank null) when a roster is given.
 // v4: incomplete pairs (verdict 'incomplete', in every family with p = 1), frozen
@@ -506,13 +507,13 @@ export function allPairsNote(set) {
 // A pair without its per-object rows, for the ladder and effort tables.
 const slimPair = pair => ({ a: pair.a, b: pair.b, objects: pair.objects, tasks: pair.tasks, mean_difference: pair.mean_difference, ci95: pair.ci95,
   t_ci95: pair.t_ci95, p_t: pair.p_t, won: pair.won, tied: pair.tied, lost: pair.lost, verdict: pair.verdict, incomplete: pair.incomplete ?? null,
-  small_sample: pair.small_sample, low_evidence: pair.low_evidence });
+  small_sample: pair.small_sample, low_evidence: pair.low_evidence, human: pair.human ?? null });
 
 // The same comparison read the other way round, B - A.
 const flip = ci => ci ? [-ci[1], -ci[0]] : null;
 const OPPOSITE = { a_higher: 'b_higher', b_higher: 'a_higher' };
 const reversed = pair => ({ ...pair, a: pair.b, b: pair.a, mean_difference: finite(pair.mean_difference) ? -pair.mean_difference : pair.mean_difference,
-  ci95: flip(pair.ci95), t_ci95: flip(pair.t_ci95), won: pair.lost, lost: pair.won, verdict: OPPOSITE[pair.verdict] ?? pair.verdict });
+  ci95: flip(pair.ci95), t_ci95: flip(pair.t_ci95), won: pair.lost, lost: pair.won, verdict: OPPOSITE[pair.verdict] ?? pair.verdict, human: flipHuman(pair.human) });
 
 // The two ladders of one set and the effort pairs between them. `order` is
 // the set's configurations in score order (then roster configurations with no
@@ -890,8 +891,10 @@ function describeSet(id, taskIds, setFiles) {
 // `roster` (roster.mjs parseRoster / readRoster) names the formal
 // configurations and their ladders; without one every configuration is formal
 // and the ladders are inferred from the recorded effort.
+//   humanCurve: the study's human curve (human.mjs readHumanCurve), for the
+//     column "panel half-score win rate of A" of every pair; null leaves it out.
 export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = new Date(), excludeStatuses = DEFAULT_EXCLUDED_STATUSES, plannedObjects = PLANNED_OBJECTS,
-  roster = null } = {}) {
+  roster = null, humanCurve = null } = {}) {
   // A roster read as plain JSON is validated here.
   if (roster && !(roster.keys instanceof Map)) roster = parseRoster(roster);
   const problems = [...(collected.problems ?? [])];
@@ -1034,6 +1037,13 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
       if (!finite(pair.p_t)) return 'undefined_test';
       return null;
     };
+    // The human curve applies where every model it would look up was scored
+    // by the scorer it was made for (docs/V1-ROUND4-PLAN.md section 6).
+    const human = humanApplies(humanCurve, counted);
+    if (human?.reason === 'scorer') {
+      problems.push('set ' + set + ': no panel half-score win rate: the human curve ' + (humanCurve.file ?? '') + ' is for scorer ' + humanCurve.scorer.version +
+        ', the reports of this set were scored by ' + human.versions.join(', '));
+    }
     const pairs = [];
     for (let i = 0; i < order.length; i++) {
       for (let j = i + 1; j < order.length; j++) {
@@ -1045,6 +1055,9 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
         const pair = comparePair({ key: a, attempts: attemptsA }, { key: b, attempts: attemptsB }, { seed: pairSeed });
         pair.reference = isReference(a) || isReference(b);
         if (both) pair.complete_objects = both.size;
+        // Descriptive, on the same attempts as the pair; the real tier gives no interval below its object minimum.
+        pair.human = human?.available ? panelWinRate(attemptsA, attemptsB, humanCurve, { seed: pairSeed + '/human',
+          minObjects: realTier ? REAL_TIER_MIN_OBJECTS : 2, fewReason: realTier ? 'real_tier' : 'few_objects' }) : null;
         const reason = incompleteReason(pair);
         pair.incomplete = null;
         // The real tier gives no interval below its object minimum, whatever the reason.
@@ -1082,6 +1095,8 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
       // Roster configurations with no counted attempt in this set: still in every family.
       absent_configurations: absent,
       tier: realTier ? 'real' : 'main',
+      // Whether the pairs carry the panel's half-score win rate (null without a human curve).
+      human,
       // Per roster configuration, what the set asked of it and what it lacks (null without a roster).
       completeness: frozen ? { expected_tasks: expected.size, required_variants: realTier ? null : roster.required_variants, missing_share_limit: realTier ? null : MISSING_SHARE_LIMIT,
         configurations: completeness } : null,
@@ -1161,6 +1176,7 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
     generated_at: now.toISOString(),
     batches: collected.batches ?? [],
     roster: rosterProvenance(roster),
+    human_curve: humanCurveProvenance(humanCurve),
     method: {
       score: 'report.score as computed by the scorer: (shape_score + detail.score) / 2 (DESIGN.md section 9); attempts without a valid report count as 0',
       tolerances: 'tolerance rows reported: ' + (tolerances.fractions.length ? tolerances.fractions.map(fraction => fraction * 100 + '%').join(', ') : 'none') +
@@ -1202,6 +1218,12 @@ export function buildLeaderboard(collected, { seed = 'e3d-leaderboard', now = ne
         'same averaging and bootstrap as the score, so the point at the wall-clock limit is the score. Time to ' + T95_SHARE * 100 + '%: per attempt with a final score of at least ' +
         T95_MIN_FINAL + ', when its first snapshot at ' + T95_SHARE * 100 + '% of its final score counts from (as above), else its end; median over attempts. ' +
         'Only for configurations whose every counted attempt has snapshots',
+      human_win_rate: 'with a human curve (--human-curve): per pair, on the tasks where both configurations delivered a model the curve applies to (counted, valid, ' +
+        'a model file, no integrity problems, not t1), the score gap g of every pair of their attempts is looked up in the curve: W of its bin when A scored higher, ' +
+        '1 - W when B did, 0.5 when |g| < the curve\'s tie gap; averaged within the task, over tasks within an object, then over objects. It is the panel\'s ' +
+        'half-score win rate ("cannot tell" counts half), not the probability that the panel prefers A. 95% interval: a two-level bootstrap (' + HUMAN_SAMPLES +
+        ' resamples) drawing the study\'s objects (W recomputed per bin) and the pair\'s objects independently; none below 2 objects (' + REAL_TIER_MIN_OBJECTS +
+        ' in the real tier), at 0 or 1, or when every resample is the same. Without a curve, or when ' + HUMAN_REASONS.scorer + ', the column is absent',
       excluded_statuses: excludeStatuses,
     },
     tolerances,
@@ -1223,10 +1245,10 @@ export const reportName = batches => (batches?.length ? batches.join('+') : 'all
 // The tasks a roster lists as missing, so the report can place them in their sets.
 export const rosterTasks = roster => roster ? roster.configurations.flatMap(item => (item.missing_tasks ?? []).map(gap => gap.task)) : [];
 
-export async function aggregate({ dataRoot, batches, outFile, seed, now, excludeStatuses = DEFAULT_EXCLUDED_STATUSES, plannedObjects, roster } = {}) {
+export async function aggregate({ dataRoot, batches, outFile, seed, now, excludeStatuses = DEFAULT_EXCLUDED_STATUSES, plannedObjects, roster, humanCurve } = {}) {
   if (roster && !(roster.keys instanceof Map)) roster = parseRoster(roster);
   const collected = await collectRuns({ dataRoot, batches, excludeStatuses, alsoTasks: rosterTasks(roster) });
-  const board = buildLeaderboard(collected, { seed, now, excludeStatuses, plannedObjects, roster });
+  const board = buildLeaderboard(collected, { seed, now, excludeStatuses, plannedObjects, roster, humanCurve });
   const target = outFile === undefined ? join(layout(resolve(dataRoot)).reports, reportName(batches), 'leaderboard.json') : outFile;
   if (target) await writeJSON(target, board);
   return board;

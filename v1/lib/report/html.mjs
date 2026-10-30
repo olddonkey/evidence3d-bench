@@ -149,6 +149,7 @@ figure.time-chart svg { display: block; width: 100%; height: auto; }
 .time-chart .label { fill: var(--fg); font-size: 12px; }
 .time-chart .series { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .time-chart .mark { stroke: var(--panel); stroke-width: 2; }
+.time-chart .whisker { stroke-width: 1.5; stroke-linecap: round; }
 ul.series-legend { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 16px; }
 ul.series-legend li { font-size: 0.85em; }
 ul.series-legend small { color: var(--muted); }

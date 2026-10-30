@@ -6,17 +6,19 @@
 //   node v1/scripts/study.mjs qualify --name <name> [--data <root>] [--legacy-rater <id>] [--raters a,b,c]
 //   node v1/scripts/study.mjs analyze --name <name> [--data <root>] [--legacy-rater <id>] [--raters a,b,c] [--g1-seed <seed>]
 //   node v1/scripts/study.mjs export  --name <name> --out <new directory> [--data <root>]
+//   node v1/scripts/study.mjs curve   --name <name> --raters a,b,c --seed <seed> [--weights 50/50] [--data <root>] [--legacy-rater <id>]
 // The study lives in <data>/study/<name>/: pairs.json (public), key.json
 // (private), images/, votes.jsonl and the votes-<rater>.jsonl other raters
-// sent back, analysis.md and analysis.json. Progress is printed as one JSON
+// sent back, analysis.md and analysis.json, human-curve.json and human-curve.md. Progress is printed as one JSON
 // object per line. Details: v1/lib/study/README.md.
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { prepareStudy, exportStudy, studyDir, DEFAULT_DATA_ROOT } from '../lib/study/index.mjs';
 import { startStudyServer, DEFAULT_PORT } from '../lib/study/server.mjs';
 import { writeAnalysis } from '../lib/study/analyze.mjs';
-import { qualifyStudy } from '../lib/study/panel.mjs';
+import { qualifyStudy, CANDIDATE_WEIGHTS } from '../lib/study/panel.mjs';
 import { addCatchPairs, CATCH_PAIRS } from '../lib/study/catch.mjs';
+import { writeHumanCurve, CURVE_REASONS } from '../lib/study/curve.mjs';
 import { readVoteFiles } from '../lib/study/votes.mjs';
 import { DEFAULT_PAIRS, DEFAULT_REPEAT_SHARE } from '../lib/study/select.mjs';
 import { isRater, LEGACY_RATER } from '../lib/study/page/state.js';
@@ -28,14 +30,18 @@ const USAGE = `Usage:
   node v1/scripts/study.mjs qualify --name <name> [--data <root>] [--legacy-rater <id>] [--raters a,b,c]
   node v1/scripts/study.mjs analyze --name <name> [--data <root>] [--legacy-rater <id>] [--raters a,b,c] [--g1-seed <seed>]
   node v1/scripts/study.mjs export  --name <name> --out <new directory> [--data <root>]
+  node v1/scripts/study.mjs curve   --name <name> --raters a,b,c --seed <seed> [--weights ${CANDIDATE_WEIGHTS.map(item => item.id).join('|')}] [--data <root>] [--legacy-rater <id>]
 --legacy-rater <id>: the rater whose votes in votes.jsonl carry no rater (recorded before raters had names); default ${LEGACY_RATER}.
---objects: development-set object ids (v1/sets/dev.json) for the catch pairs; --g1-seed: gate G1's bootstrap seed from the private record.`;
+--objects: development-set object ids (v1/sets/dev.json) for the catch pairs; --g1-seed: gate G1's bootstrap seed from the private record.
+curve: the human curve of docs/V1-ROUND4-PLAN.md section 6, from the qualified raters among --raters (the panel the private record lists), at the
+  weights of the scorer in use (50/50 is scorer 1.1.0, the default); --seed: the curve's bootstrap seed from the private record.
+  Writes human-curve.json for report --human-curve.`;
 
 const OPTIONS = {
   name: { type: 'string' }, batches: { type: 'string' }, seed: { type: 'string' }, pairs: { type: 'string' }, 'repeat-share': { type: 'string' },
   data: { type: 'string' }, port: { type: 'string' }, force: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
   'legacy-rater': { type: 'string' }, raters: { type: 'string' }, out: { type: 'string' },
-  objects: { type: 'string' }, count: { type: 'string' }, 'g1-seed': { type: 'string' },
+  objects: { type: 'string' }, count: { type: 'string' }, 'g1-seed': { type: 'string' }, weights: { type: 'string' },
 };
 const listOf = value => value.split(',').map(item => item.trim()).filter(Boolean);
 const print = value => console.log(JSON.stringify(value));
@@ -112,6 +118,19 @@ async function main(argv) {
       g1: analysis.g1.run ? { panel: analysis.g1.panel, decision: analysis.g1.decision, target: analysis.g1.target.verdict,
         agreement: analysis.g1.candidates.map(item => ({ weights: item.weights, agreement: item.agreement.estimate, ci95: [item.agreement.low, item.agreement.high] })) }
         : { not_computed: analysis.g1.reason, decision: analysis.g1.decision } });
+    return 0;
+  }
+  if (command === 'curve') {
+    const candidate = CANDIDATE_WEIGHTS.find(item => item.id === (values.weights ?? '50/50'));
+    if (!candidate) throw new Error('--weights must be one of ' + CANDIDATE_WEIGHTS.map(item => item.id).join(', '));
+    const weights = candidate.id === '50/50' ? null : { shape: candidate.shape, detail: candidate.detail };
+    need('raters');
+    const { curve, files } = await writeHumanCurve(studyDir(dataRoot, need('name')), { seed: need('seed'), raters, weights, legacyRater });
+    print({ event: 'curve', files, scorer: curve.scorer, panel: curve.panel.raters, not_on_panel: curve.panel.considered.filter(item => !item.qualified).map(item => item.rater),
+      available: curve.available, ...(curve.available ? {
+        bins: curve.bins.map(bin => ({ min: bin.min, max: bin.max, pairs: bin.pairs, half_win: bin.shares.half_win.value, ci95: bin.shares.half_win.ci95 })),
+        equal_scores: curve.equal.pairs } : { reason: CURVE_REASONS[curve.reason] }),
+      next: curve.available ? 'node v1/cli.mjs report --batches ... --human-curve ' + files[0] : undefined });
     return 0;
   }
   if (command === 'export') {

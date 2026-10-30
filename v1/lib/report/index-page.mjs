@@ -3,6 +3,7 @@ import { UNNAMED_SET, UNKNOWN_SET } from './collect.mjs';
 import { intervalText, attemptShareText, pText, allPairsNote, INCOMPLETE_REASONS, REAL_TIER_MIN_OBJECTS, VARIANT_ORDER, CONFLICT_KINDS } from './aggregate.mjs';
 import { esc, num, percent, statCell, medianCell, sdCell, slug, fractionLabel, page, NOT_EVALUATED } from './html.mjs';
 import { timeSection } from './time-chart.mjs';
+import { humanSection, humanHead, humanCell, humanLegend, hasHuman } from './human-chart.mjs';
 
 // index.html: per task set the two ladders, the leaderboard, the pairwise
 // comparison, where the noise is, the breakdowns and the task index; then
@@ -147,13 +148,13 @@ const correctionLine = correction => correction.comparisons
     (correction.incomplete ? '; ' + correction.incomplete + ' incomplete, in m with p = 1' : '') + ')' : 'no pair';
 
 function pairwiseSection(set) {
-  const pairs = set.pairwise.pairs;
+  const pairs = set.pairwise.pairs, human = hasHuman(set);
   if (!pairs.length) return '<p class="muted">Fewer than two ranked configurations in this set; nothing to compare.</p>';
   const tableOf = list => '<div class="scroll"><table><thead><tr><th>A</th><th>B</th><th class="num" title="objects with at least one task run by both">Objects</th>' +
     '<th class="num" title="mean over objects of (A - B); per object, attempts are averaged within a task and tasks within the object">A &minus; B</th>' +
     '<th class="num" title="95% percentile bootstrap over objects; below it the Student-t interval">95% interval<small>bootstrap / t</small></th><th class="num" title="share of bootstrap resamples in which A&rsquo;s mean is higher; not a p-value">A ahead</th>' +
     '<th class="num" title="objects on which A scored higher / the same / lower">Won / tied / lost</th><th>Verdict<small>uncorrected</small></th>' + holmHead(set.pairwise.correction) +
-    '</tr></thead><tbody>' + list.map(row).join('\n') + '</tbody></table></div>';
+    (human ? humanHead : '') + '</tr></thead><tbody>' + list.map(row).join('\n') + '</tbody></table></div>';
   const row = pair => {
     return '<tr><td>' + esc(pair.a) + '</td><td>' + esc(pair.b) + '</td>' +
       '<td class="num">' + pair.objects + '<small>' + pair.tasks + ' tasks' + (pair.unpaired_objects ? ' · ' + pair.unpaired_objects + ' obj. unpaired' : '') +
@@ -161,7 +162,7 @@ function pairwiseSection(set) {
       '<td class="num' + (pair.low_evidence ? ' low' : '') + '"><strong>' + num(pair.mean_difference, 1, { signed: true }) + '</strong>' + (pair.low_evidence ? '<span class="dagger">&dagger;</span>' : '') + '</td>' +
       intervalCell(pair) +
       '<td class="num">' + (pair.share_a_higher === null ? NOT_EVALUATED : percent(pair.share_a_higher, pair.share_a_higher > 0.99 && pair.share_a_higher < 1 ? 2 : 0)) + '</td>' +
-      '<td class="num">' + pair.won + ' / ' + pair.tied + ' / ' + pair.lost + '</td>' + verdictCell(pair) + holmCell(pair) + '</tr>';
+      '<td class="num">' + pair.won + ' / ' + pair.tied + ' / ' + pair.lost + '</td>' + verdictCell(pair) + holmCell(pair) + (human ? humanCell(pair) : '') + '</tr>';
   };
   const formal = pairs.filter(pair => !pair.reference), reference = pairs.filter(pair => pair.reference);
   const table = (formal.length ? tableOf(formal) : '<p class="muted">Fewer than two formal configurations in this set.</p>') + (reference.length
@@ -173,7 +174,7 @@ function pairwiseSection(set) {
     '&ldquo;A ahead&rdquo; is the share of resamples with a positive mean difference, a description of this sample, not a probability that A is better. ' +
     (set.pairwise.multiple_comparisons ? esc(set.pairwise.multiple_comparisons) + ' ' : '') +
     'Both a bootstrap and a Student-t interval are given: the bootstrap runs narrow with few objects (on synthetic data it covered the true difference 84% of the time with 5 objects, 93% with 24), ' +
-    'so a pair counts as separated only when both exclude zero and as unsettled when they disagree. ' + HOLM_LEGEND + '</p>';
+    'so a pair counts as separated only when both exclude zero and as unsettled when they disagree. ' + HOLM_LEGEND + humanLegend(set) + '</p>';
 }
 
 const HOLM_LEGEND = '<strong>Holm</strong>: the same verdict corrected for the number of comparisons. The pairs of a table form one family; their two-sided paired t ' +
@@ -187,16 +188,16 @@ const HOLM_LEGEND = '<strong>Holm</strong>: the same verdict corrected for the n
 
 // A ladder's own pairs: the leaderboard's pairwise rows restricted to it, with
 // Holm over the ladder's pairs. `effort` rows are top minus default.
-function ladderPairs(rows, correction, { effort = false, note = () => '' } = {}) {
+function ladderPairs(rows, correction, { effort = false, note = () => '', human = false } = {}) {
   if (!rows.length) return '';
   const name = pair => effort ? '' : '<td>' + esc(pair.a) + '</td><td>' + esc(pair.b) + '</td>';
   return '<div class="scroll"><table><thead><tr>' + (effort ? '<th>System</th><th>Model</th><th>Default</th><th>Top</th>' : '<th>A</th><th>B</th>') +
     '<th class="num">Objects</th><th class="num">' + (effort ? 'Top &minus; default' : 'A &minus; B') + '</th><th class="num">95% interval<small>bootstrap / t</small></th>' +
-    '<th class="num">Won / tied / lost</th><th>Verdict<small>uncorrected</small></th>' + holmHead(correction) + '</tr></thead><tbody>' +
+    '<th class="num">Won / tied / lost</th><th>Verdict<small>uncorrected</small></th>' + holmHead(correction) + (human ? humanHead : '') + '</tr></thead><tbody>' +
     rows.map(pair => '<tr>' + (effort ? '<td>' + esc(pair.system) + '</td><td>' + esc(pair.model) + '</td><td>' + (pair.default_effort === null ? NOT_EVALUATED : esc(pair.default_effort)) +
       '</td><td>' + esc(pair.top_effort) + '</td>' : name(pair)) + '<td class="num">' + pair.objects + '</td><td class="num' + (pair.low_evidence ? ' low' : '') + '"><strong>' +
       num(pair.mean_difference, 1, { signed: true }) + '</strong></td>' + intervalCell(pair) + '<td class="num">' + pair.won + ' / ' + pair.tied + ' / ' + pair.lost + '</td>' +
-      verdictCell(pair) + holmCell(pair, note(pair)) + '</tr>').join('\n') + '</tbody></table></div>';
+      verdictCell(pair) + holmCell(pair, note(pair)) + (human ? humanCell(pair) : '') + '</tr>').join('\n') + '</tbody></table></div>';
 }
 
 const sentence = text => text ? text[0].toUpperCase() + text.slice(1) : '';
@@ -213,7 +214,7 @@ function laddersSection(board, set) {
     const adjacent = entries.filter((entry, index) => ranks.get(entry.key) !== null && index + 1 < entries.length && ranks.get(entries[index + 1].key) !== null).length;
     const count = ladder.pairwise.pairs.length;
     const all = count > 1 || count > adjacent ? '<details class="more"' + (count > adjacent && count === 1 ? ' open' : '') + '><summary>All ' + plural(count, 'pair') +
-      ' of this ladder</summary>' + ladderPairs(ladder.pairwise.pairs, ladder.pairwise.correction, { note }) + '</details>' : '';
+      ' of this ladder</summary>' + ladderPairs(ladder.pairwise.pairs, ladder.pairwise.correction, { note, human: hasHuman(set) }) + '</details>' : '';
     if (!entries.length) {
       return '<h4>' + esc(ladder.label) + (count ? ' <small>' + esc(correctionLine(ladder.pairwise.correction)) + '</small>' : '') + '</h4>' +
         '<p class="muted">No configuration of this set is on this ladder with a counted attempt.</p>' + missing + all;
@@ -236,7 +237,7 @@ function laddersSection(board, set) {
       table + missing + all;
   });
   const effort = set.effort.pairs.length ? '<h4>Effort: top &minus; default, same client and model <small>' + esc(correctionLine(set.effort.correction)) + '</small></h4>' +
-    ladderPairs(set.effort.pairs, set.effort.correction, { effort: true, note }) : '';
+    ladderPairs(set.effort.pairs, set.effort.correction, { effort: true, note, human: hasHuman(set) }) : '';
   const notes = set.ladder_notes?.length ? '<ul>' + set.ladder_notes.map(note => '<li>' + esc(note) + '</li>').join('') + '</ul>' : '';
   return parts.join('\n') + effort + '<p class="legend">Every row is a system: client, model and effort together. Effort moves a model about as much as the gap between ' +
     'models, so a model ladder compares each client at the same footing: its default effort, or the highest effort the round asked it for. ' + esc(sentence(set.ladder_rule)) + '.' +
@@ -534,6 +535,7 @@ The <code>dev</code> set&rsquo;s seeds are public and its objects were used to d
 a private test set built after the scorer is frozen gives test results. ${sets}</p></div>
 ${board.sets.map(set => setSection(board, set)).join('\n')}
 ${board.sets.length ? '' : '<p class="muted">No attempts.</p>'}
+${humanSection(board)}
 <h2>Provenance</h2>
 ${provenanceTable(board)}
 ${excluded}

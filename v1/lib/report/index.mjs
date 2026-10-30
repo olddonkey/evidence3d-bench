@@ -5,6 +5,7 @@ export { aggregate, buildLeaderboard, conflictShare, conflictKind, cellKey, comp
 export { parseRoster, readRoster, rosterPath, inferLadders, rosterProvenance, ROSTER_SCHEMA, MISSING_SHARE_LIMIT, LADDERS, EFFORT_ORDER, CLIENT_DEFAULT_EFFORT } from './roster.mjs';
 export { writeReport, pickRepresentatives, objectFrame, REPORT_VIEWS, REPRESENTATIVES } from './write.mjs';
 export { summaryMarkdown } from './markdown.mjs';
+export { readHumanCurve, parseHumanCurve, humanCurveProvenance, panelWinRate, humanEligible, humanApplies, flipHuman, HUMAN_SAMPLES, HUMAN_REASONS } from './human.mjs';
 export { collectRuns, normaliseUsage, manifestProvenance, scorerIdentity, scorerVersion, DEFAULT_EXCLUDED_STATUSES, UNNAMED_SET, UNKNOWN_SET,
   UNKNOWN_ARCHETYPE } from './collect.mjs';
 export { bootstrapMean, pairedBootstrap, tInterval, tTestP, holmAdjust, studentQuantile, chiSquareQuantile, incompleteGamma, sdRange, pooledSD, detectableDifference,
