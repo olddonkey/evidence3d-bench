@@ -10,11 +10,11 @@ import { captureProcess, childEnvironment, commandOf, killTree, startTimeOf } fr
 import { toolSurfaceProblems, readJSONLines } from './events.mjs';
 import { buildPrompt, PROMPT_VERSION } from './prompt.mjs';
 import { runPreflight } from './preflight.mjs';
-import { classifyStatus, scoreOf, STATUSES, NOT_SAMPLES } from './status.mjs';
+import { classifyStatus, generationStatus, scoreOf, scorerFailed, STATUSES, NOT_SAMPLES, SCORE_RETRIES } from './status.mjs';
 import { detectInfra, modelTurns, retryWatch, INFRA_REASONS } from './infra.mjs';
 import { createGate, holdUntil, HOLD_KIND, SCHEDULE } from './schedule.mjs';
 import { hostSleepCheck, hostSuspension, PMSET } from './hostsleep.mjs';
-import { DEFAULT_SNAPSHOT_SECONDS, SNAPSHOT_SCORE_RETRIES, scorerFailed, snapshotClock, readSnapshotIndex, snapshotJobs, scoredSnapshots } from './snapshots.mjs';
+import { DEFAULT_SNAPSHOT_SECONDS, snapshotClock, readSnapshotIndex, snapshotJobs, scoredSnapshots } from './snapshots.mjs';
 import {
   sha256, sha256File, objectHash, readJSON, writeJSON, inventory, inventoryHash, makeReadOnly,
   buildRuntime, buildWorkspace, workspaceHashes, readArtifact, STALE_TEMPORARY, writeJSONSync, writeHarnessFile, readHarnessFile,
@@ -512,24 +512,48 @@ async function freshScoreDir(scoreDir) {
   await mkdir(scoreDir, { recursive: true });
 }
 
-async function scoreArtifact({ manifest, task, dir, artifact, deps, control, repoRoot }) {
-  const paths = layout(manifest.data_root), drift = await scoringDrift({ manifest, task, deps, repoRoot });
+// Scores the final artifact in a worker process (score-worker.mjs), from the
+// copy stored as score/submission.glb. When the scorer fails on it (the worker
+// crashes or times out, writes no report, or the report is the scorer's own
+// failure, see scorerFailed) it is scored again from that same file, up to
+// `retries` times (SCORE_RETRIES; nothing is generated again); the failed
+// tries are kept as report.try-<k>.json and worker.retry-<k>.*.log. Returns
+// { report, path, tries } once the scorer judged the file (valid or not), or
+// { error, tries } with the last failure (and its report, if it wrote one);
+// { aborted } when the runner was stopped, { frozen } when the scorer or what
+// it reads changed: then nothing is recorded and a later run scores again.
+async function scoreArtifact({ manifest, task, dir, artifact, deps, control, repoRoot, retries = SCORE_RETRIES, log = () => {} }) {
+  const paths = layout(manifest.data_root);
+  let drift = await scoringDrift({ manifest, task, deps, repoRoot });
   if (drift.length) return { frozen: drift };
-  const scoreDir = join(dir, 'score');
+  const scoreDir = join(dir, 'score'), path = join(scoreDir, 'report.json');
   await freshScoreDir(scoreDir);
   const submission = join(scoreDir, 'submission.glb');
   await writeFile(submission, artifact.data);
   const job = join(scoreDir, 'job.json');
   await writeJSON(job, { module: scorerModulePath(deps), glb: submission, taskDir: paths.task(task.id), truthDir: paths.truth(task.id),
     dataRoot: manifest.data_root, outDir: scoreDir });
-  const run = await captureProcess(process.execPath, [join(HERE, 'score-worker.mjs'), job], { cwd: scoreDir, seconds: deps.scoreSeconds ?? 1800,
-    env: childEnvironment(), stdoutPath: join(scoreDir, 'worker.stdout.log'), stderrPath: join(scoreDir, 'worker.stderr.log'), signal: control.signal,
-    onSpawn: pid => { control.pids.set(scoreDir, pid); writeJSONSync(join(scoreDir, 'worker.json'), { pid, started: startTimeOf(pid) }); } });
-  control.pids.delete(scoreDir);
-  if (run.aborted) return { aborted: true };
-  if (run.exit_code !== 0) return { error: 'scorer failed (exit ' + run.exit_code + (run.timed_out ? ', timed out' : '') + '): ' + run.stderr.trim().split('\n').slice(-3).join(' | ') };
-  try { return { report: await readJSON(join(scoreDir, 'report.json')), path: join(scoreDir, 'report.json') }; }
-  catch (error) { return { error: 'scorer wrote no report: ' + error.message }; }
+  for (let tries = 1; ; tries++) {
+    const suffix = tries > 1 ? '.retry-' + (tries - 1) : '';
+    const run = await captureProcess(process.execPath, [join(HERE, 'score-worker.mjs'), job], { cwd: scoreDir, seconds: deps.scoreSeconds ?? 1800,
+      env: childEnvironment(), stdoutPath: join(scoreDir, 'worker' + suffix + '.stdout.log'), stderrPath: join(scoreDir, 'worker' + suffix + '.stderr.log'), signal: control.signal,
+      onSpawn: pid => { control.pids.set(scoreDir, pid); writeJSONSync(join(scoreDir, 'worker.json'), { pid, started: startTimeOf(pid) }); } });
+    control.pids.delete(scoreDir);
+    if (run.aborted) return { aborted: true };
+    let report = null, failure;
+    if (run.exit_code !== 0) failure = 'scorer failed (exit ' + run.exit_code + (run.timed_out ? ', timed out' : '') + '): ' + run.stderr.trim().split('\n').slice(-3).join(' | ');
+    else {
+      try { report = await readJSON(path); } catch (error) { failure = 'scorer wrote no report: ' + error.message; }
+      if (report && !scorerFailed(report)) return { report, path, tries };
+      if (report) failure = report.error || 'the scorer reported that it failed';
+    }
+    if (tries > retries) return { error: failure, tries, ...(report ? { report, path } : {}) };
+    // The failed try's report is kept beside the next one, which starts clean.
+    await rename(path, join(scoreDir, 'report.try-' + tries + '.json')).catch(() => {});
+    log({ event: 'scoring_again', task_id: task.id, tries: tries + 1, error: failure });
+    drift = await scoringDrift({ manifest, task, deps, repoRoot });
+    if (drift.length) return { frozen: drift };
+  }
 }
 
 // A setTimeout longer than 2^31 - 1 ms fires at once.
@@ -541,7 +565,7 @@ const MAX_TIMER_SECONDS = Math.floor((2 ** 31 - 1) / 1000);
 // not scored again. A snapshot the scorer failed on (it threw or reported
 // its own failure, or the worker died or timed out before reaching it) is
 // scored again, from the same stored file, each in a worker of its own, up to
-// SNAPSHOT_SCORE_RETRIES times; one that still fails is a score_error, which
+// SCORE_RETRIES times; one that still fails is a score_error, which
 // the report leaves out of that tick as missing.
 // Returns the records as result.json carries them (scoredSnapshots), or
 // { aborted } / { frozen } like scoreArtifact: then nothing is recorded and a
@@ -584,7 +608,7 @@ async function scoreSnapshots({ manifest, task, dir, batchDir, records, final, d
     // failed snapshot a worker of its own: a file that crashes or hangs the
     // scorer every time cannot keep the snapshots after it from being scored.
     let pending = jobs;
-    for (let round = 0; pending.length && round <= SNAPSHOT_SCORE_RETRIES; round++) {
+    for (let round = 0; pending.length && round <= SCORE_RETRIES; round++) {
       const failed = [];
       for (const batch of round ? pending.map(item => [item]) : [pending]) {
         // The failed try's report is kept beside the next one (t0300.try-1.json, ...).
@@ -865,7 +889,7 @@ async function runAttempt({ batchDir, manifest, task, attempt, adapter, deps, lo
   // A broken boundary is never excused: the infrastructure finding is kept
   // for diagnosis, but the attempt stays a failure.
   const infra = integrityProblems.length ? null : infraFound;
-  let report = null, reportPath = null, scoreError = null, snapshotResults = null;
+  let report = null, reportPath = null, scoreError = null, scoreTries = null, snapshotResults = null;
   if (!infra) {
     if (artifact.present && artifact.problem) {
       report = refusalReport(task, manifest, artifact.problem);
@@ -873,13 +897,17 @@ async function runAttempt({ batchDir, manifest, task, attempt, adapter, deps, lo
       await writeJSON(reportPath, report);
     } else if (artifact.present) {
       log({ event: 'scoring', task_id: task.id, attempt: attempt.n, recovered: Boolean(recovered) });
-      const scored = await scoreArtifact({ manifest, task, dir, artifact, deps, control, repoRoot });
+      // A broken boundary scores 0 whatever the scorer says: the file is
+      // scored once, for diagnosis, and not again when the scorer fails.
+      const scored = await scoreArtifact({ manifest, task, dir, artifact, deps, control, repoRoot, retries: integrityProblems.length ? 0 : SCORE_RETRIES, log });
       // Scoring cut short by the operator, or refused because the scorer or
       // the truth changed: process.json is on disk, so a later run scores
       // this attempt; nothing is recorded now.
       if (scored.aborted) return { result: null, skipped: false, interrupted: true };
       if (scored.frozen) return { result: null, skipped: false, interrupted: true, frozen: scored.frozen };
-      if (scored.error) scoreError = scored.error; else { report = scored.report; reportPath = scored.path; }
+      if (scored.error) scoreError = scored.error;
+      if (scored.report) { report = scored.report; reportPath = scored.path; }
+      scoreTries = scored.tries;
     }
   }
   if (snapshotRecords) {
@@ -898,11 +926,15 @@ async function runAttempt({ batchDir, manifest, task, attempt, adapter, deps, lo
   const status = classifyStatus({ run, summary, integrityProblems, infra, artifact, report, scoreError });
   // A broken boundary, or a run the runner could not supervise to the end,
   // voids the attempt whatever it produced; the report is kept for diagnosis.
-  const score = infra ? null : integrityProblems.length ? 0 : scoreOf(report);
+  // A file the scorer failed on has no score: it is owed a re-score.
+  const score = infra || status === 'score_error' ? null : integrityProblems.length ? 0 : scoreOf(report);
   const outcome = await finish({
     status, ...common, score, report: reportPath ? relative(batchDir, reportPath) : null,
     extra: { ...diagnostics, infra, infra_ignored: infraFound && !infra ? infraFound : undefined,
-      report_valid: report ? report.valid !== false : null, score_error: scoreError,
+      report_valid: report && !scoreError ? report.valid !== false : null, score_error: scoreError,
+      ...(scoreTries > 1 ? { score_tries: scoreTries } : {}),
+      // What the generation alone said, for the re-score that ends the score_error.
+      ...(status === 'score_error' ? { generation_status: generationStatus({ run, summary, integrityProblems }) } : {}),
       ...(snapshotSeconds ? { snapshot_interval_seconds: snapshotSeconds, snapshots: snapshotResults ?? [] } : {}) },
   });
   log({ event: 'finished', task_id: task.id, attempt: attempt.n, status, reason: infra?.reason, score: outcome.result.score, wall_seconds: outcome.result.wall_seconds });

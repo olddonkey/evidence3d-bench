@@ -14,7 +14,8 @@ import { sampleModel } from '../fixtures/sample-model.mjs';
 import { objectHash } from '../../lib/io.mjs';
 import { parseCodexEvents, parseClaudeEvents, toolSurfaceProblems } from '../lib/runner/events.mjs';
 import { captureProcess, childEnvironment, assertCleanEnvironment, commandOf, killTree, startTimeOf } from '../lib/runner/process.mjs';
-import { classifyStatus, scoreOf } from '../lib/runner/status.mjs';
+import { classifyStatus, scoreOf, rescoredStatus, scoreAgain } from '../lib/runner/status.mjs';
+import { rescoreAttempt } from '../lib/runner/rescore.mjs';
 import { detectInfra, parseResetTime, INFRA_REASONS } from '../lib/runner/infra.mjs';
 import { buildPrompt, TOOL_DESCRIPTIONS } from '../lib/runner/prompt.mjs';
 import { readArtifact } from '../lib/runner/workspace.mjs';
@@ -65,7 +66,7 @@ const fakeInstallTools = async destination => {
 // A fake CLI: one Node script per test with its behaviour baked in, because the
 // runner scrubs the environment and a fake cannot be steered through it.
 //   events      JSON lines printed on stdout
-//   artifact    'glb' | 'slow' | 'invalid' | 'throw' | 'symlink-truth' | 'hardlink' | null
+//   artifact    'glb' | 'slow' | 'invalid' | 'throw' | 'own' | 'flaky' | 'crash' | 'symlink-truth' | 'hardlink' | null
 //   sleep       seconds to wait after printing (simulates a long session)
 //   exit        exit code
 //   grandchild  a marker string: a detached grandchild carrying it in its argv
@@ -113,6 +114,9 @@ if (behaviour.artifact === 'glb') fs.copyFileSync(${JSON.stringify(join(dir, 'sa
 if (behaviour.artifact === 'slow') fs.writeFileSync(out, 'SLOWGLB');
 if (behaviour.artifact === 'invalid') fs.writeFileSync(out, 'INVALID');
 if (behaviour.artifact === 'throw') fs.writeFileSync(out, 'THROW');
+if (behaviour.artifact === 'own') fs.writeFileSync(out, 'OWNFAIL');
+if (behaviour.artifact === 'flaky') fs.writeFileSync(out, 'FLAKY');
+if (behaviour.artifact === 'crash') fs.writeFileSync(out, 'CRASH');
 if (behaviour.artifact === 'symlink-truth') fs.symlinkSync(behaviour.truthPath, out);
 if (behaviour.artifact === 'hardlink') fs.linkSync(behaviour.truthPath, out);
 if (behaviour.notes) fs.writeFileSync(path.join(ws, 'output', 'notes.md'), 'notes');
@@ -129,12 +133,13 @@ setTimeout(() => process.exit(behaviour.exit ?? 0), (behaviour.sleep ?? 0) * 100
 
 // The same fake as a /bin/sh script, for tests whose wall clock is short: a
 // shell starts in milliseconds under any load, where Node can take seconds,
-// so what it prints is there before the deadline. Supports artifact 'glb',
-// events, sleep and exit, and repeat: { event, seconds } printed forever.
+// so what it prints is there before the deadline. Supports artifact 'glb' and
+// 'throw', events, sleep and exit, and repeat: { event, seconds } printed forever.
 async function fakeShellCLI(dir, name, behaviour) {
   const path = join(dir, name), quote = text => "'" + String(text).replaceAll("'", "'\\''") + "'";
   const lines = ['#!/bin/sh', 'ws=$PWD', 'while [ $# -gt 0 ]; do if [ "$1" = "-C" ]; then ws=$2; fi; shift; done', 'cat > /dev/null'];
   if (behaviour.artifact === 'glb') lines.push('cp ' + quote(join(dir, 'sample.glb')) + ' "$ws/output/model.glb"');
+  if (behaviour.artifact === 'throw') lines.push('printf THROW > "$ws/output/model.glb"');
   for (const event of behaviour.events ?? []) lines.push('printf "%s\\n" ' + quote(JSON.stringify(event)));
   if (behaviour.repeat) lines.push('while :; do printf "%s\\n" ' + quote(JSON.stringify(behaviour.repeat.event)) + '; sleep ' + behaviour.repeat.seconds + '; done');
   lines.push('sleep ' + (behaviour.sleep ?? 0), 'exit ' + (behaviour.exit ?? 0));
@@ -145,6 +150,9 @@ async function fakeShellCLI(dir, name, behaviour) {
 
 // slowFlag: while this file exists, the next scoring deletes it, creates
 // <slowFlag>.entered and then takes 30 s, long enough to be interrupted.
+// THROW throws, CRASH takes the worker down, OWNFAIL is a report of the
+// scorer's own failure (as v1/lib/score writes one), FLAKY throws the first
+// time only, INVALID is an invalid model.
 const fakeScorer = (callLog, slowFlag) => `import { appendFileSync, existsSync, unlinkSync, writeFileSync } from 'node:fs';
 export async function scoreSubmission({ glb, taskDir, truthDir, outDir }) {
   appendFileSync(${JSON.stringify(callLog)}, 'x');
@@ -154,6 +162,9 @@ export async function scoreSubmission({ glb, taskDir, truthDir, outDir }) {
     await new Promise(resolve => setTimeout(resolve, 30000));
   }
   if (text === 'THROW') throw new Error('scorer exploded');
+  if (text === 'CRASH') process.exit(3);
+  if (text === 'FLAKY' && !existsSync(${JSON.stringify(callLog + '.flaky')})) { writeFileSync(${JSON.stringify(callLog + '.flaky')}, ''); throw new Error('scorer hiccup'); }
+  if (text === 'OWNFAIL') return { schema: 'e3d-report-v1', valid: false, scorer_failed: true, error: 'Scorer error: internal', score: 0 };
   if (text === 'INVALID') return { schema: 'e3d-report-v1', valid: false, error: 'Invalid GLB 2.0 header', score: 0 };
   return { schema: 'e3d-report-v1', valid: true, error: null, score: 71.5, bytes: glb.length, taskDir, truthDir, outDir };
 }
@@ -333,7 +344,7 @@ test('the child environment never carries API keys or other credentials', () => 
 
 // ---------------------------------------------------------------- status
 
-test('status classification follows the precedence infra > timeout > failed > missing > invalid > score error > completed', () => {
+test('status classification follows the precedence infra > score error > timeout > failed > missing > invalid > completed', () => {
   const ok = { exit_code: 0, signal: null, timed_out: false }, done = { completed: true };
   const artifact = { present: true, problem: null }, report = { valid: true, score: 50 }, infra = { reason: 'usage_limit' };
   assert.equal(classifyStatus({ run: { ...ok, timed_out: true }, summary: done, artifact, report, infra }), 'infra_error');
@@ -350,6 +361,20 @@ test('status classification follows the precedence infra > timeout > failed > mi
   assert.equal(classifyStatus({ run: ok, summary: done, artifact, report: { valid: false, score: 0 } }), 'invalid_artifact');
   assert.equal(classifyStatus({ run: ok, summary: done, artifact, scoreError: 'boom' }), 'score_error');
   assert.equal(classifyStatus({ run: ok, summary: done, artifact, report }), 'completed');
+  // The scorer failing on a file is no sample whatever the generation did:
+  // it crashed (scoreError, no report) or reported its own failure.
+  const failed = { valid: false, scorer_failed: true, error: 'Scorer error: internal', score: 0 }, unflagged = { valid: false, error: 'Scorer error: internal', score: 0 };
+  for (const [label, outcome] of [['crash', { scoreError: 'scorer failed (exit 1)' }], ['flagged', { report: failed, scoreError: 'Scorer error: internal' }], ['unflagged', { report: unflagged }], ['no report', {}]]) {
+    assert.equal(classifyStatus({ run: ok, summary: done, artifact, ...outcome }), 'score_error', label);
+    assert.equal(classifyStatus({ run: { ...ok, timed_out: true }, summary: done, artifact, ...outcome }), 'score_error', label + ' after a timeout');
+    assert.equal(classifyStatus({ run: { ...ok, exit_code: 1 }, summary: done, artifact, ...outcome }), 'score_error', label + ' after a failed session');
+    // A broken boundary is 0 whatever the scorer did; infra_error still comes first.
+    assert.equal(classifyStatus({ run: ok, summary: done, artifact, ...outcome, integrityProblems: ['input/ changed'] }), 'generation_failed', label + ' with a broken boundary');
+    assert.equal(classifyStatus({ run: ok, summary: done, artifact, ...outcome, infra }), 'infra_error', label + ' in an infrastructure error');
+  }
+  // No scorer verdict is owed for an artifact that is absent or was refused.
+  assert.equal(classifyStatus({ run: { ...ok, timed_out: true }, summary: done, artifact: { present: false } }), 'timeout');
+  assert.equal(classifyStatus({ run: ok, summary: done, artifact: { present: true, problem: 'artifact is a symlink' }, report: { valid: false, score: 0 } }), 'invalid_artifact');
   assert.equal(scoreOf(report), 50); assert.equal(scoreOf({ valid: false, score: 10 }), 0); assert.equal(scoreOf(null), 0);
 });
 
@@ -687,7 +712,7 @@ test('a timed-out attempt is killed at the budget and its status is timeout', as
   assert.equal(result.score, 71.5, 'an artifact left at the deadline is still scored');
 });
 
-test('missing, invalid, unscorable and failed attempts get their own status and a zero score', async t => {
+test('missing, invalid, unscorable and failed attempts get their own status; a failure scores 0, a scorer failure has no score', async t => {
   const cases = [
     [{ artifact: null }, 'missing_artifact', null],
     [{ artifact: 'invalid' }, 'invalid_artifact', 'house-a-t1/a1/score/report.json'],
@@ -703,11 +728,177 @@ test('missing, invalid, unscorable and failed attempts get their own status and 
     const result = await readJSON(join(batchDir, 'house-a-t1', 'a1', 'result.json'));
     assert.equal(result.status, status, JSON.stringify(behaviour));
     assert.equal(result.report, report, status);
-    if (status !== 'generation_failed') assert.equal(result.score, 0, status);
+    if (status !== 'generation_failed') assert.equal(result.score, status === 'score_error' ? null : 0, status);
     const summary = await summarize(batchDir);
     // A scorer failure is the scorer's, not the model's: owed a re-score, not averaged.
     assert.deepEqual([summary.samples, summary.complete], status === 'score_error' ? [0, false] : [1, true], status);
   }
+});
+
+test('a final file the scorer fails on is scored again twice from the stored copy, then a score_error with no score; one it fails on once is scored', async t => {
+  const calls = dir => readFile(join(dir, 'scorer-calls.log'), 'utf8').then(text => text.length, () => 0);
+  // The scorer's own report of its failure, as v1/lib/score writes one: not an invalid model.
+  {
+    const { dir, batchDir, deps } = await fakeBatch(t, { behaviour: { artifact: 'own' } });
+    await passPreflight(batchDir);
+    const events = [];
+    await execute({ batchDir, deps, log: event => events.push(event) });
+    const attemptDir = join(batchDir, 'house-a-t1', 'a1'), result = await readJSON(join(attemptDir, 'result.json'));
+    assert.deepEqual([result.status, result.score, result.report_valid, result.score_tries, result.generation_status], ['score_error', null, null, 3, null]);
+    assert.equal(result.score_error, 'Scorer error: internal');
+    assert.equal(result.report, 'house-a-t1/a1/score/report.json', 'the last failed report is kept as the report');
+    assert.equal(await calls(dir), 3);
+    for (const name of ['report.json', 'report.try-1.json', 'report.try-2.json']) assert.equal((await readJSON(join(attemptDir, 'score', name))).scorer_failed, true, name);
+    for (const name of ['worker.stderr.log', 'worker.retry-1.stderr.log', 'worker.retry-2.stderr.log']) assert.ok(await exists(join(attemptDir, 'score', name)), name);
+    assert.deepEqual(events.filter(event => event.event === 'scoring_again').map(event => event.tries), [2, 3]);
+    const summary = await summarize(batchDir);
+    assert.deepEqual([summary.samples, summary.complete, summary.counts.score_error], [0, false, 1]);
+  }
+  // A worker that crashes every time, likewise.
+  {
+    const { dir, batchDir, deps } = await fakeBatch(t, { behaviour: { artifact: 'crash' } });
+    await passPreflight(batchDir);
+    await execute({ batchDir, deps });
+    const result = await readJSON(join(batchDir, 'house-a-t1', 'a1', 'result.json'));
+    assert.deepEqual([result.status, result.score, result.report, result.score_tries], ['score_error', null, null, 3]);
+    assert.match(result.score_error, /exit 3/);
+    assert.equal(await calls(dir), 3);
+  }
+  // One failure, then the scorer judges the file: the second try counts.
+  {
+    const { dir, batchDir, deps } = await fakeBatch(t, { behaviour: { artifact: 'flaky' } });
+    await passPreflight(batchDir);
+    await execute({ batchDir, deps });
+    const result = await readJSON(join(batchDir, 'house-a-t1', 'a1', 'result.json'));
+    assert.deepEqual([result.status, result.score, result.report_valid, result.score_error, result.score_tries, 'generation_status' in result], ['completed', 71.5, true, null, 2, false]);
+    assert.equal(await calls(dir), 2);
+  }
+});
+
+test('the scorer failing on the final file makes a score_error whatever the generation did; a broken boundary is still 0, scored once', async t => {
+  // A session that timed out after writing its model.
+  {
+    const { dir, batchDir, deps } = await fakeBatch(t, { wall: 2, shell: true, behaviour: { artifact: 'throw', sleep: 60 } });
+    await passPreflight(batchDir);
+    await execute({ batchDir, deps });
+    const result = await readJSON(join(batchDir, 'house-a-t1', 'a1', 'result.json'));
+    assert.deepEqual([result.status, result.timed_out, result.score, result.generation_status, result.score_tries], ['score_error', true, null, 'timeout', 3]);
+    assert.equal((await readFile(join(dir, 'scorer-calls.log'), 'utf8')).length, 3);
+  }
+  // A session that failed, with a model left behind.
+  {
+    const { batchDir, deps } = await fakeBatch(t, { behaviour: { artifact: 'throw', exit: 3 } });
+    await passPreflight(batchDir);
+    await execute({ batchDir, deps });
+    const result = await readJSON(join(batchDir, 'house-a-t1', 'a1', 'result.json'));
+    assert.deepEqual([result.status, result.score, result.generation_status], ['score_error', null, 'generation_failed']);
+  }
+  // A broken boundary: 0, the file scored once for diagnosis, no retries.
+  {
+    const { dir, batchDir, deps } = await fakeBatch(t, { behaviour: { artifact: 'throw', tamperInput: true } });
+    await passPreflight(batchDir);
+    await execute({ batchDir, deps });
+    const result = await readJSON(join(batchDir, 'house-a-t1', 'a1', 'result.json'));
+    assert.deepEqual([result.status, result.score, 'generation_status' in result, 'score_tries' in result], ['generation_failed', 0, false, false]);
+    assert.match(result.score_error, /^scorer failed \(exit 1\)/);
+    assert.equal((await readFile(join(dir, 'scorer-calls.log'), 'utf8')).length, 1);
+  }
+});
+
+// ---------------------------------------------------------------- rescore
+
+// An attempt as the runner left it: a stored submission, its report, result.json.
+async function storedAttempt(t, result, report = { schema: 'e3d-report-v1', valid: true, score: 50 }) {
+  const dir = await scratch(t), batchDir = join(dir, 'batch'), attemptDir = join(batchDir, 'house-a-t1', 'a1');
+  await mkdir(join(attemptDir, 'score'), { recursive: true });
+  await writeFile(join(attemptDir, 'score', 'submission.glb'), 'GLB');
+  if (report) await writeFile(join(attemptDir, 'score', 'report.json'), JSON.stringify(report));
+  await writeFile(join(attemptDir, 'result.json'), JSON.stringify({ task_id: 'house-a-t1', attempt: 1, integrity_problems: [], report: report ? 'house-a-t1/a1/score/report.json' : null, ...result }));
+  return { batchDir, attemptDir, result: () => readJSON(join(attemptDir, 'result.json')) };
+}
+const REPORT = 'e3d-report-v1';
+const scorers = calls => ({
+  ok: async () => { calls.push('ok'); return { schema: REPORT, valid: true, error: null, score: 61 }; },
+  invalid: async () => { calls.push('invalid'); return { schema: REPORT, valid: false, error: 'Invalid GLB 2.0 header', score: 0 }; },
+  own: async () => { calls.push('own'); return { schema: REPORT, valid: false, scorer_failed: true, error: 'Scorer error: internal', score: 0 }; },
+  throws: async () => { calls.push('throws'); throw new Error('boom'); },
+});
+
+test('rescore: the scorer failing on every try makes a score_error with no score, a later rescore ends it; nothing else changes the generation\'s status', async t => {
+  const calls = [], score = scorers(calls);
+  // A completed attempt the new scorer fails on: scored 3 times, then no score.
+  const done = await storedAttempt(t, { status: 'completed', score: 50, report_valid: true, score_error: null });
+  const row = await rescoreAttempt({ batchDir: done.batchDir, attemptDir: done.attemptDir, score: score.own });
+  assert.deepEqual(calls.splice(0), ['own', 'own', 'own']);
+  assert.deepEqual([row.before, row.score, row.status, row.tries], [50, null, 'score_error', 3]);
+  let result = await done.result();
+  assert.deepEqual([result.status, result.score, result.report_valid, result.score_error, result.score_tries, result.generation_status, result.rescored.from_status],
+    ['score_error', null, null, 'Scorer error: internal', 3, null, 'completed']);
+  assert.equal((await readJSON(join(done.attemptDir, 'result.previous.json'))).score, 50);
+  assert.equal((await readJSON(join(done.attemptDir, 'score', 'report.previous.json'))).score, 50);
+  for (const name of ['report.json', 'report.try-1.json', 'report.try-2.json']) assert.equal((await readJSON(join(done.attemptDir, 'score', name))).scorer_failed, true, name);
+  // Scored again, it is completed again.
+  await rescoreAttempt({ batchDir: done.batchDir, attemptDir: done.attemptDir, score: score.ok });
+  assert.deepEqual(calls.splice(0), ['ok']);
+  result = await done.result();
+  assert.deepEqual([result.status, result.score, result.report_valid, result.score_error, 'score_tries' in result, 'generation_status' in result], ['completed', 61, true, null, false, false]);
+
+  // A timed-out attempt an older runner recorded at 0 because its scorer crashed (no report).
+  const late = await storedAttempt(t, { status: 'timeout', score: 0, report_valid: null, score_error: 'scorer failed (exit 1): boom' }, null);
+  await rescoreAttempt({ batchDir: late.batchDir, attemptDir: late.attemptDir, score: score.throws });
+  assert.deepEqual(calls.splice(0), ['throws', 'throws', 'throws']);
+  result = await late.result();
+  assert.deepEqual([result.status, result.score, result.report, result.score_error, result.generation_status], ['score_error', null, null, 'boom', 'timeout']);
+  assert.deepEqual(await readJSON(join(late.attemptDir, 'score', 'report.json')), { scorer_failed: true, error: 'boom' }, 'no report: the failure is written in its place');
+  await rescoreAttempt({ batchDir: late.batchDir, attemptDir: late.attemptDir, score: score.ok });
+  assert.deepEqual(calls.splice(0), ['ok']);
+  result = await late.result();
+  assert.deepEqual([result.status, result.score, result.report, result.score_error, 'generation_status' in result], ['timeout', 61, 'house-a-t1/a1/score/report.json', null, false]);
+
+  // A score_error an older runner recorded (it had no generation_status: it
+  // gave score_error to sessions that finished normally only), judged invalid now.
+  const old = await storedAttempt(t, { status: 'score_error', score: 0, score_error: 'scorer failed (exit 1)' }, null);
+  await rescoreAttempt({ batchDir: old.batchDir, attemptDir: old.attemptDir, score: score.invalid });
+  assert.deepEqual(calls.splice(0), ['invalid'], 'an invalid model is a verdict, not scored again');
+  result = await old.result();
+  assert.deepEqual([result.status, result.score, result.report_valid, result.score_error], ['invalid_artifact', 0, false, null]);
+
+  // A broken boundary stays at 0 whatever the scorer does, scored once.
+  const broken = await storedAttempt(t, { status: 'generation_failed', score: 0, integrity_problems: ['input/ changed during generation'] });
+  await rescoreAttempt({ batchDir: broken.batchDir, attemptDir: broken.attemptDir, score: score.own });
+  assert.deepEqual(calls.splice(0), ['own']);
+  result = await broken.result();
+  assert.deepEqual([result.status, result.score, 'generation_status' in result], ['generation_failed', 0, false]);
+  assert.equal(await exists(join(broken.attemptDir, 'score', 'report.try-1.json')), false);
+
+  // A task that cannot be loaded stops the rescore before anything is written.
+  const intact = await storedAttempt(t, { status: 'completed', score: 50 });
+  await assert.rejects(rescoreAttempt({ batchDir: intact.batchDir, attemptDir: intact.attemptDir, score: score.ok, ready: async () => { throw new Error('truth.json missing'); } }), /truth\.json missing/);
+  assert.deepEqual(calls, []);
+  assert.equal((await intact.result()).score, 50);
+  assert.equal(await exists(join(intact.attemptDir, 'score', 'report.previous.json')), false);
+});
+
+test('rescore follows the runner\'s rules: rescoredStatus and scoreAgain', async () => {
+  const report = { valid: true, score: 70 }, invalid = { valid: false, score: 0 };
+  assert.equal(rescoredStatus({ status: 'completed' }, { report, failed: true }), 'score_error');
+  assert.equal(rescoredStatus({ status: 'timeout' }, { report, failed: false }), 'timeout');
+  assert.equal(rescoredStatus({ status: 'invalid_artifact' }, { report, failed: false }), 'completed');
+  assert.equal(rescoredStatus({ status: 'completed' }, { report: invalid, failed: false }), 'invalid_artifact');
+  assert.equal(rescoredStatus({ status: 'score_error', generation_status: 'budget_exhausted' }, { report, failed: false }), 'budget_exhausted');
+  assert.equal(rescoredStatus({ status: 'score_error' }, { report: invalid, failed: false }), 'invalid_artifact');
+  assert.equal(rescoredStatus({ status: 'generation_failed', integrity_problems: ['x'] }, { report: null, failed: true }), 'generation_failed');
+  assert.equal(rescoredStatus({ status: 'infra_error' }, { report, failed: false }), 'infra_error');
+  // A failure is described even when the scorer gives no message; the failed tries are kept.
+  const kept = [];
+  const silent = await scoreAgain(async () => { throw new Error(); }, { keep: async (tries, failed) => kept.push([tries, failed.scorer_failed]) });
+  assert.deepEqual([silent.failed, silent.tries, silent.report, kept], [true, 3, null, [[1, true], [2, true]]]);
+  assert.ok(silent.failure);
+  const none = await scoreAgain(async () => null, { retries: 0 });
+  assert.deepEqual([none.failed, none.tries, none.failure], [true, 1, 'the scorer returned no report']);
+  let n = 0;
+  const second = await scoreAgain(async () => (++n === 1 ? { valid: false, error: 'Scorer error: x', score: 0 } : report));
+  assert.deepEqual([second.failed, second.tries, second.report], [false, 2, report]);
 });
 
 test('an artifact that links to the hidden truth is refused before the scorer sees it', async t => {

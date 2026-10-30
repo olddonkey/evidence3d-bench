@@ -39,11 +39,18 @@ colours are compared, and error pictures are drawn.
 
 ## Every number in the report
 
-**`valid`, `error`, `score`.** `score` = (`shape_score` + `detail.score`) / 2,
-or `shape_score` alone when no detail group could be scored. `valid: false`
-means the GLB broke the static-track contract, the task budget, or has no
-visible surface; `score` is then 0 and `error` says why. An error starting
-`Scorer error:` is a scorer bug, not a contestant fault.
+**`valid`, `error`, `score`, `scorer_failed`.** `score` = (`shape_score` +
+`detail.score`) / 2, or `shape_score` alone when no detail group could be
+scored. `valid: false` means the GLB broke the static-track contract, the task
+budget, or has no visible surface; `score` is then 0 and `error` says why.
+`scorer_failed: true` (present only then) means the scorer itself failed: it
+caught an internal error, the report has `valid: false`, `score` 0 and an error
+starting `Scorer error:`, and it is a scorer bug, not a contestant fault. Whoever
+runs the scorer must not count it as an invalid model: the runner scores the
+same file again, twice, and then records a `score_error` with no score
+(`v1/lib/runner/README.md`, Statuses). Reports from before the flag (scorer
+stamp `f36c91ed…` and older) carry only the `Scorer error:` prefix; the runner
+counts that as the scorer's failure too.
 
 **`scorer`** — `{ version, sha256 }`: which scorer wrote the report.
 `version` names the scoring definition (1.1.0 since these tolerances; reports
@@ -53,7 +60,9 @@ they import (the kernel and `lib/glb.mjs`, `lib/io.mjs`), computed once when
 the scorer is loaded (`version.mjs`). A report re-scored later carries the
 re-scoring code's stamp, so it can be told from one written at run time.
 Compare scores only between reports with the same `version`; equal `sha256`
-means exactly the same code (a comment edit changes it too).
+means exactly the same code (a comment edit changes it too). Adding
+`scorer_failed` changed the `sha256` and no number in any report, so the
+version stayed 1.1.0.
 
 **`shape_score`** — 100 × the mean F over the threshold rows marked
 `in_shape_score` (0.25 %, 0.5 % and 1 % of D; the list is
