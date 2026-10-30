@@ -248,6 +248,112 @@ report never infers one.
   with `--roster` they would list absent configurations and report gaps that
   are not gaps.
 
+## Regression check (`regression.mjs`)
+
+`docs/V1-ROUND4-PLAN.md` §3: two systems, Codex / gpt-6-astra / high and
+Claude Code / claude-opus-5-5 / high (`REGRESSION_SYSTEMS`), run again on the
+main tasks of `test-2026-10` (`t2`, `t4`, `c1`: 72 tasks on 24 objects), one
+attempt each on the frozen Round 4 stack, and compared with their Round 3
+rows (three attempts per task). It is a report of its own: the leaderboard
+merges every batch of one configuration, and here the two rounds of one
+configuration stay apart.
+
+```sh
+node v1/cli.mjs regression --baseline R3A,R3B --batches R4A,R4B --out .local/v1/reports/regression [--set test-2026-10] [--systems codex/gpt-6-astra/high,...] [--seed S]
+```
+
+```js
+import { regressionReport, compareRounds, regressionMarkdown } from './index.mjs';
+await regressionReport({ dataRoot, baseline, batches, outDir });  // writes regression.json (e3d-regression-v1) and regression.md
+compareRounds({ baseline: collectedEarlier, current: collectedLater }); // the same from two collectRuns results, nothing written
+```
+
+`--baseline` are the earlier round's batches (any configurations: only the
+regression systems' attempts on the set's main tasks are read), `--batches`
+this round's; a batch in both is refused.
+
+- **Owed tasks**: every task of the set in a main variant that either round
+  ran or planned, or that the set's build record (`sets/<set>.built.json`)
+  lists. The objects are those of every task of the set in any variant (an
+  object only `t1` reached still owes its main tasks) and those the set file
+  (`sets/<set>.json`) declares by id (`owed.declared_objects`; the ids only,
+  never the seeds); every object owes each main variant, one no batch has
+  under a placeholder id (`<object> c1 (no task in these batches)`), which
+  nothing can fill. A sample counts only on a task of the set: an attempt on
+  a task id another set reuses does not.
+- **Difference**, per object: this round's mean over the object's main tasks
+  minus the earlier round's over the same tasks (attempts averaged within a
+  task, as everywhere), on the tasks both rounds sampled. Failures count as 0,
+  integrity problems as 0, excluded statuses are not samples. Its 90 % and 95 %
+  paired Student-t intervals, its 90 % and 95 % paired bootstrap intervals over
+  objects (`REGRESSION_SAMPLES` = 10 000 resamples, both levels from the same
+  resamples, seed `<seed>/<set>/<configuration>/difference`, default seed
+  `e3d-regression`), the two-sided paired t p-value and the TOST p-value
+  (`tostP`, margin 2: below 0.05 exactly when the 90 % t interval lies inside
+  ±2). With fewer than 2 objects, or per-object differences that do not vary,
+  no interval is available (`intervals_available: false`, every interval
+  null): the plan's 区间不可用, which meets no threshold.
+- **Verdict** (`row.verdict`), first that applies:
+  1. `not_judged`, a data problem the report will not judge past
+     (`row.blockers`, `row.reason`): `unknown_inventory` (neither a build
+     record nor a set file listing the objects, or a set file that counts
+     more objects than any source shows: nothing establishes that the tasks
+     the batches have are the whole set), `unplaced_tasks` (tasks no truth.json
+     places that may belong to an object the set does not show: the build
+     record's tasks not placed in the set whose recorded object is not one
+     of the set's, `owed.unplaced`, and tasks the configuration ran or
+     planned whose truth.json is missing or unreadable, of a main variant, in
+     this set or an unknown one, on an object not one of the set's, by what
+     the batch's manifest froze for the task, else the score report;
+     `row.unplaced` lists both. Without it an object whose truth files are
+     all gone would drop out of both rounds and a smaller set be judged
+     complete. A lost truth.json on an object the set does show needs no
+     such check: the object owes every main variant, so the task is a gap),
+     `no_baseline` (no counted earlier
+     attempt), `baseline_incomplete` (an owed task without a counted earlier
+     sample: usually the wrong batches), `scorer_mismatch` (the reports of the
+     two rounds name more than one scorer version, an unstamped report
+     counting as its own; the runner's refusal report, written before any
+     scoring, names none and does not count; a different scorer hash under
+     one version is a note, not a mismatch; plan: if G1 moves the scorer to
+     1.2.0, both rounds are rescored), `mixed_stack` (this round's batches
+     with a counted sample of the system on a main task differ in Node version or binary hash, CLI version or binary,
+     runner source, prompt version, tool kit,
+     three.js runtime or protocol; a field recorded for some batches and not
+     others counts. The earlier round's stack is shown, never refused: Round 3
+     changed CLIs between batches);
+  2. `undecided`, `incomplete`: an owed task without a counted sample in this
+     round. By the deadline in the private record that is final; before it
+     the batches may still be running. The difference on the tasks both
+     rounds have is shown as a description;
+  3. `undecided`, `few_objects` or `no_variation`: no interval;
+  4. `equivalent` (等价): the 90 % t and the 90 % bootstrap interval both lie
+     strictly inside ±`EQUIVALENCE_MARGIN` (2). `small_change: true` (有小而可测的变化)
+     when both 95 % intervals also exclude zero on the same side
+     (`direction`);
+  5. `drift` (漂移): both 95 % intervals exclude zero on the same side
+     (`direction` `up` or `down`);
+  6. `undecided`, `inconclusive`.
+- **Across rounds** (`row.cross_round`): `main score only` for an equivalent
+  system, else `none`. The page names no per-variant difference: the test
+  covered the mean of the three variants only, so per-variant scores and
+  evidence deltas stay in each round's own report.
+- Shown per round: the batches with a counted sample on a main task
+  (`batches`; the configuration's others, `other_batches`, are listed apart
+  and their stack is not compared), counted attempts, tasks sampled, attempts per
+  task, excluded statuses, scorer versions and hashes, refusal reports, the
+  stack values, the main score with a 95 % bootstrap interval (none when the
+  per-object means do not vary), and the most attempts of the
+  system that ran at once (`maxConcurrent`, from `started_at` /
+  `finished_at`). `notes`: more than one at once in either round (the
+  difference includes that, plan §8), and one scorer version with more than
+  one source hash. `problems`: both collections' problems, placeholders,
+  submissions byte-identical across rounds on one task (a copied attempt).
+- `regression.md` gives the rules, a table of both systems, then per system
+  the verdict in words, the two rounds side by side and the per-object
+  differences (not for a row that is not judged, whose comparison cells are
+  blank).
+
 ## Multiple comparisons (Holm)
 
 Round 3 had 12 configurations, so 66 pairs: at 95 % each, if no configuration

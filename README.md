@@ -117,7 +117,7 @@
     node v1/scripts/run.mjs run       --batch .local/v1/runs/BATCH
     node v1/cli.mjs report --batches BATCH --out .local/v1/reports/NAME
 
-`--system` 可以是 `codex`、`claude-code`、`grok`、`antigravity`（还没在装了 agy 的机器上验证过，见 [docs/ANTIGRAVITY.md](docs/ANTIGRAVITY.md)），以及 `api-anthropic`、`api-openai`（自建的统一 agent 循环，只在模拟服务器上测过；负责人决定不用 API key，这两个现在不跑）。`report` 加 `--roster 名单文件` 就按名单排两张榜、做 Holm 校正，Round 3 的名单是 [v1/rounds/round3.roster.json](v1/rounds/round3.roster.json)。完整说明见 [docs/V1.md](docs/V1.md) 和 [运行器说明](v1/lib/runner/README.md)。
+`--system` 可以是 `codex`、`claude-code`、`grok`、`antigravity`（还没在装了 agy 的机器上验证过，见 [docs/ANTIGRAVITY.md](docs/ANTIGRAVITY.md)），以及 `api-anthropic`、`api-openai`（自建的统一 agent 循环，只在模拟服务器上测过；负责人决定不用 API key，这两个现在不跑）。`report` 加 `--roster 名单文件` 就按名单排两张榜、做 Holm 校正，Round 3 的名单是 [v1/rounds/round3.roster.json](v1/rounds/round3.roster.json)。Round 4 的回归对照另出报告：`node v1/cli.mjs regression --baseline 上一轮的批次 --batches 这一轮的批次`（等价、漂移或未定，计划第 3 节）。完整说明见 [docs/V1.md](docs/V1.md) 和 [运行器说明](v1/lib/runner/README.md)。
 
 ## 文档
 
