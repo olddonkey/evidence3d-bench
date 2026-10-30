@@ -7,6 +7,7 @@ import { soupFromModel } from '../soup.mjs';
 import { validateModel } from '../model.mjs';
 import { decodePNG } from '../png.mjs';
 import { generateModel, GENERATOR_VERSION } from '../generator/index.mjs';
+import { mutations } from '../score/mutations.mjs';
 import { studyCameras, renderViews, STUDY_VIEWS, STUDY_SIZE, STUDY_SHADING, FRAME_FILL, BACKGROUND } from './render.mjs';
 import { imageName, ROLES } from './select.mjs';
 import { voteFiles, readVoteFiles, VOTES_FILE } from './votes.mjs';
@@ -16,9 +17,9 @@ import { studyDir, DEFAULT_DATA_ROOT } from './index.mjs';
 // Catch pairs for rater qualification (Round 4 plan, docs/V1-ROUND4-PLAN.md
 // section 5.1). Their answer is fixed by construction, not by the scorer: a
 // development-set object's truth on one side, the same truth with one massing
-// or roof group taken away on the other, both drawn exactly as the study draws
-// a pair (same cameras on the truth's bounds, same clay shading), the truth on
-// side A in half of them. They are added to a prepared study, also one that
+// or roof group taken away on the other (calibrate's dropGroup defect), both
+// drawn exactly as the study draws a pair (same cameras on the truth's bounds,
+// same clay shading), the truth on side A in half of them. They are added to a prepared study, also one that
 // has votes: no pair is changed or moved before the last pair anyone has rated,
 // and no vote is touched. key.json marks them (`catch`), pairs.json does not,
 // and they count in no agreement, only in the qualification.
@@ -44,12 +45,12 @@ export async function devModels(file = DEV_SET_FILE) {
   return models;
 }
 
-// The share of the truth's drawn pixels that differ between two sets of
-// renders of the same views (PNG bytes).
-function changedShare(truthViews, otherViews, background) {
+// The share of the truth's drawn pixels that differ in another set of renders
+// of the same views (`truthPixels`: decoded, per view; `otherViews`: PNG bytes).
+function changedShare(truthPixels, otherViews, background) {
   let drawn = 0, changed = 0;
-  for (const view of Object.keys(truthViews)) {
-    const a = decodePNG(truthViews[view].png).pixels, b = decodePNG(otherViews[view].png).pixels;
+  for (const view of Object.keys(truthPixels)) {
+    const a = truthPixels[view], b = decodePNG(otherViews[view].png).pixels;
     for (let i = 0; i < a.length; i += 3) {
       if (a[i] !== background[0] || a[i + 1] !== background[1] || a[i + 2] !== background[2]) drawn++;
       if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2]) changed++;
@@ -106,10 +107,11 @@ export async function addCatchPairs({ dataRoot = DEFAULT_DATA_ROOT, name, object
     const { model } = models.get(id), truth = soupFromModel(model);
     const cameras = studyCameras(truth.bounds, { views, width: size.width, height: size.height, fill });
     const truthViews = renderViews(truth, cameras, shading);
+    const truthPixels = Object.fromEntries(Object.entries(truthViews).map(([view, image]) => [view, decodePNG(image.png).pixels]));
     const groups = [];
     for (const group of model.groups.filter(item => CATCH_CATEGORIES.includes(item.category))) {
-      const dropped = renderViews(soupFromModel({ ...model, parts: model.parts.filter(part => part.group !== group.id) }), cameras, shading);
-      const share = changedShare(truthViews, dropped, BACKGROUND);
+      const dropped = renderViews(mutations.dropGroup(group.id).apply(truth, { model }), cameras, shading);
+      const share = changedShare(truthPixels, dropped, BACKGROUND);
       log({ event: 'catch-candidate', object: id, group: group.id, category: group.category, changed_share: Math.round(share * 1000) / 1000 });
       if (share >= minChangedShare) groups.push({ group: group.id, category: group.category, changed_share: Math.round(share * 1e4) / 1e4, views: dropped });
     }
