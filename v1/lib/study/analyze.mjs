@@ -19,8 +19,12 @@ import { g1Analysis } from './g1.mjs';
 // The last vote per rater and pair wins (a revision is a new line). Agreement
 // is counted on the original pairs; a repeat is the same two submissions shown
 // again with the sides swapped, used only for self-consistency, so no pair
-// counts twice. Votes without a rater are the legacy rater's (r0 by default;
-// see votes.mjs).
+// counts twice. Catch pairs serve rater qualification only. Votes without a
+// rater are the legacy rater's (r0 by default; see votes.mjs).
+//
+// Then the Round 4 plan's rater qualification and gate G1 (panel.mjs,
+// g1.mjs): who qualifies for the panel, and whether the panel's choices agree
+// better with another weighting of shape and detail than with scorer 1.1.0.
 
 export const ANALYSIS_SCHEMA = 'e3d-study-analysis-v3';
 export const Z95 = 1.959963984540054;
@@ -187,8 +191,8 @@ function betweenRaters(key, strata, raters, latestByRater) {
 
 //   votes: every vote, in the order cast (readVoteFiles); a vote without a
 //     rater is the legacy rater's.
-//   raters: only these raters (default: everyone who voted); for G1, the panel
-//     is the qualified ones among them.
+//   raters: only these raters (default: everyone who voted); G1 runs only
+//     when they are named, and its panel is the qualified ones among them.
 //   g1Seed: the bootstrap seed of gate G1 from the private record; without it
 //     G1 is not computed. g1Samples: resamples (10 000; fewer only in tests).
 //   malformed, duplicates, files, ignored: what readVoteFiles reports, for the summary.
@@ -224,7 +228,7 @@ export function analyzeStudy({ key, votes, malformed = 0, duplicates = 0, files 
   };
 
   const qualification = qualifyRaters(key, chosen, latestByRater);
-  const g1 = g1Analysis({ key, latestByRater, qualification, seed: g1Seed, samples: g1Samples });
+  const g1 = g1Analysis({ key, latestByRater, qualification, named: Array.isArray(raters), seed: g1Seed, samples: g1Samples });
   return {
     schema: ANALYSIS_SCHEMA, study: key.name, prepared_at: key.created_at ?? null,
     votes: votesSummary, raters: perRater, between_raters: betweenRaters(key, strata, chosen, latestByRater),
@@ -318,8 +322,8 @@ const TARGET_TEXT = { reached: 'reaches the 70 % target (lower bound ≥ 70 %)',
 // Section 5.2 of the Round 4 plan: gate G1.
 export function g1Markdown(g1, lines) {
   lines.push('## Gate G1: scorer ' + CURRENT_SCORER + ' or ' + NEXT_SCORER, '');
-  lines.push('Round 4 plan section 5.2. Panel: ' + (g1.panel.length ? g1.panel.join(', ') : 'nobody') + ' (qualified raters' +
-    (g1.not_qualified.length ? '; not qualified, reported on their own: ' + g1.not_qualified.join(', ') : '') + ').', '');
+  lines.push('Round 4 plan section 5.2. Panel (the qualified raters): ' + (g1.panel.length ? g1.panel.join(', ') : 'nobody') + '.' +
+    (g1.not_qualified.length ? ' Not qualified, reported on their own: ' + g1.not_qualified.join(', ') + '.' : ''), '');
   if (!g1.run) {
     lines.push('**G1 not computed:** ' + g1.reason + '.' + (g1.decision ? ' Decision: scorer ' + g1.decision.scorer + ' (' + g1.decision.weights + ').' : ''), '');
     return;
@@ -423,7 +427,8 @@ export function analysisMarkdown(analysis) {
     const m = between.majority;
     lines.push('### Majority vote', '');
     lines.push('The choice of more than half of the raters who rated a pair, on original pairs rated by two raters or more: ' + m.pairs + ' pairs (' +
-      Object.entries(m.raters_per_pair).map(([count, pairs]) => pairs + ' rated by ' + count).join(', ') + '); majority for A or B ' + m.decided + ', for "cannot tell" ' + m.tie + ', no majority ' + m.no_majority + '.', '');
+      Object.entries(m.raters_per_pair).map(([count, pairs]) => pairs + ' rated by ' + count).join(', ') + '); majority for A or B ' + m.decided + ', for "cannot tell" ' + m.tie + ', no majority ' + m.no_majority + '. ' +
+      'Gate G1 uses the panel\'s choice instead: qualified raters only, the option with the most votes (see below).', '');
     lines.push('| measure | agree / decided | agreement | no higher side |', '|---|---|---|---|');
     for (const measure of m.agreement) lines.push('| ' + measure.title + ' | ' + measure.overall.k + ' / ' + measure.overall.n + ' | ' + interval(measure.overall) + ' | ' + measure.overall.no_higher_side + ' |');
     lines.push('');

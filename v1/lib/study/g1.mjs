@@ -85,13 +85,17 @@ export function targetVerdict(agreement) {
 //   key: key.json; latestByRater: each rater's last vote per pair (panel.mjs latestVotes);
 //   qualification: qualifyRaters for the raters named for the panel (analyze's
 //     --raters, else everyone who voted); the panel is the qualified ones;
+//   named: whether the raters were named (analyze --raters, the panel as the
+//     private record has it after the deadlines and replacements); required
+//     to run G1, so that a rater who was replaced cannot join the panel;
 //   seed: the bootstrap seed from the private record (required to run G1).
-export function g1Analysis({ key, latestByRater, qualification, seed = null, samples = BOOTSTRAP_RESAMPLES }) {
+export function g1Analysis({ key, latestByRater, qualification, named = false, seed = null, samples = BOOTSTRAP_RESAMPLES }) {
   const panel = qualification.filter(item => item.qualified).map(item => item.rater);
   const base = { panel, not_qualified: qualification.filter(item => !item.qualified).map(item => item.rater), seed, samples,
     weights: CANDIDATE_WEIGHTS.map(item => ({ ...item })), tie_gap: TIE_GAP };
   const keep = reason => ({ ...base, run: false, reason, decision: { scorer: CURRENT_SCORER, weights: '50/50', reason } });
   if (panel.length < G1_MIN_PANEL) return keep('fewer than ' + G1_MIN_PANEL + ' qualified raters (' + panel.length + '): no G1, scorer ' + CURRENT_SCORER + ' stays (plan section 5.1)');
+  if (!named) return { ...base, run: false, reason: 'the panel is not named: pass --raters with the raters the private record lists after the deadlines and replacements', decision: null };
   if (seed === null || seed === undefined || seed === '') return { ...base, run: false, reason: 'no bootstrap seed: pass --g1-seed with the seed written in the private record', decision: null };
 
   const verdicts = panelOriginals(key, latestByRater, panel);
