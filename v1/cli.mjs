@@ -166,6 +166,11 @@ try {
     const { writeReport, readRoster } = await import('./lib/report/index.mjs');
     const roster = options.roster ? await readRoster(resolve(options.roster)) : null;
     print(await writeReport({ dataRoot, batches: list(need('batches')), outDir: resolve(options.out || join(dataRoot, 'reports', 'latest')), roster }));
+  } else if (command === 'regression') {
+    // Round 4 plan section 3: the regression systems' rows in two rounds, paired by object.
+    const { regressionReport, parseSystems } = await import('./lib/report/index.mjs');
+    print(await regressionReport({ dataRoot, baseline: list(need('baseline')), batches: list(need('batches')), outDir: resolve(options.out || join(dataRoot, 'reports', 'regression')),
+      set: options.set, systems: options.systems ? parseSystems(options.systems) : undefined, seed: options.seed }));
   } else {
     console.log([
       'Evidence3D v1 — hidden-truth reconstruction benchmark', '',
@@ -178,6 +183,8 @@ try {
       '  node v1/cli.mjs calibrate    --task ID [--out FILE]',
       '  node v1/cli.mjs rescore      --batches A,B      (recompute reports from stored submissions)',
       '  node v1/cli.mjs report       --batches A,B [--out DIR] [--roster FILE]   (FILE: formal configurations and ladders, e.g. v1/rounds/round3.roster.json)',
+      '  node v1/cli.mjs regression   --baseline A,B --batches C,D [--out DIR] [--set test-2026-10] [--systems codex/gpt-6-astra/high,...]',
+      '                               (Round 4 plan section 3: the same systems in two rounds, paired by object; equivalent, drift or undecided)',
       '  node v1/scripts/run.mjs prepare|preflight|run …      (generation runner)',
       '  node v1/scripts/landmarks.mjs new-set|build-set|check (memory tasks: named landmark twins, variants m2 m3)',
       '  node v1/scripts/real.mjs prepare|build|verify|coverage (real buildings, variants r2 r4)',
