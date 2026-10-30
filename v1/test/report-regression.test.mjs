@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { rng } from '../lib/rng.mjs';
-import { compareRounds, regressionReport, regressionMarkdown, parseSystems, tostP, maxConcurrent, tInterval, pairedBootstrap, mean, cellKey,
+import { compareRounds, regressionReport, regressionMarkdown, regressionVerdict, refusedBeforeScoring, parseSystems, tostP, maxConcurrent, tInterval, pairedBootstrap, mean, cellKey,
   REGRESSION_SCHEMA, REGRESSION_SYSTEMS, MAIN_VARIANTS, EQUIVALENCE_MARGIN, REGRESSION_SAMPLES } from '../lib/report/index.mjs';
 
 // The regression check, docs/V1-ROUND4-PLAN.md section 3.
@@ -17,7 +17,7 @@ const NOW = new Date('2026-10-30T12:00:00Z');
 const SET = 'test-2026-10';
 const [ASTRA, OPUS] = REGRESSION_SYSTEMS.map(cellKey);
 const SCORER = { version: '1.1.0', sha256: 'a'.repeat(64) };
-const STACK = { node_version: 'v26.12.0', cli_version: '1.0.0', cli_sha256: 'b'.repeat(64), runner_sha256: 'c'.repeat(64), prompt_version: 'p1',
+const STACK = { node_version: 'v26.12.0', node_sha256: '8'.repeat(64), cli_version: '1.0.0', cli_sha256: 'b'.repeat(64), runner_sha256: 'c'.repeat(64), prompt_version: 'p1',
   tools_sha256: 'd'.repeat(64), runtime_sha256: 'e'.repeat(64), protocol: 'e3d-v1' };
 // An object effect both rounds share, so pairing by object removes it.
 const OBJECT_EFFECT = (() => { const random = rng('regression-objects'); return Array.from({ length: 40 }, () => 30 * (random.next() - 0.5)); })();
@@ -163,6 +163,40 @@ test('undecided when the intervals are neither inside the margin nor clear of ze
   }
 });
 
+test('the two 90% intervals must both lie strictly inside the margin, and both 95% intervals clear zero on one side', () => {
+  // Differences alternating +-5.8: the percentile bootstrap's 90% interval
+  // fits inside +-2, the Student-t one (wider, with its n - 1 and t tail) does not.
+  const before = round('r3', { attempts: 3, value: () => 60 }), after = round('r4', { value: o => 60 + (o % 2 ? 5.8 : -5.8) });
+  const row = rowOf(compare(before, after), ASTRA), d = row.difference;
+  assert.ok(d.bootstrap_ci90[0] > -2 && d.bootstrap_ci90[1] < 2, 'bootstrap ' + d.bootstrap_ci90);
+  assert.ok(d.t_ci90[0] < -2 && d.t_ci90[1] > 2, 't ' + d.t_ci90);
+  assert.deepEqual([row.verdict, row.reason], ['undecided', 'inconclusive']);
+  // The rules on given intervals.
+  const verdict = intervals => regressionVerdict({ difference: { intervals_available: true, objects: 24, ...intervals } });
+  const level = { t_ci95: [-1.5, 1.4], bootstrap_ci95: [-1.4, 1.3] };
+  assert.equal(verdict({ t_ci90: [-1.2, 1.1], bootstrap_ci90: [-1.1, 1.0], ...level }).verdict, 'equivalent');
+  // A bound exactly on the margin is not inside it, on either side and for either interval.
+  for (const t_ci90 of [[-2, 1.1], [-1.2, 2]]) assert.deepEqual(verdict({ t_ci90, bootstrap_ci90: [-1.1, 1.0], ...level }), { verdict: 'undecided', reason: 'inconclusive' });
+  for (const bootstrap_ci90 of [[-2, 1.0], [-1.1, 2]]) assert.equal(verdict({ t_ci90: [-1.2, 1.1], bootstrap_ci90, ...level }).verdict, 'undecided');
+  // Only one 95% interval clear of zero: no drift, and no small-change note.
+  const wide = { t_ci90: [0.2, 3.4], bootstrap_ci90: [0.3, 3.3] };
+  assert.deepEqual(verdict({ ...wide, t_ci95: [0.1, 3.6], bootstrap_ci95: [-0.1, 3.5] }), { verdict: 'undecided', reason: 'inconclusive' });
+  assert.deepEqual(verdict({ ...wide, t_ci95: [-0.1, 3.6], bootstrap_ci95: [0.1, 3.5] }), { verdict: 'undecided', reason: 'inconclusive' });
+  // An interval touching zero does not exclude it; two that exclude it on opposite sides do not agree.
+  assert.equal(verdict({ ...wide, t_ci95: [0, 3.6], bootstrap_ci95: [0.1, 3.5] }).verdict, 'undecided');
+  assert.equal(verdict({ ...wide, t_ci95: [0.1, 3.6], bootstrap_ci95: [-3.5, -0.1] }).verdict, 'undecided');
+  assert.deepEqual(verdict({ ...wide, t_ci95: [0.1, 3.6], bootstrap_ci95: [0.2, 3.5] }), { verdict: 'drift', reason: null, direction: 'up' });
+  const narrow = { t_ci90: [0.2, 1.4], bootstrap_ci90: [0.3, 1.3] };
+  assert.equal(verdict({ ...narrow, t_ci95: [0.1, 1.5], bootstrap_ci95: [-0.1, 1.4] }).small_change, false);
+  assert.equal(verdict({ ...narrow, t_ci95: [0, 1.5], bootstrap_ci95: [0.1, 1.4] }).small_change, false);
+  assert.deepEqual(verdict({ ...narrow, t_ci95: [-1.5, -0.1], bootstrap_ci95: [-1.4, -0.2] }), { verdict: 'equivalent', reason: null, small_change: true, direction: 'down' });
+  // Data problems first, then gaps, then missing intervals.
+  const any = { intervals_available: true, objects: 24, t_ci90: [-1, 1], bootstrap_ci90: [-1, 1], t_ci95: [-1, 1], bootstrap_ci95: [-1, 1] };
+  assert.equal(regressionVerdict({ difference: any, blockers: [{ reason: 'mixed_stack' }], missing: ['o1-t2'] }).reason, 'mixed_stack');
+  assert.equal(regressionVerdict({ difference: any, missing: ['o1-t2'] }).reason, 'incomplete');
+  assert.equal(regressionVerdict({ difference: { ...any, intervals_available: false } }).reason, 'no_variation');
+});
+
 test('a system missing a main task in this round is undecided; what both rounds have is a description only', () => {
   const before = round('r3', { attempts: 3 });
   // An infra error is not a sample: o5-c1 has an attempt, but none that counts.
@@ -197,6 +231,10 @@ test('differences that do not vary give no interval, so no verdict but undecided
   assert.deepEqual([row.verdict, row.reason], ['undecided', 'no_variation']);
   assert.match(row.statement, /do not vary, so no interval is available/);
   assert.match(regressionMarkdown(compare(before, after)), /not available/);
+  // Every object scoring the same in a round: no interval for that round's score either.
+  const flat = compare(round('r3', { attempts: 3, value: () => 50 }), round('r4', { value: () => 50 }));
+  for (const side of ['baseline', 'current']) assert.deepEqual(rowOf(flat, ASTRA)[side].score, { mean: 50, ci95: null });
+  assert.match(regressionMarkdown(flat), /\| 50\.00 \(interval not available\) \|/);
   // One object: no interval either.
   const one = rowOf(compare(round('r3', { attempts: 3, objects: 1 }), round('r4', { objects: 1 })), ASTRA);
   assert.deepEqual([one.verdict, one.reason, one.difference.objects], ['undecided', 'few_objects', 1]);
@@ -216,6 +254,17 @@ test('two scorer versions, an earlier row with gaps or none, or this round on tw
   assert.doesNotMatch(markdown, /\| Object \| Tasks \|/, 'no per-object comparison for a row that is not judged');
   // Reports without a stamp were written by scorer 1.0.0: not the same definition either.
   assert.equal(rowOf(compare(before, round('r4', { scorer: null })), ASTRA).reason, 'scorer_mismatch');
+  // An artifact the runner refused before scoring (a link, say) has a report with no scorer stamp: a 0, not another scorer.
+  const refusing = round('r4');
+  const refused = refusing.attempts.find(item => item.system === 'codex' && item.task_id === 'o4-t2');
+  Object.assign(refused, { valid: false, score: 0, report: { schema: 'e3d-report-v1', task_id: 'o4-t2', object: null, variant: null, valid: false, error: 'output/model.glb is a symbolic link',
+    score: 0, produced_by: 'v1.2.4 (refused before scoring)' } });
+  assert.equal(refusedBeforeScoring(refused.report), true);
+  assert.equal(refusedBeforeScoring({ valid: false, score: 0, produced_by: 'v1.2.4' }), false);
+  const withRefusal = rowOf(compare(before, refusing), ASTRA);
+  assert.notEqual(withRefusal.verdict, 'not_judged', withRefusal.statement);
+  assert.deepEqual([withRefusal.current.scorer_versions, withRefusal.current.refused_before_scoring, withRefusal.current.tasks], [['1.1.0'], 1, 72]);
+  assert.equal(withRefusal.difference.per_object.find(item => item.object === 'o4').current < withRefusal.difference.per_object.find(item => item.object === 'o4').baseline - 15, true);
   // The same version from another build of the scorer (a change that moves no number): judged, with a note.
   const rebuilt = compare(before, round('r4', { scorer: { version: '1.1.0', sha256: '9'.repeat(64) } }));
   assert.equal(rowOf(rebuilt, ASTRA).verdict, 'equivalent');
@@ -229,6 +278,13 @@ test('two scorer versions, an earlier row with gaps or none, or this round on tw
   assert.deepEqual([mixed.verdict, mixed.reason], ['not_judged', 'mixed_stack']);
   assert.match(mixed.statement, /differ in CLI version/);
   assert.equal(rowOf(compare(before, split), OPUS).verdict, 'equivalent', 'the other system is judged on its own');
+  // One Node version from two builds is two stacks as well.
+  const rebuiltNode = round('r4');
+  rebuiltNode.attempts.filter(item => item.system === 'codex').slice(36).forEach(item => { item.batch = 'r4-codex-second'; });
+  rebuiltNode.batches.push({ id: 'r4-codex-second', manifest: { ...STACK, node_sha256: '7'.repeat(64) } });
+  const node = rowOf(compare(before, rebuiltNode), ASTRA);
+  assert.deepEqual([node.verdict, node.reason], ['not_judged', 'mixed_stack']);
+  assert.match(node.statement, /differ in Node binary;/);
   // The same in Round 3 is history, not a reason to refuse (Round 3 changed CLIs between batches).
   const history = round('r3', { attempts: 3 });
   history.attempts.filter(item => item.system === 'codex').slice(108).forEach(item => { item.batch = 'r3-codex-later'; });
@@ -254,6 +310,13 @@ test('only the main tasks of the set count; an object variant no batch has is ow
   assert.equal(row.baseline.outside, 24 * 2 * 3 + 2);
   assert.equal(row.baseline.attempts, 72 * 3);
   assert.equal(row.verdict, 'equivalent');
+  // An object whose main tasks no batch has, seen only through its t1: still owes them.
+  const onlyT1 = round('r3', { attempts: 3, variants: ['t1', 't2', 't3', 't4', 'c1'] }), later = round('r4');
+  for (const source of [onlyT1, later]) source.attempts = source.attempts.filter(item => item.object !== 'o23' || item.variant === 't1');
+  const seen = compare(onlyT1, later);
+  assert.deepEqual([seen.owed.tasks, seen.owed.objects], [72, 24]);
+  assert.deepEqual(seen.owed.placeholders, ['o23 t2 (no task in these batches)', 'o23 t4 (no task in these batches)', 'o23 c1 (no task in these batches)']);
+  assert.deepEqual([rowOf(seen, ASTRA).verdict, rowOf(seen, ASTRA).reason, rowOf(seen, ASTRA).baseline.missing.length], ['not_judged', 'baseline_incomplete', 3]);
   // No batch has a c1 task of o5: owed by everyone, a gap in both rounds, a data problem.
   const noC1 = round('r3', { attempts: 3 }), after = round('r4');
   for (const source of [noC1, after]) source.attempts = source.attempts.filter(item => item.task_id !== 'o5-c1');
@@ -323,7 +386,7 @@ async function dataRoot({ objects = 4 } = {}) {
 async function batch(root, id, { system, model, effort }, { attempts = 1, score, skip = [], integrity = [], manifest = STACK }) {
   const dir = join(root, 'runs', id);
   await write(join(dir, 'manifest.json'), { schema: 'e3d-run-batch-v1', id, system, model, effort, attempts, harness: { version: manifest.cli_version, binary_sha256: manifest.cli_sha256 },
-    node: { version: manifest.node_version }, runner_source: { sha256: manifest.runner_sha256 }, prompt_version: manifest.prompt_version, tools: { sha256: manifest.tools_sha256 },
+    node: { version: manifest.node_version, sha256: manifest.node_sha256 }, runner_source: { sha256: manifest.runner_sha256 }, prompt_version: manifest.prompt_version, tools: { sha256: manifest.tools_sha256 },
     runtime: { three_version: '0.180.0', sha256: manifest.runtime_sha256 }, protocol: manifest.protocol, tasks: [] });
   let clock = Date.UTC(2026, 9, 20);
   for (let o = 0; o < 4; o++) {
@@ -360,6 +423,7 @@ test('regressionReport and `cli regression` read both rounds from disk and write
     assert.equal(summary.owed_tasks, 12);
     const json = JSON.parse(await readFile(join(out, 'regression.json'), 'utf8'));
     assert.equal(json.owed.build_record, 'sets/' + SET + '.built.json');
+    assert.deepEqual(rowOf(json, ASTRA).current.stack.node_sha256, [STACK.node_sha256], 'the Node binary hash comes from the manifest');
     assert.deepEqual(json.baseline_batches, ['r3-astra', 'r3-opus']);
     const astraRow = rowOf(json, ASTRA), opusRow = rowOf(json, OPUS);
     assert.deepEqual([astraRow.verdict, astraRow.reason, astraRow.current.missing], ['undecided', 'incomplete', ['o3-c1']]);

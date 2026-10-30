@@ -68,13 +68,22 @@ export const REGRESSION_REASONS = {
 // The stack a round's batches freeze (plan section 5, step 2): Node, the
 // client's binary, the runner and prompt source and what it builds. The
 // scorer and the generator are not part of it.
-const STACK_FIELDS = [['node_version', 'Node'], ['cli_version', 'CLI version'], ['cli_sha256', 'CLI binary'], ['runner_sha256', 'runner source'],
+const STACK_FIELDS = [['node_version', 'Node'], ['node_sha256', 'Node binary'], ['cli_version', 'CLI version'], ['cli_sha256', 'CLI binary'], ['runner_sha256', 'runner source'],
   ['prompt_version', 'prompt version'], ['tools_sha256', 'contestant tool kit'], ['runtime_sha256', 'three.js runtime'], ['protocol', 'protocol']];
 
 const distinct = values => [...new Set(values)].sort((a, b) => String(a).localeCompare(String(b)));
 const plural = (count, word) => count + ' ' + word + (count === 1 ? '' : 's');
 const firstFew = (list, count = 3) => list.slice(0, count).join(', ') + (list.length > count ? ', ...' : '');
 const placeholder = (object, variant) => object + ' ' + variant + ' (no task in these batches)';
+// Values that vary, as the plan's intervals need: at least two, with a
+// standard deviation above rounding noise (the same test tTestP applies).
+// Constant values give every resample the same mean, an interval of zero
+// width that the plan calls not available.
+const varies = values => tTestP(values.filter(finite)) !== null;
+// The runner's own report for an artifact it refused before scoring (a link,
+// a file over the size limit): 0 points, and no scorer took part.
+const REFUSED = /\(refused before scoring\)$/;
+export const refusedBeforeScoring = report => Boolean(report) && !report.scorer && typeof report.produced_by === 'string' && REFUSED.test(report.produced_by);
 const sameConfiguration = spec => item => item.system === spec.system && item.model === spec.model && (item.effort ?? null) === (spec.effort ?? null);
 
 // "codex/gpt-6-astra/high,claude-code/claude-opus-5-5/high" (effort "-" for a
@@ -106,19 +115,18 @@ export function tostP(values, margin = EQUIVALENCE_MARGIN) {
 
 // The main tasks of the set: every task of a main variant that either round
 // ran or planned, or that the set's build record lists (`taskInfo`). Every
-// object owes each main variant; one with no task of a variant in these
-// batches owes it under a placeholder id, which no attempt can fill.
+// object of the set (seen through a task of any variant: an object whose
+// only task here is a t1 still owes its main tasks) owes each main variant;
+// one with no task of a variant in these batches owes it under a placeholder
+// id, which no attempt can fill.
 function owedTasks(sources, set, variants) {
-  const known = new Map();
+  const all = new Map();
   for (const source of sources) {
-    for (const attempt of source.attempts) {
-      if (attempt.set === set && variants.includes(attempt.variant)) known.set(attempt.task_id, { object: attempt.object, variant: attempt.variant });
-    }
-    for (const [task, info] of source.taskInfo ?? []) {
-      if (info.set === set && variants.includes(info.variant) && !known.has(task)) known.set(task, { object: info.object, variant: info.variant });
-    }
+    for (const attempt of source.attempts) if (attempt.set === set) all.set(attempt.task_id, { object: attempt.object, variant: attempt.variant });
+    for (const [task, info] of source.taskInfo ?? []) if (info.set === set && !all.has(task)) all.set(task, { object: info.object, variant: info.variant });
   }
-  const objects = distinct([...known.values()].map(info => info.object)), tasks = new Map(known), placeholders = [];
+  const known = new Map([...all].filter(([, info]) => variants.includes(info.variant)));
+  const objects = distinct([...all.values()].map(info => info.object)), tasks = new Map(known), placeholders = [];
   for (const object of objects) {
     for (const variant of variants) {
       if ([...known.values()].some(info => info.object === object && info.variant === variant)) continue;
@@ -163,8 +171,9 @@ function roundSide(source, spec, owed, { seed, samples }) {
   const batches = (source.batches ?? []).filter(batch => batchIds.includes(batch.id));
   const stack = Object.fromEntries(STACK_FIELDS.map(([field]) => [field, distinct(batches.map(batch => stackValue(batch, field)).filter(value => value !== null))]));
   // The scoring definition is the scorer's version; its hash pins the code,
-  // which can change without moving a number (version.mjs).
-  const reported = counted.filter(attempt => attempt.report);
+  // which can change without moving a number (version.mjs). A report the
+  // runner wrote for a refused artifact names no scorer, and needs none.
+  const reported = counted.filter(attempt => attempt.report && !refusedBeforeScoring(attempt.report));
   const excluded = {};
   for (const attempt of owedAttempts.filter(attempt => attempt.excluded)) excluded[attempt.status] = (excluded[attempt.status] ?? 0) + 1;
   return {
@@ -177,7 +186,8 @@ function roundSide(source, spec, owed, { seed, samples }) {
     missing: [...owed.tasks.keys()].filter(task => !sampled.has(task)).sort(),
     attempts_per_task: perTask.length ? { min: Math.min(...perTask), max: Math.max(...perTask) } : null,
     objects: objects.size,
-    score: { mean: mean(objectMeans), ci95: bootstrapMean(objectMeans, { seed, samples }) },
+    score: { mean: mean(objectMeans), ci95: varies(objectMeans) ? bootstrapMean(objectMeans, { seed, samples }) : null },
+    refused_before_scoring: counted.filter(attempt => refusedBeforeScoring(attempt.report)).length,
     scorer_versions: distinct(reported.map(attempt => scorerVersion(attempt.report) ?? 'unstamped')),
     scorer_sha256: distinct(reported.map(attempt => scorerIdentity(attempt.report)).filter(Boolean)),
     stack,
@@ -224,7 +234,7 @@ function roundDifference(before, after, { seed, samples, margin }) {
   // The plan's "interval not available": fewer than two objects, or
   // differences that do not vary (every resample the same, a zero SD). Such
   // intervals meet no threshold, so they are not given at all.
-  const available = tTestP(values) !== null;
+  const available = varies(values);
   const boot = level => available ? pairedBootstrap(values, { seed, samples, level }) : null;
   const boot90 = boot(EQUIVALENCE_LEVEL), boot95 = boot(0.95);
   const higher = values.filter(value => value > TIE_TOLERANCE).length, lower = values.filter(value => value < -TIE_TOLERANCE).length;
@@ -269,10 +279,11 @@ function blockers(key, before, after, labels) {
   return found;
 }
 
-function judge(row, margin) {
-  const d = row.difference;
-  if (row.blockers.length) return { verdict: 'not_judged', reason: row.blockers[0].reason };
-  if (row.current.missing.length) return { verdict: 'undecided', reason: 'incomplete' };
+// The plan's order (section 3), first that applies. `difference` carries the
+// four intervals; `blockers` the data problems; `missing` this round's gaps.
+export function regressionVerdict({ difference: d, blockers: found = [], missing = [], margin = EQUIVALENCE_MARGIN }) {
+  if (found.length) return { verdict: 'not_judged', reason: found[0].reason };
+  if (missing.length) return { verdict: 'undecided', reason: 'incomplete' };
   if (!d.intervals_available) return { verdict: 'undecided', reason: d.objects < 2 ? 'few_objects' : 'no_variation' };
   if (inside(d.t_ci90, margin) && inside(d.bootstrap_ci90, margin)) {
     const change = clearOfZero(d.t_ci95, d.bootstrap_ci95);
@@ -346,7 +357,7 @@ export function compareRounds({ baseline, current, set = REGRESSION_SET, variant
     const row = { key, system: spec.system, model: spec.model, effort: spec.effort ?? null, owed_tasks: owed.tasks.size,
       baseline: earlier, current: later, difference: roundDifference(earlier.task_means, later.task_means, { seed: sideSeed + '/difference', samples, margin }) };
     row.blockers = blockers(key, earlier, later, labels);
-    Object.assign(row, judge(row, margin));
+    Object.assign(row, regressionVerdict({ difference: row.difference, blockers: row.blockers, missing: later.missing, margin }));
     row.cross_round = row.verdict === 'equivalent' ? 'main score only' : 'none';
     row.statement = regressionStatement(row, { margin, labels });
     for (const side of [earlier, later]) delete side.task_means;
@@ -428,7 +439,8 @@ export function regressionMarkdown(result) {
       item.attempts_per_task ? (item.attempts_per_task.min === item.attempts_per_task.max ? item.attempts_per_task.min : item.attempts_per_task.min + '–' + item.attempts_per_task.max) : 'n/a',
       Object.entries(item.excluded).map(([status, count]) => status + ' ' + count).join(', ') || 'none',
       item.scorer_versions.join(', ') || 'no report', listOrNone(item.stack.cli_version), listOrNone(item.stack.node_version),
-      item.concurrency.max ?? 'n/a', fixed(item.score.mean, 2) + (item.score.ci95 ? ' [' + fixed(item.score.ci95[0], 2) + ', ' + fixed(item.score.ci95[1], 2) + ']' : '')];
+      item.concurrency.max ?? 'n/a', fixed(item.score.mean, 2) + (item.score.ci95 ? ' [' + fixed(item.score.ci95[0], 2) + ', ' + fixed(item.score.ci95[1], 2) + ']'
+        : finite(item.score.mean) ? ' (interval not available)' : '')];
     lines.push(table(['Round', 'Batches', 'Counted attempts', 'Tasks sampled', 'Attempts per task', 'Excluded', 'Scorer', 'CLI', 'Node', 'Most at once', 'Main score [95% bootstrap]'],
       [[labels.baseline, ...side(row.baseline)], [labels.current, ...side(row.current)]], 2), '');
     if (row.current.missing.length) lines.push(labels.current + ' has no counted sample on: ' + row.current.missing.join(', ') + '.', '');

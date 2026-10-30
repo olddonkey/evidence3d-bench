@@ -153,6 +153,8 @@ export function manifestProvenance(manifest) {
     cli_sha256: hash(harness.binary_sha256),
     login: text(harness.login),
     node_version: text(m.node?.version),
+    // The Node binary itself (prepare hashes it): one version string can name two builds.
+    node_sha256: hash(m.node?.sha256),
     runtime: text(m.runtime?.three_version) ? 'three ' + m.runtime.three_version : null,
     runtime_sha256: hash(m.runtime?.sha256),
     tools_sha256: hash(m.tools?.sha256),
