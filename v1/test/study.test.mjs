@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
+import { spawnSync } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -14,7 +15,7 @@ import { STRATA, stratumOf, higherSide, selectPairs, collectSubmissions, publicP
 import { STUDY_VIEWS, studyCameras, renderViews } from '../lib/study/render.mjs';
 import { prepareStudy, exportStudy, studyDir } from '../lib/study/index.mjs';
 import { startStudyServer } from '../lib/study/server.mjs';
-import { parseVotes, readVoteFiles } from '../lib/study/votes.mjs';
+import { parseVotes, readVoteFiles, lockVoting, votingLock, VOTING_LOCK } from '../lib/study/votes.mjs';
 import { analyzeStudy, analysisMarkdown, wilson, cohenKappa, fleissKappa, writeAnalysis } from '../lib/study/analyze.mjs';
 import { KEY_CHOICES, LEGACY_RATER, latestChoices, votedTrail, nextUnrated, afterCurrent, progress, elapsed, raterId, isRater, pauseClock } from '../lib/study/page/state.js';
 
@@ -486,6 +487,40 @@ test('server: 127.0.0.1 only, serves the page, pairs and named images, never key
       assert.equal(JSON.parse((await call(again.url + 'votes?rater=ann')).body).votes.length, 3);
       assert.deepEqual(JSON.parse((await call(again.url + 'votes?rater=cy')).body).votes.map(vote => [vote.rater, vote.choice]), [['cy', 'tie']]);
     } finally { await again.close(); }
+  });
+});
+
+test('server: no vote while a step changes the study (voting.lock), nor once pairs.json changed under it', async () => {
+  await withTemp(async dir => {
+    const { ids } = await handMadeStudy(dir);
+    const served = await startStudyServer({ studyDir: dir, port: 0 });
+    const vote = (pair, choice) => call(served.url + 'vote', { method: 'POST', body: JSON.stringify({ rater: 'lls', pair, choice, ms: 3 }), headers: { 'Content-Type': 'application/json' } });
+    try {
+      assert.equal((await vote(ids[0], 'a')).status, 200);
+      const unlock = await lockVoting(dir);
+      assert.deepEqual(await votingLock(dir), { pid: process.pid });
+      await assert.rejects(lockVoting(dir), /another step is changing this study \(process \d+\)/);
+      const locked = await vote(ids[1], 'a');
+      assert.equal(locked.status, 409);
+      assert.match(JSON.parse(locked.body).error, /voting\.lock/);
+      await unlock();
+      assert.equal(await votingLock(dir), null);
+      assert.equal((await vote(ids[1], 'b')).status, 200);
+      // A lock left by a process that is gone stops nothing; one being written (no pid yet) does.
+      await writeFile(join(dir, VOTING_LOCK), JSON.stringify({ pid: spawnSync(process.execPath, ['-e', '']).pid }) + '\n');
+      assert.equal((await vote(ids[1], 'tie')).status, 200);
+      await writeFile(join(dir, VOTING_LOCK), '');
+      assert.equal((await vote(ids[1], 'a')).status, 409);
+      await rm(join(dir, VOTING_LOCK));
+      // pairs.json changed after the server started (add-catch): its page shows the old order, so no vote until it restarts.
+      const study = JSON.parse(await readFile(join(dir, 'pairs.json'), 'utf8'));
+      await writeFile(join(dir, 'pairs.json'), JSON.stringify({ ...study, pairs: study.pairs.slice().reverse() }));
+      const stale = await vote(ids[0], 'b');
+      assert.equal(stale.status, 409);
+      assert.match(JSON.parse(stale.body).error, /pairs\.json changed after serve started/);
+    } finally { await served.close(); }
+    const lines = (await readFile(join(dir, 'votes.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(lines.map(line => [line.pair, line.choice]), [[ids[0], 'a'], [ids[1], 'b'], [ids[1], 'tie']]);
   });
 });
 
