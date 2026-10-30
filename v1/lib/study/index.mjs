@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { writeJSON } from '../../../lib/io.mjs';
 import { collectSubmissions, selectPairs, publicPairs, privateKey, DEFAULT_PAIRS, DEFAULT_REPEAT_SHARE, PER_TASK } from './select.mjs';
 import { renderStudyImages, STUDY_VIEWS, STUDY_SIZE } from './render.mjs';
-import { voteFiles, checkFinished } from './votes.mjs';
+import { voteFiles, readFinished, withStudyLock, KEY_BACKUP } from './votes.mjs';
 
 // The blind paired-comparison study: prepare (select pairs, render them, write
 // pairs.json and key.json), then serve.mjs for the rating and analyze.mjs for
@@ -56,6 +56,12 @@ export async function prepareStudy({ dataRoot = DEFAULT_DATA_ROOT, name, batches
   if (!Array.isArray(batches) || !batches.length) throw new Error('prepare needs at least one batch');
   if (seed === undefined || seed === null || seed === '') throw new Error('prepare needs a seed');
   const root = resolve(dataRoot), dir = studyDir(root, name);
+  await mkdir(dir, { recursive: true });
+  // The study's lock for the whole of it: nothing reads, votes or adds catch pairs meanwhile.
+  return withStudyLock(dir, 'prepare', () => prepareLocked({ root, dir, name, batches, pairs, seed, repeatShare, perTask, views, size, force, log, now }));
+}
+
+async function prepareLocked({ root, dir, name, batches, pairs, seed, repeatShare, perTask, views, size, force, log, now }) {
   // Ratings are never overwritten: a study with votes (any rater's) is finished material.
   for (const { file } of (await voteFiles(dir)).files) {
     if (await fileSize(join(dir, file))) throw new Error(join(dir, file) + ' holds votes; a study with votes is never prepared again (choose another name)');
@@ -63,7 +69,8 @@ export async function prepareStudy({ dataRoot = DEFAULT_DATA_ROOT, name, batches
   if (await fileSize(join(dir, 'pairs.json')) !== null && !force) throw new Error(dir + ' already holds a study; pass --force to prepare it again');
   await rm(join(dir, 'images'), { recursive: true, force: true });
   await rm(join(dir, 'pairs.json'), { force: true });
-  await mkdir(dir, { recursive: true });
+  // What an add-catch that did not finish left: both documents are made again.
+  for (const file of [KEY_BACKUP, 'key.json.add-catch.tmp', 'pairs.json.add-catch.tmp']) await rm(join(dir, file), { force: true });
 
   const { submissions, skipped, problems } = await collectSubmissions({ dataRoot: root, batches });
   log({ event: 'collected', submissions: submissions.length, skipped, problems: problems.length });
@@ -115,7 +122,6 @@ async function realTarget(path) {
 export async function exportStudy({ dataRoot = DEFAULT_DATA_ROOT, name, out }) {
   if (typeof out !== 'string' || !out) throw new Error('export needs an output directory');
   const source = studyDir(dataRoot, name), target = resolve(out);
-  await checkFinished(source);
   // Compared as real paths, so a symlinked alias of the repository (e.g. macOS /tmp for /private/tmp) is caught.
   const inRepo = relative(await realpath(REPO_ROOT), await realTarget(target));
   const outside = inRepo === '..' || inRepo.startsWith('..' + sep) || isAbsolute(inRepo);
@@ -123,6 +129,10 @@ export async function exportStudy({ dataRoot = DEFAULT_DATA_ROOT, name, out }) {
     throw new Error(target + ' is inside the repository; export outside it (or under .local/), the renders show the hidden truth');
   }
   if (await lstat(target).then(() => true, () => false)) throw new Error(target + ' already exists; export into a new directory');
+  return readFinished(source, () => exportLocked(source, target, name));
+}
+
+async function exportLocked(source, target, name) {
   const pairsBytes = await readFile(join(source, 'pairs.json'));
   const pairs = JSON.parse(pairsBytes.toString('utf8'));
   const images = [...new Set(pairs.pairs.flatMap(pair => Object.values(pair.images).flatMap(byRole => Object.values(byRole))))].sort();

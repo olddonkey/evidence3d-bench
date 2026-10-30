@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { readFile, appendFile } from 'node:fs/promises';
 import { join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CHOICES, VOTES_FILE, readVoteFiles, lockVoting, checkFinished } from './votes.mjs';
+import { CHOICES, VOTES_FILE, readVoteFiles, lockVoting, checkFinished, readFinished } from './votes.mjs';
 import { isRater, LEGACY_RATER } from './page/state.js';
 
 // Local server for the rating page. It binds 127.0.0.1 only, serves the page
@@ -64,15 +64,16 @@ async function body(request) {
 //   legacyRater: whose the votes in votes.jsonl without a rater are (see votes.mjs);
 //   the owner names themself here to resume where they stopped before raters had names.
 export async function startStudyServer({ studyDir, port = DEFAULT_PORT, now = () => new Date(), legacyRater = LEGACY_RATER }) {
-  await checkFinished(studyDir);
-  const pairsBytes = await readFile(join(studyDir, 'pairs.json'));
+  // Fails here, before listening, on a legacy rater that is not an id.
+  const pairsBytes = await readFinished(studyDir, async () => {
+    await readVoteFiles(studyDir, { legacyRater });
+    return readFile(join(studyDir, 'pairs.json'));
+  });
   const study = JSON.parse(pairsBytes.toString('utf8'));
   const pairIds = new Set(study.pairs.map(pair => pair.id));
   // Only the images pairs.json names can be fetched, so no path from a request reaches the file system.
   const imageNames = new Set(study.pairs.flatMap(pair => Object.values(pair.images).flatMap(byRole => Object.values(byRole))));
   const votesFile = join(studyDir, VOTES_FILE);
-  // Fails here, before listening, on a legacy rater that is not an id.
-  await readVoteFiles(studyDir, { legacyRater });
   let appending = Promise.resolve();
 
   const send = (response, status, bytes, type, cache = 'no-store') => {

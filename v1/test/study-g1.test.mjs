@@ -19,7 +19,7 @@ import {
   TIE_GAP, CANDIDATE_WEIGHTS, scoreGap, weightedScore, weightedGap, rescorePair, isOriginal, isCatch, isRepeat, latestVotes,
   qualifyRater, qualifyRaters, qualifyStudy, pluralityChoice, panelOriginals, percentileInterval, objectBootstrap, proportionInterval,
 } from '../lib/study/panel.mjs';
-import { lockVoting, VOTING_LOCK, KEY_BACKUP } from '../lib/study/votes.mjs';
+import { lockVoting, votingLock, VOTING_LOCK, KEY_BACKUP } from '../lib/study/votes.mjs';
 
 // Round 4 plan (docs/V1-ROUND4-PLAN.md): rater qualification and the panel
 // (section 5.1), gate G1 (section 5.2), intervals (section 4), catch pairs.
@@ -586,5 +586,96 @@ test('add-catch changes key.json and pairs.json together or not at all', async (
     await assert.rejects(addCatchPairs({ dataRoot, name: 'unit', objects, seed: 's' }), /already has catch pairs/);
     assert.deepEqual(await leftovers(), []);
     assert.equal((await qualifyStudy(dir)).catch_pairs, 6);
+  });
+});
+
+// The study directory's files other than images, by name.
+async function snapshot(dir) {
+  const files = {};
+  for (const name of (await readdir(dir)).sort()) if (name !== 'images') files[name] = await readFile(join(dir, name), 'utf8');
+  return files;
+}
+
+test('readers, prepare and add-catch hold the study lock: none of them overlaps another', async () => {
+  await withTemp(async root => {
+    const dataRoot = join(root, 'data'), objects = ['house-0011', 'hall-0014', 'structure-0015', 'retail-0012'];
+    await writeSampleRuns(dataRoot, { attempts: RUN_SPECS, withInputs: false });
+    const prepare = (seed, force = false) => prepareStudy({ dataRoot, name: 'unit', batches: ['demo-codex', 'demo-claude'], pairs: 8, seed, force, size: { width: 48, height: 36 } });
+    await prepare('prep');
+    const dir = studyDir(dataRoot, 'unit'), before = await snapshot(dir);
+    const readers = [() => startStudyServer({ studyDir: dir, port: 0 }), () => exportStudy({ dataRoot, name: 'unit', out: join(root, 'out') }), () => qualifyStudy(dir), () => writeAnalysis(dir)];
+    // While add-catch holds it, no reader reads, and prepare does not start.
+    const adding = await lockVoting(dir, { kind: 'add-catch' });
+    for (const reader of readers) await assert.rejects(reader(), /add-catch is changing this study/);
+    await assert.rejects(prepare('other', true), /add-catch is changing this study/);
+    await adding();
+    assert.deepEqual(await snapshot(dir), before);
+    // While prepare holds it, add-catch does not start.
+    const preparing = await lockVoting(dir, { kind: 'prepare' });
+    await assert.rejects(addCatchPairs({ dataRoot, name: 'unit', objects, seed: 's' }), /prepare is changing this study/);
+    await preparing();
+    // A reader checks and reads under the lock.
+    const seen = [];
+    const readFile = fsp.readFile;
+    const watch = mock.method(fsp, 'readFile', async (path, ...rest) => {
+      if (String(path) === join(dir, 'key.json')) seen.push((await votingLock(dir))?.kind ?? null);
+      return readFile(path, ...rest);
+    });
+    syncBuiltinESMExports();
+    try { await qualifyStudy(dir); await writeAnalysis(dir); } finally { watch.mock.restore(); syncBuiltinESMExports(); }
+    assert.deepEqual(seen, ['read', 'read']);
+    // add-catch waits for a reader, then runs.
+    const reading = await lockVoting(dir, { kind: 'read' });
+    const added = addCatchPairs({ dataRoot, name: 'unit', objects, seed: 's' });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal((await snapshot(dir))['key.json'], before['key.json']);
+    await reading();
+    assert.equal((await added).added, 6);
+    // prepare --force and add-catch at once on a study nobody rated: one runs, and every image pairs.json names is there.
+    await prepare('again', true);
+    const both = await Promise.allSettled([prepare('other', true), addCatchPairs({ dataRoot, name: 'unit', objects, seed: 's' })]);
+    assert.equal(both.filter(item => item.status === 'fulfilled').length, 1, JSON.stringify(both.map(item => item.reason?.message)));
+    assert.match(both.find(item => item.status === 'rejected').reason.message, /is changing this study/);
+    const listed = JSON.parse(await fsp.readFile(join(dir, 'pairs.json'), 'utf8')).pairs.flatMap(pair => Object.values(pair.images).flatMap(Object.values));
+    const onDisk = new Set(await readdir(join(dir, 'images')));
+    assert.deepEqual(listed.filter(name => !onDisk.has(name)), []);
+    assert.equal(await votingLock(dir), null);
+  });
+});
+
+test('add-catch puts an unfinished add-catch right, or leaves everything as it is', async () => {
+  await withTemp(async root => {
+    const dataRoot = join(root, 'data'), objects = ['house-0011', 'hall-0014', 'structure-0015', 'retail-0012'];
+    await writeSampleRuns(dataRoot, { attempts: RUN_SPECS, withInputs: false });
+    for (const name of ['early', 'lost', 'stuck']) await prepareStudy({ dataRoot, name, batches: ['demo-codex', 'demo-claude'], pairs: 8, seed: 'prep', size: { width: 48, height: 36 } });
+    const reversed = text => { const value = JSON.parse(text); value.pairs.reverse(); return JSON.stringify(value); };
+    // Stopped before the first rename: key.json and pairs.json are the old ones; the backup and the new files go, and it runs.
+    const early = studyDir(dataRoot, 'early'), earlyKey = await readFile(join(early, 'key.json'), 'utf8');
+    await writeFile(join(early, KEY_BACKUP), earlyKey);
+    await writeFile(join(early, 'key.json.add-catch.tmp'), '{"half":');
+    await writeFile(join(early, 'pairs.json.add-catch.tmp'), '{');
+    const done = await addCatchPairs({ dataRoot, name: 'early', objects, seed: 's' });
+    assert.deepEqual([done.recovered, done.added], ['kept', 6]);
+    assert.deepEqual(Object.keys(await snapshot(early)), ['key.json', 'pairs.json']);
+    // Neither key.json nor the backup lists the pairs of pairs.json: refused, nothing touched.
+    const lost = studyDir(dataRoot, 'lost'), lostKey = await readFile(join(lost, 'key.json'), 'utf8');
+    await writeFile(join(lost, 'key.json'), reversed(lostKey));
+    await writeFile(join(lost, KEY_BACKUP), reversed(lostKey));
+    await writeFile(join(lost, 'pairs.json.add-catch.tmp'), '{');
+    const lostBefore = await snapshot(lost);
+    await assert.rejects(addCatchPairs({ dataRoot, name: 'lost', objects, seed: 's' }), /neither it nor key\.json lists the pairs of pairs\.json: put the study right by hand/);
+    assert.deepEqual(await snapshot(lost), lostBefore);
+    // Putting the backup back fails: refused, nothing touched; the next run puts it back.
+    const stuck = studyDir(dataRoot, 'stuck'), stuckKey = await readFile(join(stuck, 'key.json'), 'utf8');
+    await writeFile(join(stuck, KEY_BACKUP), stuckKey);
+    await writeFile(join(stuck, 'key.json'), reversed(stuckKey));
+    await writeFile(join(stuck, 'key.json.add-catch.tmp'), '{');
+    const stuckBefore = await snapshot(stuck);
+    await assert.rejects(failing('rename', from => String(from).endsWith(KEY_BACKUP) ? Object.assign(new Error('input/output error'), { code: 'EIO' }) : null,
+      () => addCatchPairs({ dataRoot, name: 'stuck', objects, seed: 's' })), /input\/output error/);
+    assert.deepEqual(await snapshot(stuck), stuckBefore);
+    const again = await addCatchPairs({ dataRoot, name: 'stuck', objects, seed: 's' });
+    assert.deepEqual([again.recovered, again.added], ['restored', 6]);
+    assert.deepEqual(Object.keys(await snapshot(stuck)), ['key.json', 'pairs.json']);
   });
 });

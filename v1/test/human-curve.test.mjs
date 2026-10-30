@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { STRATA } from '../lib/study/select.mjs';
 import { mergeBins, binOf, humanCurve, curveMarkdown, writeHumanCurve, curveSampler, curveClusters, CURVE_SCHEMA, MIN_BIN_PAIRS } from '../lib/study/curve.mjs';
 import { rng } from '../lib/rng.mjs';
-import { KEY_BACKUP } from '../lib/study/votes.mjs';
+import { KEY_BACKUP, withStudyLock } from '../lib/study/votes.mjs';
 import { buildLeaderboard, summaryMarkdown, parseRoster, parseHumanCurve, readHumanCurve, panelWinRate, humanEligible, flipHuman, writeReport } from '../lib/report/index.mjs';
 import { indexPage } from '../lib/report/index-page.mjs';
 import { humanMarkdownCell } from '../lib/report/human-chart.mjs';
@@ -414,10 +414,11 @@ test('study.mjs curve and report --human-curve, end to end on files', async () =
     // A rater named twice is one rater: ann alone does not make a panel of two.
     await assert.rejects(writeHumanCurve(dir, { seed: 'files', raters: ['ann', 'ann'] }), /names ann more than once/);
     assert.throws(() => humanCurve([], { panel: ['ann', 'ann'], seed: 1 }), /names a rater twice/);
-    // Not while an add-catch is unfinished.
+    // Not while an add-catch is unfinished, nor while one holds the study.
     await writeFile(join(dir, KEY_BACKUP), '{}');
     await assert.rejects(writeHumanCurve(dir, { seed: 'files', raters: PANEL }), error => error.code === 'EUNFINISHED');
     await rm(join(dir, KEY_BACKUP));
+    await withStudyLock(dir, 'add-catch', () => assert.rejects(writeHumanCurve(dir, { seed: 'files', raters: PANEL }), error => error.code === 'ELOCKED'));
     const { curve, files } = await writeHumanCurve(dir, { seed: 'files', raters: PANEL, samples: 300 });
     assert.deepEqual(curve.panel.raters, ['ann', 'bob', 'cy']);
     assert.deepEqual(curve.bins.map(bin => bin.counts), [{ higher: 4, tie: 4, lower: 4 }, { higher: 8, tie: 4, lower: 0 }]);

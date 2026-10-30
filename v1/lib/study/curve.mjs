@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { writeJSON } from '../../../lib/io.mjs';
 import { rng } from '../rng.mjs';
 import { STRATA, SKIPPED_VARIANTS } from './select.mjs';
-import { readVoteFiles, checkFinished } from './votes.mjs';
+import { readVoteFiles, readFinished } from './votes.mjs';
 import { TIE_GAP, CANDIDATE_WEIGHTS, CURRENT_SCORER, NEXT_SCORER, rescorePair, latestVotes, qualifyRaters, panelOriginals, percentileInterval } from './panel.mjs';
 import { LEGACY_RATER } from './page/state.js';
 
@@ -225,10 +225,13 @@ export async function writeHumanCurve(studyDir, { seed, raters, weights = null, 
   if (!Array.isArray(raters) || !raters.length) throw new Error('the human curve needs the named panel (--raters): the raters the private record lists (section 5.1)');
   const twice = raters.filter((rater, index) => raters.indexOf(rater) !== index);
   if (twice.length) throw new Error('--raters names ' + [...new Set(twice)].join(', ') + ' more than once: each rater counts once in the panel');
-  // Like every reader of the study: not while an add-catch is unfinished (key.json and pairs.json may not belong together).
-  await checkFinished(studyDir);
-  const key = JSON.parse(await readFile(join(studyDir, 'key.json'), 'utf8'));
-  const read = await readVoteFiles(studyDir, { legacyRater });
+  // Like every reader of the study: under the study lock, so never halfway
+  // through an add-catch or a prepare, and not after an add-catch that did not
+  // finish (key.json and pairs.json may not belong together).
+  const { key, read } = await readFinished(studyDir, async () => ({
+    key: JSON.parse(await readFile(join(studyDir, 'key.json'), 'utf8')),
+    read: await readVoteFiles(studyDir, { legacyRater }),
+  }));
   const latest = latestVotes(key, read.votes);
   const asked = [...raters];
   const missing = asked.filter(rater => !latest.has(rater));

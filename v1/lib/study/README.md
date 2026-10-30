@@ -110,10 +110,14 @@ stays. In order:
   not touched. Every pair's `position` in key.json follows the new order.
 - Voting stops while it runs: from reading the study to writing it,
   `add-catch` holds the study's lock, `voting.lock` in the study directory
-  (created only if absent, with its process id). `serve` saves each vote under
-  the same lock, so a vote is refused while `add-catch` holds it and none is
-  half-saved when `add-catch` reads the votes (it waits up to 2 s for a vote
-  being saved). Two `add-catch` runs cannot overlap. A lock left by a process
+  (created only if absent, with its process id). Everything else that touches
+  the study takes the same lock: `prepare` for the whole of it, `serve` for
+  each vote (check and save) and while it reads the study at start, `export`,
+  `qualify` and `analyze` while they check and read it. So a vote is refused
+  while `add-catch` or `prepare` holds it, none is half-saved when `add-catch`
+  reads the votes, no reader sees the study half changed, and two `add-catch`
+  runs (or one and `prepare --force`) cannot overlap. Votes and reads are
+  waited for (up to 10 s); a step that changes the study is not. A lock left by a process
   that ended is never taken over: the command says so, and the file is
   deleted by hand. A `serve` started before `add-catch` refuses every vote
   afterwards (pairs.json changed), so it has to be restarted and the page
@@ -382,8 +386,8 @@ higher-scored side, as a function of the headline gap.
   drawn again and counted (`bootstrap.redrawn`). No interval for a share of 0
   or 1, or when every resample gives the same share.
 - Seeded: `--seed` comes from the private decision record, like G1's.
-- Like every reader of the study, it refuses a study whose add-catch did not
-  finish (`checkFinished`).
+- Like every reader of the study, it reads under the study lock and refuses
+  a study whose add-catch did not finish (`readFinished`).
 
 `human-curve.json` (schema `e3d-human-curve-v1`) holds the bins, the equal
 pairs' tally, the panel and the raters left out with their reasons, the
@@ -421,7 +425,9 @@ prepared study (places after the last rated pair, votes untouched, renders,
 nothing in pairs.json, refusals for other raters' votes in either file, the
 voting lock, a vote being saved as it starts, a vote that arrives while it
 draws, two runs at once, a failed write of either document and every reader
-refusing until add-catch puts the study right, seeded).
+refusing until add-catch puts the study right, readers, prepare and add-catch
+never overlapping, the repair of an unfinished add-catch from every point it
+can stop at, seeded).
 
 `node --test v1/test/study.test.mjs`: stratification, the per-task cap, t1
 skipped, cross-configuration preference, shortfall reporting, repeats
@@ -433,8 +439,9 @@ object (a part-model draws only on the reference's silhouette), the server
 resumed per rater, legacy votes, bad votes and raters, cross-origin and
 foreign Host refused, each vote saved under the study lock, none while
 add-catch holds it or once pairs.json changed under it), the study lock (one
-of many callers gets it, waits only for a vote being saved, never taken from
-anyone, given back only by its holder, removed when it cannot be written),
+of many callers gets it, waits only for a vote being saved or a read, never
+taken from anyone, given back only by its holder, removed when it cannot be
+written),
 the page logic and rater ids, merging the votes files,
 the export, and the analysis on hand-computed examples (Wilson intervals, last
 vote wins, strata, ties, self-consistency, disagreements; Cohen's and Fleiss'
@@ -444,5 +451,6 @@ vote wins, strata, ties, self-consistency, disagreements; Cohen's and Fleiss'
 curve on a hand-counted example (equal scores apart, shares and W, no interval
 at 0 or 1, seeded), rebinning at other weights, too few raters (also with
 pairs) or pairs, the redraw of a draw with an empty bin, and `curve` end to end
-on files (the named panel, each rater once, an unfinished add-catch refused);
+on files (the named panel, each rater once, an unfinished add-catch and a held
+study lock refused);
 the report side of the curve is in v1/lib/report/README.md.

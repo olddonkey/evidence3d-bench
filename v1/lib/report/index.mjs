@@ -6,6 +6,8 @@ export { parseRoster, readRoster, rosterPath, inferLadders, rosterProvenance, RO
 export { writeReport, pickRepresentatives, objectFrame, REPORT_VIEWS, REPRESENTATIVES } from './write.mjs';
 export { summaryMarkdown } from './markdown.mjs';
 export { readHumanCurve, parseHumanCurve, humanCurveProvenance, panelWinRate, humanEligible, humanApplies, flipHuman, HUMAN_SAMPLES, HUMAN_REASONS } from './human.mjs';
+export { compareRounds, regressionReport, regressionMarkdown, regressionStatement, regressionVerdict, refusedBeforeScoring, parseSystems, tostP, maxConcurrent, REGRESSION_SCHEMA, REGRESSION_SET, REGRESSION_SYSTEMS,
+  REGRESSION_VERDICTS, REGRESSION_REASONS, MAIN_VARIANTS, EQUIVALENCE_MARGIN, EQUIVALENCE_LEVEL, REGRESSION_SAMPLES, ROUND_LABELS } from './regression.mjs';
 export { collectRuns, normaliseUsage, manifestProvenance, scorerIdentity, scorerVersion, DEFAULT_EXCLUDED_STATUSES, UNNAMED_SET, UNKNOWN_SET,
   UNKNOWN_ARCHETYPE } from './collect.mjs';
 export { bootstrapMean, pairedBootstrap, tInterval, tTestP, holmAdjust, studentQuantile, chiSquareQuantile, incompleteGamma, sdRange, pooledSD, detectableDifference,
