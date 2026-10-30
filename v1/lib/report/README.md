@@ -423,10 +423,15 @@ ladders and the effort pairs) the column "panel half-score win rate of A"
 (docs/V1-ROUND4-PLAN.md section 6). Without it nothing changes: no column, no
 section, `human_curve: null`, and every other number is the same either way.
 
-- The file is checked: its schema, bins that tile the gap scale from 0, and
-  shares that its own pair rows reproduce (to 1e-12). A file that does not
-  hold together is refused; an unavailable curve (too few raters or pairs) is
-  shown with its reason.
+- The file is checked, so that the page never meets a missing number: its
+  schema; a scorer version that goes with its weights (a candidate of
+  section 5.2); G1's tie gap; a panel that names each rater once; bins that
+  are runs of the study's strata and cover the gap scale from 0 to 100; pair
+  rows whose gaps fall in their bin and stratum and that reproduce each bin's
+  pairs, objects, mean gap, counts and shares (to 1e-12); a finite value for
+  every share, with an interval within [0, 1] or a known reason for none. A
+  file that does not hold together is refused; an unavailable curve (too few
+  raters or pairs) is shown with its reason and its equal-score tally.
 - `set.human`: `{ available, reason, versions }`. The curve applies to a set
   only when every eligible attempt's report was scored by the curve's scorer
   version (an unstamped report is `unstamped`, which is no version); otherwise
@@ -446,7 +451,10 @@ section, `human_curve: null`, and every other number is the same either way.
   objects (W per bin recomputed from the drawn pairs, the bins and weights
   unchanged) and the pair's objects independently; 2.5 and 97.5 percentiles.
   None below 2 objects (8 in the real tier), at a value of 0 or 1, or when
-  every resample gives the same value. Seeded per pair.
+  every resample gives the same value (the value and the resamples are
+  rounded to 1e-12 first: sums of 1 / n over attempt pairs drift by a few
+  units in the last place). Seeded per pair. Without an interval the cell
+  says why.
 - A ladder or effort pair read the other way round carries 1 − the value and
   the flipped interval.
 - `board.human_curve`: the curve's provenance (file, sha256, scorer, panel,

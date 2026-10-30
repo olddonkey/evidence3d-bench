@@ -123,7 +123,7 @@ export function shareInterval(value, sorted, { level = CURVE_LEVEL } = {}) {
 }
 
 export const INTERVAL_REASONS = {
-  boundary: 'the share is exactly 0 or 1',
+  boundary: 'the value is exactly 0 or 1',
   constant: 'every resample gave the same value',
   no_resamples: 'no resample had a pair in every bin',
   no_value: 'no value',
@@ -150,6 +150,7 @@ export function curveScorer(weights) {
 export function humanCurve(originals, { weights = null, panel = [], considered = [], seed, samples = CURVE_SAMPLES, level = CURVE_LEVEL, strata = STRATA,
   minPairs = MIN_BIN_PAIRS, study = null } = {}) {
   if (seed === undefined || seed === null || seed === '') throw new Error('the human curve needs a seed (record it in the private record)');
+  if (new Set(panel).size !== panel.length) throw new Error('the panel names a rater twice: ' + panel.join(', '));
   const scorer = curveScorer(weights);
   const base = {
     schema: CURVE_SCHEMA, study, scorer, tie_gap: TIE_GAP, min_bin_pairs: minPairs, strata: strata.map(({ id, min, max }) => ({ id, min, max })),
@@ -220,6 +221,8 @@ function notesOf(base, available) {
 // lists once the deadlines and replacements are over), never whoever voted.
 export async function writeHumanCurve(studyDir, { seed, raters, weights = null, legacyRater = LEGACY_RATER, samples = CURVE_SAMPLES } = {}) {
   if (!Array.isArray(raters) || !raters.length) throw new Error('the human curve needs the named panel (--raters): the raters the private record lists (section 5.1)');
+  const twice = raters.filter((rater, index) => raters.indexOf(rater) !== index);
+  if (twice.length) throw new Error('--raters names ' + [...new Set(twice)].join(', ') + ' more than once: each rater counts once in the panel');
   const key = JSON.parse(await readFile(join(studyDir, 'key.json'), 'utf8'));
   const read = await readVoteFiles(studyDir, { legacyRater });
   const latest = latestVotes(key, read.votes);
@@ -241,6 +244,10 @@ export const shareWords = share => pct(share.value) + (share.ci95 ? ' [' + pct(s
 // The bins as `[min, max)`, the last one closed.
 export const binRange = (bin, last) => '[' + bin.min + ', ' + bin.max + (last ? ']' : ')');
 
+// The pairs with equal scores, which are in no bin, and the panel on them.
+export const equalWords = curve => 'Pairs with equal scores (gap < ' + curve.tie_gap + '), in no bin: ' + curve.equal.pairs +
+  (curve.equal.pairs ? ' (panel: A ' + curve.equal.panel.a + ', cannot tell ' + curve.equal.panel.tie + ', B ' + curve.equal.panel.b + ')' : '') + '.';
+
 export function curveMarkdown(curve) {
   const lines = ['# Human curve' + (curve.study?.name ? ': ' + curve.study.name : ''), ''];
   lines.push('Scorer ' + curve.scorer.version + (curve.scorer.weights ? ' (shape ' + curve.scorer.weights.shape + ' / detail ' + curve.scorer.weights.detail + ')' : '') +
@@ -250,6 +257,7 @@ export function curveMarkdown(curve) {
   if (!curve.available) {
     lines.push('**No curve**: ' + CURVE_REASONS[curve.reason] + '.', '');
     if (curve.stratum_pairs) lines.push('Pairs per stratum (score gap ≥ ' + curve.tie_gap + '): ' + Object.entries(curve.stratum_pairs).map(([id, n]) => id + ': ' + n).join(', ') + '.', '');
+    if (curve.equal) lines.push(equalWords(curve), '');
     return lines.join('\n');
   }
   lines.push('| gap | strata | pairs | objects | mean gap | higher | cannot tell | lower | half-score win rate W |', '|---|---|---|---|---|---|---|---|---|');
@@ -258,8 +266,7 @@ export function curveMarkdown(curve) {
   lines.push('');
   lines.push('Shares of the panel\'s conclusions per bin of the headline gap, with 95% cluster bootstrap intervals over ' + curve.bootstrap.clusters + ' objects (' +
     curve.bootstrap.resamples + ' resamples' + (curve.bootstrap.redrawn ? ', ' + curve.bootstrap.redrawn + ' draws with an empty bin drawn again' : '') + '). W = higher + ½ cannot tell.', '');
-  const e = curve.equal;
-  lines.push('Pairs with equal scores (gap < ' + curve.tie_gap + '), in no bin: ' + e.pairs + (e.pairs ? ' (panel: A ' + e.panel.a + ', cannot tell ' + e.panel.tie + ', B ' + e.panel.b + ')' : '') + '.', '');
+  lines.push(equalWords(curve), '');
   lines.push(...curve.notes.map(note => '- ' + note), '');
   return lines.join('\n');
 }

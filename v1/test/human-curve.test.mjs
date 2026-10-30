@@ -6,8 +6,9 @@ import { tmpdir } from 'node:os';
 import { STRATA } from '../lib/study/select.mjs';
 import { mergeBins, binOf, humanCurve, curveMarkdown, writeHumanCurve, curveSampler, curveClusters, CURVE_SCHEMA, MIN_BIN_PAIRS } from '../lib/study/curve.mjs';
 import { rng } from '../lib/rng.mjs';
-import { buildLeaderboard, summaryMarkdown, parseRoster, parseHumanCurve, readHumanCurve, panelWinRate, humanEligible, writeReport } from '../lib/report/index.mjs';
+import { buildLeaderboard, summaryMarkdown, parseRoster, parseHumanCurve, readHumanCurve, panelWinRate, humanEligible, flipHuman, writeReport } from '../lib/report/index.mjs';
 import { indexPage } from '../lib/report/index-page.mjs';
+import { humanMarkdownCell } from '../lib/report/human-chart.mjs';
 import { writeSampleRuns } from '../lib/report/sample-runs.mjs';
 
 // The human curve and the panel's half-score win rate (docs/V1-ROUND4-PLAN.md section 6).
@@ -122,9 +123,15 @@ test('the curve rebins at the scorer\'s weights, needs two raters, and says when
   assert.deepEqual([none.available, none.reason, none.panel.size], [false, 'panel', 1]);
   assert.match(curveMarkdown(none), /fewer than 2 qualified raters/);
   // Fewer than two bins of ten after merging: 人眼数据不够.
-  const few = humanCurve(band('s', 9, 1, ['higher']), { panel: PANEL, seed: 'w' });
-  assert.deepEqual([few.available, few.reason, few.bins.length], [false, 'too_few_pairs', 1]);
+  const few = humanCurve([...band('s', 9, 1, ['higher']), original('e1', 'o1', 50, 50, 'tie'), original('e2', 'o2', 40.01, 40, 'a')], { panel: PANEL, seed: 'w' });
+  assert.deepEqual([few.available, few.reason, few.bins.length, few.equal.pairs], [false, 'too_few_pairs', 1, 2]);
   assert.match(curveMarkdown(few), /人眼数据不够/);
+  // The pairs with equal scores are reported even without a curve.
+  const tally = /Pairs with equal scores \(gap < 0\.05\), in no bin: 2 \(panel: A 1, cannot tell 1, B 0\)/;
+  assert.match(curveMarkdown(few), tally);
+  const fewBoard = buildLeaderboard(design(FOUR), { now: NOW, humanCurve: parseHumanCurve(JSON.parse(JSON.stringify(few))) });
+  assert.match(indexPage(fewBoard), new RegExp(tally.source.replace(' < ', ' &lt; ')));
+  assert.match(summaryMarkdown(fewBoard), tally);
   // Two raters: the report says that "cannot tell" is more frequent.
   assert.match(humanCurve(filler, { panel: ['ann', 'bob'], seed: 'w', samples: 100 }).notes.join(' '), /only 2 qualified raters/);
 });
@@ -149,10 +156,11 @@ test('one draw of the objects serves every bin; a draw that leaves a bin empty i
 // ----------------------------------------------------------------- the report
 
 // A curve the report reads: W = 0.6 in [0, 3), 0.8 in [3, 100] (pairs on six objects).
+// At 1.2.0 (65/35) the gaps are the same: shape and detail equal the score.
 function reportCurve({ version = '1.1.0' } = {}) {
   const originals = [...band('s', 10, 1, ['higher', 'higher', 'tie', 'tie', 'lower']), ...band('l', 10, 10, ['higher', 'higher', 'higher', 'tie', 'tie', 'higher', 'higher', 'higher', 'lower', 'higher'])];
-  const curve = humanCurve(originals, { panel: PANEL, seed: 'report', samples: 500, study: { name: 'unit' } });
-  return JSON.parse(JSON.stringify({ ...curve, scorer: { ...curve.scorer, version } }));
+  const weights = version === '1.2.0' ? { shape: 0.65, detail: 0.35 } : null;
+  return JSON.parse(JSON.stringify(humanCurve(originals, { panel: PANEL, seed: 'report', samples: 500, study: { name: 'unit' }, weights })));
 }
 
 const attempt = (config, task, object, score, extra = {}) => ({ batch: config, task_id: task, attempt: 1, slot: 'a1', system: config, model: 'm', effort: 'high', status: 'ok',
@@ -225,6 +233,44 @@ test('a curve file is refused when its bins or shares do not match its pairs', (
   assert.throws(() => parseHumanCurve(gap), /does not continue/);
   const unavailable = humanCurve(null, { panel: [], seed: 1 });
   assert.equal(parseHumanCurve(JSON.parse(JSON.stringify(unavailable))).available, false);
+  const changed = change => { const copy = JSON.parse(JSON.stringify(good)); change(copy); return () => parseHumanCurve(copy); };
+  // A stored share that is missing or not a number, or an interval outside [0, 1] or upside down.
+  assert.throws(changed(curve => { delete curve.bins[0].shares.higher.value; }), /bin 0 higher does not match its pairs/);
+  assert.throws(changed(curve => { curve.bins[0].shares.higher.value = String(curve.bins[0].shares.higher.value); }), /bin 0 higher does not match/);
+  assert.throws(changed(curve => { delete curve.bins[1].shares.tie; }), /bin 1 tie does not match/);
+  assert.throws(changed(curve => { curve.bins[0].shares.higher.ci95 = [0.9, 0.1]; }), /needs an interval within \[0, 1\]/);
+  assert.throws(changed(curve => { curve.bins[0].shares.higher.ci95 = null; curve.bins[0].shares.higher.interval = 'because'; }), /a reason for none/);
+  // Bins that stop short of 100, or that are not the study's strata.
+  assert.throws(changed(curve => { curve.bins[1].max = 15; curve.bins[1].strata = ['3-8', '8-15']; }), /cover the gap scale up to 100/);
+  assert.throws(changed(curve => { curve.bins[1].max = 20; }), /not a run of the study's strata/);
+  // The counts, objects and mean gap shown with the bin come from its pairs too.
+  assert.throws(changed(curve => { curve.bins[0].pairs += 1; }), /bin 0 does not match its pairs/);
+  assert.throws(changed(curve => { curve.bins[1].mean_gap = 3; }), /bin 1 does not match its pairs/);
+  assert.throws(changed(curve => { curve.pairs[0].gap = 40; }), /their gap \(in their bin and stratum\)/);
+  // Its scorer, tie gap, panel and tally.
+  assert.throws(changed(curve => { curve.scorer.version = '1.2.0'; }), /does not go with weights 50\/50/);
+  assert.throws(changed(curve => { curve.tie_gap = 0.5; }), /tie gap must be 0.05/);
+  assert.throws(changed(curve => { curve.panel.raters = ['ann', 'ann', 'bob']; }), /each once/);
+  assert.throws(changed(curve => { curve.equal.panel.a += 1; }), /does not add up/);
+});
+
+test('the column at 0 and 1 and with every resample the same, also with several attempts per task', () => {
+  // W = 1 in [3, 100]: every pair there was won by the higher-scored side.
+  const curve = parseHumanCurve(JSON.parse(JSON.stringify(humanCurve([...band('s', 10, 1, ['higher', 'tie']), ...band('l', 10, 10, ['higher'])], { panel: PANEL, seed: 'edge', samples: 300 }))));
+  assert.equal(curve.half_win[1], 1);
+  // Three objects with 3, 3 and 1 attempts a side, A ahead by 10 everywhere: sums of 1/9 would give 1.0000000000000002.
+  const sides = (config, score) => [[0, 3], [1, 3], [2, 1]].flatMap(([o, n]) => Array.from({ length: n }, (_, i) => attempt(config, 'o' + o + '-t2', 'o' + o, score, { slot: 'a' + (i + 1) })));
+  const sweep = panelWinRate(sides('A', 60), sides('B', 50), curve, { seed: 'sweep', samples: 300 });
+  assert.deepEqual([sweep.win_rate_a, sweep.ci95, sweep.interval, sweep.attempt_pairs], [1, null, 'boundary', 19]);
+  assert.deepEqual([flipHuman(sweep).win_rate_a, flipHuman(sweep).ci95], [0, null]);
+  assert.deepEqual([panelWinRate(sides('B', 50), sides('A', 60), curve, { samples: 300 }).win_rate_a], [0]);
+  // Equal scores on every attempt pair: 0.5 in every resample, so no interval.
+  const even = panelWinRate(sides('A', 50.02), sides('B', 50), curve, { seed: 'even', samples: 300 });
+  assert.deepEqual([even.win_rate_a, even.ci95, even.interval, even.equal_scores], [0.5, null, 'constant', 19]);
+  assert.equal(humanMarkdownCell({ human: sweep }), '100.0% (no interval: the value is exactly 0 or 1) (3/3 tasks)');
+  assert.equal(humanMarkdownCell({ human: even }), '50.0% (no interval: every resample gave the same value) (3/3 tasks)');
+  assert.match(summaryMarkdown(buildLeaderboard(design(FOUR, { objects: 1 }), { now: NOW, roster: ROSTER, humanCurve: parseHumanCurve(reportCurve()) })),
+    /\(no interval: fewer than 2 objects\) \(3\/3 tasks\)/);
 });
 
 // Hand-made attempts, one per task, t2 / t4 / c1 on `objects` objects: [system, model, effort, mean].
@@ -273,6 +319,16 @@ test('the leaderboard: every pair, ladder pair and effort pair carries the colum
 
   const html = indexPage(board);
   assert.match(html, /<h2 id="human-curve">Human curve<\/h2>/);
+  // Each ladder has two rungs, so no table of all its pairs: the gap to the next rung carries the column.
+  for (const ladder of set.ladders) {
+    assert.equal(ladder.entries.length, 2);
+    const start = html.indexOf('<h4>' + ladder.label), part = html.slice(start, html.indexOf('</table>', start));
+    assert.ok(start >= 0, ladder.label);
+    assert.doesNotMatch(part, /All 1 pair/);
+    assert.match(part, /Panel &frac12;-win of A/);
+    const pair = ladder.pairwise.pairs[0];
+    assert.match(part, new RegExp((100 * pair.human.win_rate_a).toFixed(1).replace('.', '\\.') + '%<small>\\['));
+  }
   assert.match(html, /Panel &frac12;-win of A<small>half-score win rate, 95%<\/small>/);
   assert.match(html, /30 \/ 30 tasks/);
   assert.match(html, /assumes that the gap a human can see does not depend on the task set/);
@@ -334,6 +390,9 @@ test('study.mjs curve and report --human-curve, end to end on files', async () =
     await writeFile(join(dir, 'votes-cy.jsonl'), lines('cy'));
     // Like G1, only with the panel named.
     await assert.rejects(writeHumanCurve(dir, { seed: 'files' }), /needs the named panel/);
+    // A rater named twice is one rater: ann alone does not make a panel of two.
+    await assert.rejects(writeHumanCurve(dir, { seed: 'files', raters: ['ann', 'ann'] }), /names ann more than once/);
+    assert.throws(() => humanCurve([], { panel: ['ann', 'ann'], seed: 1 }), /names a rater twice/);
     const { curve, files } = await writeHumanCurve(dir, { seed: 'files', raters: PANEL, samples: 300 });
     assert.deepEqual(curve.panel.raters, ['ann', 'bob', 'cy']);
     assert.deepEqual(curve.bins.map(bin => bin.counts), [{ higher: 4, tie: 4, lower: 4 }, { higher: 8, tie: 4, lower: 0 }]);

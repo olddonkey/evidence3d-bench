@@ -220,15 +220,16 @@ function laddersSection(board, set) {
         '<p class="muted">No configuration of this set is on this ladder with a counted attempt.</p>' + missing + all;
     }
     // Each rung against the one below it: the gap a reader asks about first.
-    const pairs = new Map(ladder.pairwise.pairs.map(pair => [pair.a + '|' + pair.b, pair]));
+    const pairs = new Map(ladder.pairwise.pairs.map(pair => [pair.a + '|' + pair.b, pair])), human = hasHuman(set);
     const next = (entry, index) => {
       const below = ranks.get(entry.key) !== null && index + 1 < entries.length && ranks.get(entries[index + 1].key) !== null ? entries[index + 1] : null;
       const pair = below ? pairs.get(entry.key + '|' + below.key) : null;
-      return pair ? '<td class="num">' + num(pair.mean_difference, 1, { signed: true }) + '<small>' + interval(pair.t_ci95) + ' t</small></td>' + holmCell(pair, note(pair))
-        : '<td class="num"></td><td></td>';
+      return pair ? '<td class="num">' + num(pair.mean_difference, 1, { signed: true }) + '<small>' + interval(pair.t_ci95) + ' t</small></td>' + holmCell(pair, note(pair)) +
+        (human ? humanCell(pair) : '') : '<td class="num"></td><td></td>' + (human ? '<td class="num"></td>' : '');
     };
     const table = entryTable(entries, '<th class="num">Score</th><th class="num" title="attempts with a valid score report">Success</th>' +
-      '<th class="num" title="this configuration minus the next one down the ladder, per object; Student-t interval">Gap to next</th>' + holmHead(ladder.pairwise.correction),
+      '<th class="num" title="this configuration minus the next one down the ladder, per object; Student-t interval">Gap to next</th>' + holmHead(ladder.pairwise.correction) +
+      (human ? humanHead : ''),
     entry => {
       const index = entries.indexOf(entry);
       return [statCell(entry.score), '<td class="num">' + percent(entry.success.rate) + '<small>' + entry.success.valid + ' / ' + entry.success.attempts + ' att.</small></td>', next(entry, index)];

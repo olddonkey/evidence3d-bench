@@ -343,7 +343,7 @@ higher-scored side, as a function of the headline gap.
 
 - The panel: the qualified raters (section 5.1, `panel.mjs`) among
   `--raters`, which is required, as for G1: the panel the private record
-  lists, never whoever happens to have voted. Each original pair's conclusion
+  lists, never whoever happens to have voted, each rater once. Each original pair's conclusion
   is the plurality of their last votes. With fewer than two qualified raters
   there is no curve.
 - The gap: at the weights of the scorer the curve is for. 50/50 is scorer
@@ -356,7 +356,8 @@ higher-scored side, as a function of the headline gap.
 - Bins: the study's four strata of the gap, [0, 3), [3, 8), [8, 15) and
   [15, 100]. From the smallest up, a stratum with fewer than 10 pairs merges
   into the next one up and is counted again; if the largest is then short it
-  merges into the one below. Fewer than two bins: no curve (人眼数据不够).
+  merges into the one below. Fewer than two bins: no curve (人眼数据不够); the
+  equal-score tally is still reported.
 - Per bin: the shares of "picked the higher-scored", "cannot tell" and "picked
   the lower-scored", and the half-score win rate W = higher + ½ cannot tell.
   Intervals: an object cluster bootstrap, 10 000 resamples, one draw of the

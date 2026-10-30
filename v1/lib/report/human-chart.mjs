@@ -1,5 +1,5 @@
 import { esc, num, NOT_EVALUATED } from './html.mjs';
-import { CURVE_REASONS, INTERVAL_REASONS, SHARES } from '../study/curve.mjs';
+import { CURVE_REASONS, INTERVAL_REASONS, SHARES, equalWords } from '../study/curve.mjs';
 import { HUMAN_REASONS } from './human.mjs';
 
 // The human curve on the page and in summary.md (human.mjs,
@@ -51,7 +51,7 @@ export function humanSection(board) {
   const left = (curve.panel.considered ?? []).filter(item => !item.qualified);
   const leftOut = left.length ? '<p class="legend">Not on the panel: ' + left.map(item => esc(item.rater) + (item.reasons?.length ? ' (' + esc(item.reasons.join('; ')) + ')' : '')).join(', ') + '.</p>' : '';
   if (!curve.available) return '<h2 id="human-curve">Human curve</h2>' + source + leftOut + '<p><strong>No human curve:</strong> ' + esc(CURVE_REASONS[curve.reason] ?? curve.reason) +
-    '. The pairwise tables have no panel half-score win rate.</p>';
+    '. The pairwise tables have no panel half-score win rate.' + (curve.equal ? ' ' + esc(equalWords(curve)) : '') + '</p>';
   const table = '<div class="scroll"><table><thead><tr><th>Score gap</th><th class="num">Pairs</th>' +
     SHARES.map(share => '<th class="num">' + esc(SHARE_LABELS[share]) + '</th>').join('') + '</tr></thead><tbody>' +
     curve.bins.map((bin, k) => '<tr><td>' + esc(binRange(bin, k === curve.bins.length - 1)) + '<small>' + esc(bin.strata.join(' + ')) + '</small></td>' +
@@ -101,20 +101,20 @@ export function humanLegend(set) {
 // --------------------------------------------------------------- markdown
 
 export const humanMarkdownCell = pair => !pair.human || !isNumber(pair.human.win_rate_a) ? 'n/a'
-  : pct(pair.human.win_rate_a, 1) + (pair.human.ci95 ? ' [' + pct(pair.human.ci95[0], 1) + ', ' + pct(pair.human.ci95[1], 1) + ']' : '') + ' (' + pair.human.tasks + '/' + pair.human.tasks_paired + ' tasks)';
+  : pct(pair.human.win_rate_a, 1) + (pair.human.ci95 ? ' [' + pct(pair.human.ci95[0], 1) + ', ' + pct(pair.human.ci95[1], 1) + ']'
+    : ' (no interval: ' + (INTERVAL_REASONS[pair.human.interval] ?? pair.human.interval) + ')') + ' (' + pair.human.tasks + '/' + pair.human.tasks_paired + ' tasks)';
 
 export function humanMarkdown(board) {
   const curve = board.human_curve;
   if (!curve) return [];
   const lines = ['## Human curve', '', 'From `' + (curve.file ?? 'the human curve') + '`' + (curve.study?.name ? ' (study `' + curve.study.name + '`)' : '') + '; ' + scorerWords(curve) +
     '; panel of ' + panelWords(curve) + '.', ''];
-  if (!curve.available) return [...lines, '**No human curve**: ' + (CURVE_REASONS[curve.reason] ?? curve.reason) + '.', ''];
+  if (!curve.available) return [...lines, '**No human curve**: ' + (CURVE_REASONS[curve.reason] ?? curve.reason) + '.' + (curve.equal ? ' ' + equalWords(curve) : ''), ''];
   const cell = value => String(value).replace(/\|/g, '\\|');
   lines.push('| Score gap | Pairs | ' + SHARES.map(share => SHARE_LABELS[share]).join(' | ') + ' |', '|---|---:|' + SHARES.map(() => '---:|').join(''));
   curve.bins.forEach((bin, k) => lines.push('| ' + cell(binRange(bin, k === curve.bins.length - 1)) + ' | ' + bin.pairs + ' | ' +
     SHARES.map(share => pct(bin.shares[share].value, 1) + ' ' + cell(intervalWords(bin.shares[share]))).join(' | ') + ' |'));
   lines.push('', 'Panel conclusions on the original pairs of the blind study, per bin of the headline gap; W = higher + ½ cannot tell; 95% cluster bootstrap intervals over ' +
-    curve.bootstrap.clusters + ' objects. ' + curve.equal.pairs + ' pairs with equal scores (gap < ' + curve.tie_gap + ') are in no bin' +
-    (curve.equal.pairs ? ' (panel: A ' + curve.equal.panel.a + ', cannot tell ' + curve.equal.panel.tie + ', B ' + curve.equal.panel.b + ')' : '') + '. ' + curve.notes.join(' '), '');
+    curve.bootstrap.clusters + ' objects. ' + equalWords(curve) + ' ' + curve.notes.join(' '), '');
   return lines;
 }

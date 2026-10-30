@@ -5,7 +5,8 @@ import { finite } from './stats.mjs';
 import { scorerVersion } from './collect.mjs';
 import { rosterPath } from './roster.mjs';
 import { TIE_GAP, scoreGap } from '../study/panel.mjs';
-import { CURVE_SCHEMA, CURVE_REASONS, INTERVAL_REASONS, OUTCOMES, SHARES, binOf, binShares, curveClusters, curveSampler, halfWinAt, shareInterval } from '../study/curve.mjs';
+import { STRATA } from '../study/select.mjs';
+import { CURVE_SCHEMA, CURVE_REASONS, INTERVAL_REASONS, OUTCOMES, SHARES, binOf, binShares, curveClusters, curveSampler, curveScorer, halfWinAt, shareInterval } from '../study/curve.mjs';
 
 // The human curve in the results report (docs/V1-ROUND4-PLAN.md section 6).
 // The curve itself is the study's (study/curve.mjs, `study.mjs curve`); the
@@ -35,36 +36,68 @@ import { CURVE_SCHEMA, CURVE_REASONS, INTERVAL_REASONS, OUTCOMES, SHARES, binOf,
 export const HUMAN_SAMPLES = 10000;
 export const HUMAN_LEVEL = 0.95;
 
-// Refuses a curve file that does not hold together: its bins must tile the
-// gap scale and its pairs reproduce the shares it states.
+const count = value => Number.isInteger(value) && value >= 0;
+const isProportion = value => finite(value) && value >= 0 && value <= 1;
+
+// Refuses a curve file that does not hold together, so that the page, the
+// Markdown and the column never meet a missing number: its scorer must be a
+// candidate of section 5.2, its tie gap G1's, its bins the study's strata
+// merged and covering the whole gap scale [0, 100], and its pair rows must
+// reproduce every bin's counts, objects, mean gap and shares; each share
+// carries a finite value and either an interval within [0, 1] or a known
+// reason for having none.
 export function parseHumanCurve(data, { file = null, sha256 = null } = {}) {
-  const where = 'human curve' + (file ? ' ' + file : '');
-  if (!data || typeof data !== 'object' || data.schema !== CURVE_SCHEMA) throw new Error(where + ': schema must be ' + CURVE_SCHEMA);
-  if (typeof data.available !== 'boolean') throw new Error(where + ': no "available"');
-  if (!data.scorer || typeof data.scorer.version !== 'string') throw new Error(where + ': no scorer version');
-  if (!Array.isArray(data.skipped_variants)) throw new Error(where + ': no skipped_variants');
+  const where = 'human curve' + (file ? ' ' + file : ''), fail = message => { throw new Error(where + ': ' + message); };
+  if (!data || typeof data !== 'object' || data.schema !== CURVE_SCHEMA) fail('schema must be ' + CURVE_SCHEMA);
+  if (typeof data.available !== 'boolean') fail('no "available"');
+  if (!data.scorer || typeof data.scorer.version !== 'string') fail('no scorer version');
+  let scorer;
+  try { scorer = curveScorer(data.scorer.weights ?? null); } catch { fail('its weights are not a candidate of section 5.2'); }
+  if (scorer.version !== data.scorer.version) fail('scorer ' + data.scorer.version + ' does not go with weights ' + (scorer.weights?.id ?? '50/50'));
+  if (data.tie_gap !== TIE_GAP) fail('its tie gap must be ' + TIE_GAP);
+  if (!Array.isArray(data.skipped_variants) || !data.skipped_variants.every(variant => typeof variant === 'string')) fail('no skipped_variants');
+  const panel = data.panel;
+  if (!panel || !Array.isArray(panel.raters) || !panel.raters.every(rater => typeof rater === 'string') || panel.size !== panel.raters.length ||
+    new Set(panel.raters).size !== panel.raters.length || !Array.isArray(panel.considered)) fail('the panel must list its raters, each once');
+  if (data.equal !== undefined && !(data.equal && count(data.equal.pairs) && ['a', 'tie', 'b'].every(choice => count(data.equal.panel?.[choice])) &&
+    data.equal.panel.a + data.equal.panel.tie + data.equal.panel.b === data.equal.pairs)) fail('its equal-score tally does not add up');
+  if (!Array.isArray(data.notes) || !data.notes.every(note => typeof note === 'string')) fail('no notes');
   if (!data.available) {
-    if (!(data.reason in CURVE_REASONS)) throw new Error(where + ': unavailable without a known reason');
+    if (!(data.reason in CURVE_REASONS)) fail('unavailable without a known reason');
     return { ...data, file, sha256, clusters: null, half_win: null };
   }
-  const bins = data.bins;
-  if (!Array.isArray(bins) || bins.length < 2) throw new Error(where + ': needs two bins or more');
+  const bins = data.bins, last = STRATA[STRATA.length - 1].max;
+  if (!Array.isArray(bins) || bins.length < 2) fail('needs two bins or more');
   bins.forEach((bin, k) => {
-    if (!finite(bin.min) || !finite(bin.max) || !(bin.max > bin.min) || (k === 0 ? bin.min !== 0 : bin.min !== bins[k - 1].max)) {
-      throw new Error(where + ': bin ' + k + ' does not continue the bins before it');
+    if (!finite(bin?.min) || !finite(bin.max) || !(bin.max > bin.min) || (k === 0 ? bin.min !== 0 : bin.min !== bins[k - 1].max)) fail('bin ' + k + ' does not continue the bins before it');
+    const strata = STRATA.filter(stratum => stratum.min >= bin.min && stratum.max <= bin.max);
+    if (!strata.length || strata[0].min !== bin.min || strata[strata.length - 1].max !== bin.max || JSON.stringify(bin.strata) !== JSON.stringify(strata.map(stratum => stratum.id))) {
+      fail('bin ' + k + ' is not a run of the study\'s strata');
     }
   });
-  if (!Array.isArray(data.pairs) || !data.pairs.every(pair => typeof pair.object === 'string' && Number.isInteger(pair.bin) && pair.bin >= 0 && pair.bin < bins.length &&
-    OUTCOMES.includes(pair.outcome))) throw new Error(where + ': pairs must name their object, bin and outcome');
+  if (bins[bins.length - 1].max !== last) fail('its bins must cover the gap scale up to ' + last);
+  if (!Array.isArray(data.pairs) || !data.pairs.every(pair => pair && typeof pair.object === 'string' && Number.isInteger(pair.bin) && pair.bin >= 0 && pair.bin < bins.length &&
+    OUTCOMES.includes(pair.outcome) && finite(pair.gap) && pair.gap >= TIE_GAP && binOf(pair.gap, bins) === pair.bin && bins[pair.bin].strata.includes(pair.stratum))) {
+    fail('pairs must name their object, their gap (in their bin and stratum) and outcome');
+  }
   const clusters = curveClusters(data.pairs, bins.length);
   const totals = new Float64Array(3 * bins.length);
   for (const row of clusters) row.forEach((value, j) => { totals[j] += value; });
   bins.forEach((bin, k) => {
-    const shares = binShares(totals, k);
+    const inBin = data.pairs.filter(pair => pair.bin === k), shares = binShares(totals, k);
+    if (!shares || bin.pairs !== inBin.length || bin.objects !== new Set(inBin.map(pair => pair.object)).size ||
+      !(Math.abs(bin.mean_gap - inBin.reduce((sum, pair) => sum + pair.gap, 0) / inBin.length) <= 1e-9) ||
+      !OUTCOMES.every((outcome, j) => bin.counts?.[outcome] === totals[3 * k + j])) fail('bin ' + k + ' does not match its pairs');
     for (const share of SHARES) {
-      if (!shares || Math.abs(shares[share] - bin.shares?.[share]?.value) > 1e-12) throw new Error(where + ': bin ' + k + ' ' + share + ' does not match its pairs');
+      const stated = bin.shares?.[share];
+      if (!stated || !finite(stated.value) || !(Math.abs(shares[share] - stated.value) <= 1e-12)) fail('bin ' + k + ' ' + share + ' does not match its pairs');
+      const interval = stated.ci95 === null ? stated.interval in INTERVAL_REASONS
+        : Array.isArray(stated.ci95) && stated.ci95.length === 2 && stated.ci95.every(isProportion) && stated.ci95[0] <= stated.ci95[1] && stated.interval === null;
+      if (!interval) fail('bin ' + k + ' ' + share + ' needs an interval within [0, 1] or a reason for none');
     }
   });
+  const b = data.bootstrap;
+  if (!b || !count(b.clusters) || b.clusters !== clusters.length || !count(b.resamples) || !count(b.redrawn) || !count(data.min_bin_pairs)) fail('no bootstrap record');
   return { ...data, file, sha256, clusters, half_win: Float64Array.from(bins, (_, k) => halfWinAt(totals, k)) };
 }
 
@@ -100,6 +133,12 @@ export function humanApplies(curve, attempts) {
 }
 
 export const HUMAN_REASONS = { ...CURVE_REASONS, scorer: 'the reports were not all scored by the scorer the curve was made for' };
+
+// Sums of 1 / n over attempt pairs drift by a few ulps (three attempts a side
+// that all win give 1.0000000000000002). The column is settled to 1e-12, far
+// below anything it shows, so that a value of 0 or 1, 1 - x and a constant
+// resample are exact before the rules of section 4 look at them.
+const settle = value => Math.min(1, Math.max(0, Math.round(value * 1e12) / 1e12));
 
 // The column for one pair: A's and B's counted attempts on the objects the
 // pair is compared on.
@@ -147,7 +186,7 @@ export function panelWinRate(attemptsA, attemptsB, curve, { seed = 'e3d-human', 
   const valueOf = (sums, W, count) => { let value = sums[K]; for (let k = 0; k < K; k++) value += sums[k] * W[k]; return value / count; };
   const observedSums = new Float64Array(K + 1);
   for (const row of rows) row.forEach((value, j) => { observedSums[j] += value; });
-  const value = valueOf(observedSums, curve.half_win, rows.length);
+  const value = settle(valueOf(observedSums, curve.half_win, rows.length));
   if (rows.length < minObjects) return { win_rate_a: value, ci95: null, interval: value === 0 || value === 1 ? 'boundary' : fewReason, samples: 0, ...coverage };
 
   const random = rng(seed), sampler = curveSampler(curve.clusters, K, random.fork('study objects'), { samples }), draws = random.fork('objects');
@@ -161,14 +200,14 @@ export function panelWinRate(attemptsA, attemptsB, curve, { seed = 'e3d-human', 
       const row = rows[Math.floor(draws.next() * rows.length)];
       for (let j = 0; j <= K; j++) sums[j] += row[j];
     }
-    values.push(valueOf(sums, W, rows.length));
+    values.push(settle(valueOf(sums, W, rows.length)));
   }
   const share = shareInterval(value, Float64Array.from(values).sort(), { level });
   return { win_rate_a: value, ci95: share.ci95, interval: share.interval, samples: values.length, ...coverage };
 }
 
 // The same column read the other way round (B's half-score win rate).
-export const flipHuman = human => human ? { ...human, win_rate_a: finite(human.win_rate_a) ? 1 - human.win_rate_a : human.win_rate_a,
-  ci95: human.ci95 ? [1 - human.ci95[1], 1 - human.ci95[0]] : null } : human ?? null;
+export const flipHuman = human => human ? { ...human, win_rate_a: finite(human.win_rate_a) ? settle(1 - human.win_rate_a) : human.win_rate_a,
+  ci95: human.ci95 ? [settle(1 - human.ci95[1]), settle(1 - human.ci95[0])] : null } : human ?? null;
 
 export const humanIntervalReason = reason => INTERVAL_REASONS[reason] ?? reason;
