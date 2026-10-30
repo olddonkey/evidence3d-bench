@@ -10,7 +10,7 @@ import { generateModel, GENERATOR_VERSION } from '../generator/index.mjs';
 import { mutations } from '../score/mutations.mjs';
 import { studyCameras, renderViews, STUDY_VIEWS, STUDY_SIZE, STUDY_SHADING, FRAME_FILL, BACKGROUND } from './render.mjs';
 import { imageName, ROLES } from './select.mjs';
-import { voteFiles, readVoteFiles, lockVoting } from './votes.mjs';
+import { voteFiles, readVoteFiles, lockVoting, KEY_BACKUP } from './votes.mjs';
 import { LEGACY_RATER } from './page/state.js';
 import { isCatch, isOriginal } from './panel.mjs';
 import { studyDir, DEFAULT_DATA_ROOT } from './index.mjs';
@@ -36,8 +36,6 @@ export const CATCH_CATEGORIES = ['massing', 'roof'];
 // (a chimney changes about 2 %, a house's roof about 34 %).
 export const MIN_CHANGED_SHARE = 0.15;
 export const DEV_SET_FILE = fileURLToPath(new URL('../../sets/dev.json', import.meta.url));
-// key.json as it was, kept while add-catch replaces key.json and pairs.json.
-export const KEY_BACKUP = 'key.json.before-add-catch';
 
 const exists = async path => stat(path).then(item => item.size > 0, () => false);
 
@@ -111,11 +109,12 @@ async function ownerVotes(dir, legacyRater) {
 }
 
 async function addLocked({ dir, objects, seed, count, minChangedShare, legacyRater, devSet, now, log }) {
+  const recovered = await recover(dir);
+  if (recovered) log({ event: 'catch-recovered', study: dir, key: recovered });
   const keyText = await readFile(join(dir, 'key.json'), 'utf8'), key = JSON.parse(keyText);
   const study = JSON.parse(await readFile(join(dir, 'pairs.json'), 'utf8'));
   if (study.pairs.length !== key.pairs.length || study.pairs.some((pair, index) => pair.id !== key.pairs[index].id)) {
-    throw new Error('pairs.json and key.json do not list the same pairs in the same order' + (await exists(join(dir, KEY_BACKUP))
-      ? ': an add-catch did not finish; ' + join(dir, KEY_BACKUP) + ' is key.json from before it, move it back to key.json' : ''));
+    throw new Error('pairs.json and key.json do not list the same pairs in the same order');
   }
   if (key.pairs.some(isCatch)) throw new Error(dir + ' already has catch pairs');
   // Nothing is placed before the last pair the owner has rated.
@@ -230,16 +229,40 @@ async function addLocked({ dir, objects, seed, count, minChangedShare, legacyRat
     generator: GENERATOR_VERSION, categories: CATCH_CATEGORIES.slice(), min_changed_share: minChangedShare, after_position: lastRated };
   await publish(dir, keyText, key, { ...study, pairs: publicPairs });
   return {
-    dir, added: count, pairs: keyPairs.length, after_position: lastRated, images: written,
+    dir, ...(recovered ? { recovered } : {}), added: count, pairs: keyPairs.length, after_position: lastRated, images: written,
     groups: chosen.map(item => ({ object: item.object, group: item.group, category: item.category, changed_share: item.changed_share })),
   };
+}
+
+// An add-catch that did not finish (KEY_BACKUP is there) is put right before
+// anything else: if key.json and pairs.json list the same pairs, it stopped
+// before replacing either, or after replacing both, and the backup goes
+// ('kept'); if pairs.json is the old one and the backup lists its pairs, the
+// backup goes back to key.json ('restored'). Anything else is left alone, with
+// an error. Returns null when there was nothing to put right.
+async function recover(dir) {
+  const keyFile = join(dir, 'key.json'), backup = join(dir, KEY_BACKUP);
+  let backupText;
+  try { backupText = await readFile(backup, 'utf8'); } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+  const ids = text => { try { return JSON.parse(text).pairs.map(pair => pair.id).join(','); } catch { return null; } };
+  const listed = ids(await readFile(join(dir, 'pairs.json'), 'utf8'));
+  let action;
+  if (listed !== null && ids(await readFile(keyFile, 'utf8')) === listed) action = 'kept';
+  else if (listed !== null && ids(backupText) === listed) { await rename(backup, keyFile); action = 'restored'; }
+  else throw new Error(backup + ' is there and neither it nor key.json lists the pairs of pairs.json: put the study right by hand');
+  for (const file of [backup, keyFile + '.add-catch.tmp', join(dir, 'pairs.json.add-catch.tmp')]) await rm(file, { force: true });
+  return action;
 }
 
 // key.json and pairs.json change together or not at all. Both are written
 // beside them first and key.json as it was is kept aside (KEY_BACKUP); then
 // key.json and pairs.json are renamed into place. If pairs.json cannot be,
 // the old key.json goes back. The backup is removed once both are in place;
-// if even putting it back fails, it stays, and the error says what to do.
+// if even putting it back fails, it stays: until add-catch runs again and
+// puts the study right (recover), nothing reads the study (checkFinished).
 async function publish(dir, keyText, key, pairs) {
   const keyFile = join(dir, 'key.json'), pairsFile = join(dir, 'pairs.json'), backup = join(dir, KEY_BACKUP);
   const nextKey = keyFile + '.add-catch.tmp', nextPairs = pairsFile + '.add-catch.tmp';
@@ -258,8 +281,8 @@ async function publish(dir, keyText, key, pairs) {
   } catch (error) {
     await tidy(nextPairs);
     try { await rename(backup, keyFile); } catch (restore) {
-      throw new Error('add-catch wrote key.json but not pairs.json (' + error.message + ') and could not put the old key.json back (' + restore.message + '): move ' +
-        backup + ' to ' + keyFile + ' before anyone votes', { cause: error });
+      throw new Error('add-catch wrote key.json but not pairs.json (' + error.message + ') and could not put the old key.json back (' + restore.message + '); it is in ' +
+        backup + '. Run add-catch again, which puts it back first; until then the study is not served, exported, qualified or analysed', { cause: error });
     }
     throw new Error('add-catch could not write pairs.json (' + error.message + '); key.json was put back, nothing changed', { cause: error });
   }

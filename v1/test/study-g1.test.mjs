@@ -12,13 +12,14 @@ import { writeSampleRuns } from '../lib/report/sample-runs.mjs';
 import { STRATA, higherSide } from '../lib/study/select.mjs';
 import { prepareStudy, exportStudy, studyDir } from '../lib/study/index.mjs';
 import { analyzeStudy, analysisMarkdown, writeAnalysis } from '../lib/study/analyze.mjs';
-import { addCatchPairs, devModels, KEY_BACKUP } from '../lib/study/catch.mjs';
+import { addCatchPairs, devModels } from '../lib/study/catch.mjs';
+import { startStudyServer } from '../lib/study/server.mjs';
 import { g1Analysis, g1Decision, targetVerdict } from '../lib/study/g1.mjs';
 import {
   TIE_GAP, CANDIDATE_WEIGHTS, scoreGap, weightedScore, weightedGap, rescorePair, isOriginal, isCatch, isRepeat, latestVotes,
   qualifyRater, qualifyRaters, qualifyStudy, pluralityChoice, panelOriginals, percentileInterval, objectBootstrap, proportionInterval,
 } from '../lib/study/panel.mjs';
-import { lockVoting, VOTING_LOCK } from '../lib/study/votes.mjs';
+import { lockVoting, VOTING_LOCK, KEY_BACKUP } from '../lib/study/votes.mjs';
 
 // Round 4 plan (docs/V1-ROUND4-PLAN.md): rater qualification and the panel
 // (section 5.1), gate G1 (section 5.2), intervals (section 4), catch pairs.
@@ -554,18 +555,36 @@ test('add-catch changes key.json and pairs.json together or not at all', async (
     assert.deepEqual(await leftovers(), []);
     // Nor can key.json go back: the old one stays aside, and add-catch says how to recover.
     await assert.rejects(failing('rename', (from, to) => String(to).endsWith('pairs.json') || String(from).endsWith(KEY_BACKUP) ? ioError() : null,
-      () => addCatchPairs({ dataRoot, name: 'unit', objects, seed: 's' })), /could not put the old key\.json back[^\n]*key\.json\.before-add-catch to [^\n]*key\.json before anyone votes/);
+      () => addCatchPairs({ dataRoot, name: 'unit', objects, seed: 's' })), /could not put the old key\.json back[^\n]*key\.json\.before-add-catch\. Run add-catch again, which puts it back first/);
     assert.equal((await texts())[1], before[1]);
     assert.equal(await readFile(join(dir, KEY_BACKUP), 'utf8'), before[0]);
-    await assert.rejects(addCatchPairs({ dataRoot, name: 'unit', objects, seed: 's' }), /an add-catch did not finish; [^\n]*key\.json\.before-add-catch is key\.json from before it/);
-    await fsp.rename(join(dir, KEY_BACKUP), join(dir, 'key.json'));
-    assert.deepEqual(await texts(), before);
-    // The new files cannot be written: nothing changed.
+    // Until add-catch runs again, nothing reads the study.
+    const unfinished = /key\.json\.before-add-catch is there: an add-catch did not finish/;
+    const readers = [() => startStudyServer({ studyDir: dir, port: 0 }), () => exportStudy({ dataRoot, name: 'unit', out: join(root, 'out') }), () => qualifyStudy(dir), () => writeAnalysis(dir)];
+    for (const reader of readers) await assert.rejects(reader(), unfinished);
+    // add-catch puts key.json back first; then the new files cannot be written: nothing changed.
+    const logged = [];
     await assert.rejects(failing('writeFile', path => String(path).endsWith('.add-catch.tmp') ? ioError() : null,
-      () => addCatchPairs({ dataRoot, name: 'unit', objects, seed: 's' })), /could not write the study \(input\/output error\); nothing changed/);
+      () => addCatchPairs({ dataRoot, name: 'unit', objects, seed: 's', log: event => logged.push(event) })), /could not write the study \(input\/output error\); nothing changed/);
+    assert.deepEqual(logged.filter(event => event.event === 'catch-recovered').map(event => event.key), ['restored']);
     assert.deepEqual(await texts(), before);
     assert.deepEqual(await leftovers(), []);
-    assert.equal((await addCatchPairs({ dataRoot, name: 'unit', objects, seed: 's' })).added, 6);
+    const done = await addCatchPairs({ dataRoot, name: 'unit', objects, seed: 's' });
+    assert.deepEqual([done.added, done.recovered], [6, undefined]);
     assert.deepEqual(await leftovers(), []);
+    // Stopped after replacing both, before removing the backup: a server already running takes no vote, nothing else reads
+    // the study, and add-catch keeps what is there (it lists the same pairs as pairs.json) and refuses to add more.
+    const served = await startStudyServer({ studyDir: dir, port: 0 });
+    try {
+      await writeFile(join(dir, KEY_BACKUP), before[0]);
+      const pair = JSON.parse((await texts())[1]).pairs[0].id;
+      const refused = await fetch(served.url + 'vote', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rater: 'ann', pair, choice: 'a', ms: 5 }) });
+      assert.equal(refused.status, 409);
+      assert.match((await refused.json()).error, unfinished);
+    } finally { await served.close(); }
+    for (const reader of readers) await assert.rejects(reader(), unfinished);
+    await assert.rejects(addCatchPairs({ dataRoot, name: 'unit', objects, seed: 's' }), /already has catch pairs/);
+    assert.deepEqual(await leftovers(), []);
+    assert.equal((await qualifyStudy(dir)).catch_pairs, 6);
   });
 });

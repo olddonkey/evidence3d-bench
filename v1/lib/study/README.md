@@ -117,10 +117,13 @@ stays. In order:
 - key.json and pairs.json change together or not at all: both are written
   beside them first, key.json as it was is kept as
   `key.json.before-add-catch`, and if pairs.json cannot be put in place the
-  old key.json goes back. Should even that fail, the backup stays, the error
-  says to move it back to key.json, and a later `add-catch` refuses with the
-  same advice. New images are written first; until pairs.json names them
-  nothing shows them.
+  old key.json goes back. Should even that fail (or the process stop between
+  the two), the backup stays, and while it is there `serve` neither starts
+  nor takes a vote and `export`, `qualify` and `analyze` refuse. Running
+  `add-catch` again puts the study right first: the backup goes back to
+  key.json when pairs.json is still the old one, and is dropped when key.json
+  and pairs.json already list the same pairs. New images are written first;
+  until pairs.json names them nothing shows them.
 - key.json marks each with `catch: { correct, object, set, archetype, seed,
   group, category, changed_share }` and gets a `catch_pairs` block (time,
   seed, objects, generator version, threshold, `after_position`); pairs.json
@@ -369,7 +372,8 @@ raters left out, legacy votes with `--legacy-rater`), and add-catch on a
 prepared study (places after the last rated pair, votes untouched, renders,
 nothing in pairs.json, refusals for other raters' votes in either file, the
 voting lock, a vote being saved as it starts, a vote that arrives while it
-draws, two runs at once, a failed write of either document, seeded).
+draws, two runs at once, a failed write of either document and every reader
+refusing until add-catch puts the study right, seeded).
 
 `node --test v1/test/study.test.mjs`: stratification, the per-task cap, t1
 skipped, cross-configuration preference, shortfall reporting, repeats

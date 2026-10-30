@@ -1,4 +1,4 @@
-import { readFile, readdir, open, rm } from 'node:fs/promises';
+import { readFile, readdir, open, rm, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { join } from 'node:path';
@@ -19,6 +19,9 @@ export const VOTES_FILE = 'votes.jsonl';
 export const VOTING_LOCK = 'voting.lock';
 // How long taking the lock waits for a vote being saved.
 const LOCK_WAIT_MS = 2000;
+// key.json as it was, kept while add-catch replaces key.json and pairs.json
+// (catch.mjs). Still there afterwards, that replacement did not finish.
+export const KEY_BACKUP = 'key.json.before-add-catch';
 const RATER_FILE = /^votes-(.*)\.jsonl$/;
 // Anything that looks like a votes file but is not read is reported, never silently dropped.
 const VOTES_LIKE = /^votes.*\.jsonl$/;
@@ -228,4 +231,18 @@ export async function lockVoting(studyDir, { kind = 'add-catch', waitMs = LOCK_W
   return async () => {
     if ((await votingLock(studyDir))?.token === token) await rm(path, { force: true });
   };
+}
+
+// Throws (code EUNFINISHED) while an add-catch has not finished (KEY_BACKUP is
+// there): key.json and pairs.json may not belong together, so nobody rates,
+// exports, qualifies or analyses the study until add-catch is run again, which
+// puts it right first.
+export async function checkFinished(studyDir) {
+  const backup = join(studyDir, KEY_BACKUP);
+  try { await stat(backup); } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+  throw Object.assign(new Error(backup + ' is there: an add-catch did not finish, so key.json and pairs.json may not belong together. ' +
+    'Run add-catch again (it puts the study right first) before anyone rates, or the study is exported, qualified or analysed'), { code: 'EUNFINISHED' });
 }
