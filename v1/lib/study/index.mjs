@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { writeJSON } from '../../../lib/io.mjs';
 import { collectSubmissions, selectPairs, publicPairs, privateKey, DEFAULT_PAIRS, DEFAULT_REPEAT_SHARE, PER_TASK } from './select.mjs';
 import { renderStudyImages, STUDY_VIEWS, STUDY_SIZE } from './render.mjs';
-import { voteFiles } from './votes.mjs';
+import { voteFiles, checkFinished } from './votes.mjs';
 
 // The blind paired-comparison study: prepare (select pairs, render them, write
 // pairs.json and key.json), then serve.mjs for the rating and analyze.mjs for
@@ -115,6 +115,7 @@ async function realTarget(path) {
 export async function exportStudy({ dataRoot = DEFAULT_DATA_ROOT, name, out }) {
   if (typeof out !== 'string' || !out) throw new Error('export needs an output directory');
   const source = studyDir(dataRoot, name), target = resolve(out);
+  await checkFinished(source);
   // Compared as real paths, so a symlinked alias of the repository (e.g. macOS /tmp for /private/tmp) is caught.
   const inRepo = relative(await realpath(REPO_ROOT), await realTarget(target));
   const outside = inRepo === '..' || inRepo.startsWith('..' + sep) || isAbsolute(inRepo);

@@ -1,7 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeJSON } from '../../../lib/io.mjs';
-import { readVoteFiles } from './votes.mjs';
+import { readVoteFiles, checkFinished } from './votes.mjs';
 import { LEGACY_RATER } from './page/state.js';
 import { CATEGORIES, cohenKappa, fleissKappa } from './kappa.mjs';
 import { isOriginal, isCatch, qualifyRaters, BOOTSTRAP_RESAMPLES, QUALIFICATION, CURRENT_SCORER, NEXT_SCORER } from './panel.mjs';
@@ -449,6 +449,7 @@ export function analysisMarkdown(analysis) {
 //   legacyRater, raters: see readVoteFiles and analyzeStudy.
 //   g1Seed: see analyzeStudy.
 export async function writeAnalysis(studyDir, { legacyRater = LEGACY_RATER, raters = null, g1Seed = null } = {}) {
+  await checkFinished(studyDir);
   const key = JSON.parse(await readFile(join(studyDir, 'key.json'), 'utf8'));
   const read = await readVoteFiles(studyDir, { legacyRater });
   const analysis = analyzeStudy({ key, votes: read.votes, malformed: read.malformed, duplicates: read.duplicates, files: read.files, ignored: read.ignored, legacyRater, raters, g1Seed });

@@ -45,9 +45,9 @@ const SCORES = { A: 30, B: 60, C: 90, FLAKY: 40 };
 
 // A scorer that scores by marker, logs every call (and every context load),
 // throws on THROW (always) and FLAKY (its first time only), takes its whole
-// process down on CRASH, reports its own failure on OWN (flagged) and on
-// INTERNAL (as v1/lib/score reports an internal error it caught, unflagged),
-// judges BAD invalid.
+// process down on CRASH, reports its own failure on OWN (flagged, as
+// v1/lib/score reports an internal error it caught) and on INTERNAL (unflagged,
+// as v1/lib/score reported one before it set the flag), judges BAD invalid.
 const fakeScorer = log => `import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 const marker = glb => { try { return JSON.parse(glb.subarray(20).toString('utf8').trim()).e3d; } catch { return null; } };
 export async function loadContext() { appendFileSync(${JSON.stringify(log)}, 'context\\n'); return { loaded: true }; }
@@ -387,13 +387,16 @@ test('the scorer\'s own report of an internal error counts as its failure; an in
   // A context the scorer cannot work with: scoreSoup catches what it throws.
   const internal = scoreSoup({ candidate, context: { task_id: 'x' } });
   assert.equal(internal.valid, false); assert.match(internal.error, /^Scorer error: /);
+  assert.equal(internal.scorer_failed, true, 'the scorer marks its own failure'); assert.equal(internal.score, 0);
   assert.equal(scorerFailed(internal), true);
   const invalid = await scoreSubmission({ glb: Buffer.from('not a glb'), context: { task_id: 'x', budget: {} } });
-  assert.equal(invalid.valid, false); assert.equal(scorerFailed(invalid), false);
+  assert.equal(invalid.valid, false); assert.equal('scorer_failed' in invalid, false); assert.equal(scorerFailed(invalid), false);
+  const empty = scoreSoup({ candidate: { triangles: 0, positions: new Float32Array(0), parts: [] }, context: { task_id: 'x' } });
+  assert.equal(empty.valid, false); assert.equal('scorer_failed' in empty, false, 'a model without triangles is invalid, not a scorer failure');
   assert.equal(scorerFailed({ valid: true, score: 50, error: 'Scorer error: but valid' }), false);
 });
 
-test('a snapshot the scorer reports an internal error on, as v1/lib/score does, is retried and missing, not 0', async t => {
+test('a snapshot the scorer reports an internal error on without the flag, as v1/lib/score did, is retried and missing, not 0', async t => {
   const batch = await snapshotBatch(t, { steps: [{ after: 1, write: 'INTERNAL' }, { after: 2, write: 'C' }] });
   await execute({ batchDir: batch.batchDir, deps: batch.deps });
   const result = await readJSON(join(batch.attemptDir, 'result.json'));
@@ -407,7 +410,9 @@ test('a snapshot identical to a final file the scorer failed on is scored itself
   await execute({ batchDir: batch.batchDir, deps: batch.deps });
   const result = await readJSON(join(batch.attemptDir, 'result.json'));
   assert.deepEqual(result.snapshots.map(item => [item.t, item.status, item.score, item.score_of ?? null, item.tries ?? null]), [[2, 'score_error', null, null, 3]]);
-  assert.deepEqual(await batch.calls(), ['score OWN maps', 'context', 'score OWN with-context', 'context', 'score OWN with-context', 'context', 'score OWN with-context']);
+  assert.deepEqual(await batch.calls(), ['score OWN maps', 'score OWN maps', 'score OWN maps', 'context', 'score OWN with-context', 'context', 'score OWN with-context',
+    'context', 'score OWN with-context'], 'the final file is scored three times, then the snapshot');
+  assert.deepEqual([result.status, result.score, result.score_tries], ['score_error', null, 3]);
 });
 
 test('with --snapshot-seconds 0 nothing is taken and result.json has no snapshots', async t => {

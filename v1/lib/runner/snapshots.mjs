@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { join, relative } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { readJSON, writeJSON } from './workspace.mjs';
-import { scoreOf } from './status.mjs';
+import { scoreOf, scorerFailed, scoreAgain, SCORER_ERROR_PREFIX } from './status.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -27,20 +27,9 @@ export const SNAPSHOT_SCHEMA = 'e3d-snapshots-v1';
 export const SETTLE = { tries: 4, ms: 750 };
 
 // A snapshot the scorer fails on (it throws, crashes or times out, or reports
-// its own failure, see scorerFailed) is scored again from the same stored file
-// this many times before it is a score_error.
-export const SNAPSHOT_SCORE_RETRIES = 2;
-
-// A report that records the scorer's failure rather than judging the file:
-// score-worker.mjs writes { scorer_failed: true, error } when the scorer
-// threw, and a scorer that catches its own internal error marks its report
-// the same way. The scorer in v1/lib/score does not mark it yet (that changes
-// its source hash; round-4 plan, section 11): its scoreSoup reports a caught
-// internal error as valid: false with an error starting SCORER_ERROR_PREFIX,
-// which counts too. valid: false otherwise means an invalid model, scored 0.
-export const SCORER_ERROR_PREFIX = 'Scorer error: ';
-export const scorerFailed = report => report?.scorer_failed === true ||
-  (report?.valid === false && typeof report.error === 'string' && report.error.startsWith(SCORER_ERROR_PREFIX));
+// its own failure) is scored again from the same stored file, as the final
+// file is: SCORE_RETRIES and scorerFailed are in status.mjs.
+export { scorerFailed, SCORER_ERROR_PREFIX };
 
 export const snapshotName = t => 't' + String(t).padStart(4, '0');
 
@@ -278,23 +267,12 @@ export async function rescoreSnapshots({ attemptDir, batchDir, result, finalRepo
   }
   for (const job of jobs) {
     const path = join(scoreDir, job.name + '.json');
-    for (let tries = 1; ; tries++) {
-      // Whether the scorer failed, apart from what it said (a message may be empty).
-      let report = null, failed = false, failure = '';
-      try {
-        report = await score(await readFile(join(attemptDir, job.file)));
-        if (!report || typeof report !== 'object') { failed = true; failure = 'the scorer returned no report'; report = null; }
-        else if (scorerFailed(report)) { failed = true; failure = report.error || 'the scorer reported that it failed'; }
-      } catch (error) { failed = true; failure = error?.message || String(error) || 'the scorer threw'; }
-      if (!failed) {
-        await writeJSON(path, report);
-        scores.set(job.sha256, { status: 'scored', score: scoreOf(report), valid: report.valid !== false, ...(report.valid === false && report.error ? { error: report.error } : {}),
-          ...(tries > 1 ? { tries } : {}), report: relative(batchDir, path) });
-        break;
-      }
-      await writeJSON(tries > SNAPSHOT_SCORE_RETRIES ? path : join(scoreDir, job.name + '.try-' + tries + '.json'), report ?? { scorer_failed: true, error: failure });
-      if (tries > SNAPSHOT_SCORE_RETRIES) { scores.set(job.sha256, { status: 'score_error', score: null, valid: null, tries, error: failure }); break; }
-    }
+    const { report, failed, failure, tries } = await scoreAgain(async () => score(await readFile(join(attemptDir, job.file))),
+      { keep: (tries, failedReport) => writeJSON(join(scoreDir, job.name + '.try-' + tries + '.json'), failedReport) });
+    await writeJSON(path, report ?? { scorer_failed: true, error: failure });
+    if (failed) scores.set(job.sha256, { status: 'score_error', score: null, valid: null, tries, error: failure });
+    else scores.set(job.sha256, { status: 'scored', score: scoreOf(report), valid: report.valid !== false, ...(report.valid === false && report.error ? { error: report.error } : {}),
+      ...(tries > 1 ? { tries } : {}), report: relative(batchDir, path) });
   }
   return scoredSnapshots(records, { scores, final });
 }

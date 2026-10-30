@@ -87,6 +87,7 @@ stays. In order:
    (the same `--legacy-rater`), at the weights G1 kept: the human curve that
    the results report reads (below).
 
+
 ### Catch pairs (`catch.mjs`)
 
 - A catch pair shows a development-set object (`v1/sets/dev.json`, generated
@@ -122,10 +123,13 @@ stays. In order:
 - key.json and pairs.json change together or not at all: both are written
   beside them first, key.json as it was is kept as
   `key.json.before-add-catch`, and if pairs.json cannot be put in place the
-  old key.json goes back. Should even that fail, the backup stays, the error
-  says to move it back to key.json, and a later `add-catch` refuses with the
-  same advice. New images are written first; until pairs.json names them
-  nothing shows them.
+  old key.json goes back. Should even that fail (or the process stop between
+  the two), the backup stays, and while it is there `serve` neither starts
+  nor takes a vote and `export`, `qualify` and `analyze` refuse. Running
+  `add-catch` again puts the study right first: the backup goes back to
+  key.json when pairs.json is still the old one, and is dropped when key.json
+  and pairs.json already list the same pairs. New images are written first;
+  until pairs.json names them nothing shows them.
 - key.json marks each with `catch: { correct, object, set, archetype, seed,
   group, category, changed_share }` and gets a `catch_pairs` block (time,
   seed, objects, generator version, threshold, `after_position`); pairs.json
@@ -378,6 +382,8 @@ higher-scored side, as a function of the headline gap.
   drawn again and counted (`bootstrap.redrawn`). No interval for a share of 0
   or 1, or when every resample gives the same share.
 - Seeded: `--seed` comes from the private decision record, like G1's.
+- Like every reader of the study, it refuses a study whose add-catch did not
+  finish (`checkFinished`).
 
 `human-curve.json` (schema `e3d-human-curve-v1`) holds the bins, the equal
 pairs' tally, the panel and the raters left out with their reasons, the
@@ -414,7 +420,8 @@ raters left out, legacy votes with `--legacy-rater`), and add-catch on a
 prepared study (places after the last rated pair, votes untouched, renders,
 nothing in pairs.json, refusals for other raters' votes in either file, the
 voting lock, a vote being saved as it starts, a vote that arrives while it
-draws, two runs at once, a failed write of either document, seeded).
+draws, two runs at once, a failed write of either document and every reader
+refusing until add-catch puts the study right, seeded).
 
 `node --test v1/test/study.test.mjs`: stratification, the per-task cap, t1
 skipped, cross-configuration preference, shortfall reporting, repeats
@@ -435,5 +442,7 @@ vote wins, strata, ties, self-consistency, disagreements; Cohen's and Fleiss'
 
 `node --test v1/test/human-curve.test.mjs`: the bins and their merging, the
 curve on a hand-counted example (equal scores apart, shares and W, no interval
-at 0 or 1, seeded), rebinning at other weights, too few raters or pairs, the
-redraw of a draw with an empty bin, and `curve` end to end on files.
+at 0 or 1, seeded), rebinning at other weights, too few raters (also with
+pairs) or pairs, the redraw of a draw with an empty bin, and `curve` end to end
+on files (the named panel, each rater once, an unfinished add-catch refused);
+the report side of the curve is in v1/lib/report/README.md.
