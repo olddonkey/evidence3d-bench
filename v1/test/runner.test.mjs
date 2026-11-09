@@ -270,6 +270,15 @@ test('tool surface: extra tools, MCP servers, API-key auth and foreign codex ite
   assert.deepEqual(toolSurfaceProblems('codex', codex), ['codex produced a web_search item']);
 });
 
+test('tool surface: the reviewed built-in plugins pass (CLI 2.1.321 set), any other plugin is reported', () => {
+  const builtin = name => ({ name, path: 'builtin', source: name + '@builtin' });
+  const reviewed = ['cc-plugin-agents-md', 'cc-plugin-privacy', 'cc-plugin-plugin-authoring'].map(builtin);
+  const withPlugins = plugins => parseClaudeEvents([{ ...CLAUDE_EVENTS[0], plugins }, ...CLAUDE_EVENTS.slice(1)]);
+  assert.deepEqual(toolSurfaceProblems('claude-code', withPlugins(reviewed)), []);
+  assert.deepEqual(toolSurfaceProblems('claude-code', withPlugins([...reviewed, builtin('cc-plugin-mermaid')])),
+    ['claude loaded plugins cc-plugin-mermaid']);
+});
+
 // ---------------------------------------------------------------- processes
 
 test('captureProcess reassembles JSON lines split across writes and keeps the exact raw log', async t => {

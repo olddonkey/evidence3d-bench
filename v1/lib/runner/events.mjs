@@ -250,7 +250,10 @@ export function parseAntigravityEvents(events) {
 // CLI version, so batches on different CLIs are flagged either way.
 //   cc-plugin-plugin-authoring (CLI 2.1.288+): a skill for writing Claude Code
 //   extensions; a skill description in the system prompt, no tools, no network.
-export const CLAUDE_BUILTIN_PLUGINS = ['cc-plugin-agents-md', 'cc-plugin-telemetry', 'cc-plugin-plugin-authoring'];
+//   cc-plugin-privacy (seen from CLI 2.1.321; absent in 2.1.316): a tool.check
+//   hook on Bash that refuses a command holding the signed-in account's email
+//   address next to a User-Agent setting; no tools, no prompt text, no network.
+export const CLAUDE_BUILTIN_PLUGINS = ['cc-plugin-agents-md', 'cc-plugin-telemetry', 'cc-plugin-plugin-authoring', 'cc-plugin-privacy'];
 
 // Problems with the tool surface a finished session actually used or was given.
 export function toolSurfaceProblems(system, summary) {
