@@ -336,8 +336,10 @@ here:
   scorer source differ from the Round 3 batches (that change, and the scorer's
   `scorer_failed` change of #13), so the report shows a third scorer stamp
   (`17916972…`); scorer 1.1.0's numbers are unchanged.
-- **Concurrency.** 3, then 6 for pass 1, with the extra attempts at 4 alongside;
-  the machine's load stayed under 3.5, below the Air's during Opus max. Median
+- **Concurrency.** 3, then 6 for pass 1, with the extra attempts at 4 alongside.
+  The 1-minute load averaged over each attempt had a median of 1.9 and a
+  maximum of 2.4 on 18 cores (single readings up to 7.7); Opus max on the Air
+  had a median of 3.4 on 10 cores. Median
   wall 984 s (Opus max 607 s, Astra max 1138 s), no attempt at the time limit,
   no integrity problems. Score over time (snapshots of `output/model.glb`): mean
   47.2 at 10 minutes and 77.8 at 15 (final 78.9); the median attempt reaches
