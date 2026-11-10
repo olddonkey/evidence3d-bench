@@ -165,26 +165,26 @@ test('a roster is validated as a whole', () => {
   assert.deepEqual(roster.configurations.map(item => [item.key, item.ladders]), [['claude-code / haiku / -', ['default', 'top']], ['codex / a / high', []]]);
 });
 
-test('the Round 3 roster reproduces the ladders of docs/V1-ROUND3.md and matches what inference gives', async () => {
+test('the Round 3 roster reproduces the ladders of docs/V1-ROUND3.md (with Fable 5.2 max, section 10) and matches what inference gives', async () => {
   const roster = await readRoster('v1/rounds/round3.roster.json');
   assert.equal(roster.file, 'v1/rounds/round3.roster.json');
   assert.match(roster.sha256, /^[a-f0-9]{64}$/);
   const onLadder = id => roster.configurations.filter(item => item.ladders.includes(id)).map(item => item.key);
-  assert.equal(roster.configurations.length, 12, '12 configurations, 66 pairs');
-  // Owed: the test set's three-variant headline; nothing demoted. The six
+  assert.equal(roster.configurations.length, 13, '13 configurations, 78 pairs (Round 3\'s 12 and Fable 5.2 max, added 2026-11-10)');
+  // Owed: the test set's three-variant headline; nothing demoted. The seven
   // configurations that never ran the real-building set list its four tasks.
   assert.deepEqual(roster.required_variants, ['t2', 't4', 'c1']);
   assert.ok(roster.configurations.every(item => item.demoted === null));
   const missing = roster.configurations.filter(item => item.missing_tasks.length);
-  assert.deepEqual(missing.map(item => item.key).sort(), ['claude-code / claude-opus-5-5 / max', 'codex / gpt-6-astra / max', 'codex / gpt-6-sol / high',
+  assert.deepEqual(missing.map(item => item.key).sort(), ['claude-code / claude-fable-5-2 / max', 'claude-code / claude-opus-5-5 / max', 'codex / gpt-6-astra / max', 'codex / gpt-6-sol / high',
     'codex / gpt-6.1-sol / high', 'codex / gpt-6.1-sol / max', 'grok / grok-4.7-build-fast / high']);
   assert.ok(missing.every(item => item.missing_tasks.map(gap => gap.task).join() === 'real-0001-r2,real-0001-r4,real-0002-r2,real-0002-r4'));
   // The keys exactly as the Round 3 result.json files record them (Haiku with its date suffix).
   assert.deepEqual(roster.configurations.map(item => item.key).sort(), [
-    'claude-code / claude-haiku-4-5-20251001 / -', 'claude-code / claude-opus-5-5 / high', 'claude-code / claude-opus-5-5 / max',
+    'claude-code / claude-fable-5-2 / max', 'claude-code / claude-haiku-4-5-20251001 / -', 'claude-code / claude-opus-5-5 / high', 'claude-code / claude-opus-5-5 / max',
     'codex / gpt-5.6-luna / high', 'codex / gpt-6-astra / high', 'codex / gpt-6-astra / max', 'codex / gpt-6-sol / high', 'codex / gpt-6.1-sol / high',
     'codex / gpt-6.1-sol / max', 'grok / grok-4.6 / high', 'grok / grok-4.7 / high', 'grok / grok-4.7-build-fast / high']);
-  assert.deepEqual(onLadder('top'), ['codex / gpt-6-astra / max', 'codex / gpt-6.1-sol / max', 'claude-code / claude-opus-5-5 / max']);
+  assert.deepEqual(onLadder('top'), ['codex / gpt-6-astra / max', 'codex / gpt-6.1-sol / max', 'claude-code / claude-opus-5-5 / max', 'claude-code / claude-fable-5-2 / max']);
   assert.equal(onLadder('default').length, 9);
   const { ladders } = inferLadders(roster.configurations);
   for (const item of roster.configurations) assert.deepEqual(ladders.get(item.key), item.ladders, item.key);
