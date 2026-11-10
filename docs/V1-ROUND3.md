@@ -13,6 +13,9 @@ harness (mock-tested only); a Grok Build system; a re-test of Opus nine days
 apart; and the same models at their top reasoning effort, which turned out to
 matter as much as the gaps between models.
 
+Added on 2026-11-10, after the round: Claude Code / claude-fable-5-2 / max on
+the same test set (§10); nothing in §1–§9 was changed for it.
+
 Reports: `.local/v1/reports/test-final` (test set, every batch),
 `mr-final` (memory and real), and the per-pass reports named in the text
 (`summary.md` and `index.html` in each). Decisions taken before the data they
@@ -47,6 +50,9 @@ the normal-mode Grok models; 1 on t1/t3 for everyone who ran them.
 | 10 | Grok Build / grok-4.7 / high | **49.6** [44.6, 54.5] | 47.7 [43.5, 51.8] | 31.7 | 36.7 | 58.0 | 60.0 | 52.2 | 64.7 | 30.6 |
 | 11 | Codex / gpt-5.6-luna / high | **40.1** | 39.2 [35.8, 42.5] | 31.2 | 31.2 | 44.5 | 48.6 | 40.5 | 57.4 | 20.9 |
 | 12 | Claude Code / claude-haiku-4-5 | **24.0** | 23.8 [20.7, 26.9] | 23.1 | 22.8 | 23.8 | 29.2 | 20.0 | 35.5 | 12.0 |
+
+Claude Code / claude-fable-5-2 / max, run after the round, would sit between
+rows 1 and 2 (78.9 [76.9, 81.0]); it is in §10.
 
 The first-pass intervals of rows 3 and 6 are in `docs/V1-TEST.md`
 (73.4 [72.0, 74.8] and 66.5 [64.3, 68.8]). Shape and detail are over the
@@ -277,6 +283,73 @@ expect to re-freeze.
   tasks among them) and two extra test attempts not run, by the owner's
   decision.
 - Effort: Codex `ultra` and Grok `xhigh` not run.
+
+## 10. Added after the round: Claude Code / claude-fable-5-2 / max
+
+Run 2026-11-09/10 at the owner's request, on the same 72 main tasks (24 objects
+× t2/t4/c1), prompt, 30-minute limit and scorer 1.1.0 as every row above; the
+decision entry was written before the first attempt
+(`.local/v1/scratch/orchestrator/round3/DECISIONS.md`). Report:
+`.local/v1/reports/test-fable52` (the 29 batches of `test-final` plus
+`t3-fable52max-2` and `t4-fable52max`, with `v1/rounds/round3.roster.json`, where
+it is a top-ladder configuration).
+
+| Configuration | 3-variant | t2 photos + aerial | t4 + notes | c1 stale drawings | Shape | Detail | Conflict | Attempts |
+|---|---|---|---|---|---|---|---|---|
+| Claude Code / claude-fable-5-2 / **max** | **78.9** [76.9, 81.0] | 65.7 | 90.2 | 80.9 | 91.3 | 66.6 | 92 % [82, 100] | 102 |
+
+Top ladder with it (4 configurations, Holm over the ladder's 6 pairs):
+
+| A | B | A − B | Won / lost | Uncorrected | Holm, 6 pairs |
+|---|---|---|---|---|---|
+| Astra max | Fable 5.2 max | +0.3 [−1.6, +2.1] | 13 / 11 | not separated | not separated (0.797) |
+| Fable 5.2 max | gpt-6.1-sol max | +1.8 [−0.1, +3.7] | 17 / 7 | not separated | not separated (0.181) |
+| Fable 5.2 max | Opus max | +7.4 [+5.8, +8.9] | 24 / 0 | separated | separated (< 0.001) |
+| Astra max | gpt-6.1-sol max | +2.0 [+0.7, +3.4] | 16 / 8 | separated | separated (0.029; it was 0.010 among 3 pairs) |
+
+So Fable 5.2 max is tied with both Astra max and gpt-6.1-sol max, which are
+still separated from each other, and is clearly ahead of Opus max (every
+object). It is ahead of every default-effort configuration: Astra high +5.5
+[+3.8, +7.3] (21 / 3), gpt-6.1-sol high +6.5 [+4.7, +8.4] (22 / 2), Opus high
++12.4 [+10.3, +14.4] (24 / 0). It has the highest t4 of any configuration
+(90.2; Astra max 85.4) and a lower t2 than the two Codex max rows (65.7 against
+69.5 and 69.0). Among all 78 pairs of the 13 configurations, 71 are separated
+uncorrected and 66 after Holm: Fable's 10 uncorrected separations all hold, and
+the five pairs §1 lists as dropping out still drop out (Astra max vs gpt-6.1-sol
+max now at adjusted 0.108 instead of 0.088).
+
+How it differs from the other max rows, all flagged by the report or recorded
+here:
+
+- **Attempts.** One attempt on every task, plus two more on the three tasks of
+  5 of the 24 objects (102 attempts; pass 1 alone: 78.3). The rule used for the
+  other strong configurations (an interval overlapping Astra high's or Opus
+  high's, or a mean within 10 points: two more attempts) asked for three; the
+  extra attempts were stopped at 30 at the owner's request to run less, after
+  the first 100 attempts had used up the subscription's weekly Fable
+  allowance. Fewer attempts do not bias the mean; they make the intervals a
+  little wider than with three. The remaining extra attempts were never scored and are not reported.
+- **Toolchain.** Claude Code 2.1.321 (2.1.316 does not know the model id; Opus
+  max ran on 2.1.296), node 26.13, on a Mac Studio (M5 Max, 18 cores) instead of
+  the MacBook Air. The CLI's new built-in `cc-plugin-privacy` plugin needed a
+  runner allowlist entry (PR #15; a shell-command hook, no tools). Runner and
+  scorer source differ from the Round 3 batches (that change, and the scorer's
+  `scorer_failed` change of #13), so the report shows a third scorer stamp
+  (`17916972…`); scorer 1.1.0's numbers are unchanged.
+- **Concurrency.** 3, then 6 for pass 1, with the extra attempts at 4 alongside;
+  the machine's load stayed under 3.5, below the Air's during Opus max. Median
+  wall 984 s (Opus max 607 s, Astra max 1138 s), no attempt at the time limit,
+  no integrity problems. Score over time (snapshots of `output/model.glb`): mean
+  47.2 at 10 minutes and 77.8 at 15 (final 78.9); the median attempt reaches
+  95 % of its final score at 10 minutes.
+- **Served model.** Every one of the 6,210 assistant messages of the 102
+  attempts reports `claude-fable-5-2`.
+- **Infrastructure tries** (archived, never scored): 3 attempts cut short when
+  the runner was restarted at higher concurrency, 8 that hit the weekly Fable
+  limit and 6 cut short when the extra attempts were paused. The pass-1 ones
+  were re-run from fresh workspaces.
+
+Not run: t1, t3, memory and real tasks, and the same model at `high`.
 
 ## Files
 
